@@ -37,7 +37,7 @@ The covenants in `covenants/m0/` are probes for measurement, not protocol code.
 - outputs: controller successor, K fresh shards and an unbound caller output carrying reward plus change;
 - every count and index checked in script.
 
-The transaction conserves value and runs every input under the compute budget it commits. Its masses are within all limits, and its fee is at least the relay minimum; `assert_valid_masses` checks both. It passes for K = 1, 3 and 8. At K = 8 the controller uses 32,240 script units (budget 3), compute mass is 8,997 and storage mass is 952.
+The transaction conserves value and runs every input under the compute budget it commits. It is consensus-valid: masses within all limits and inputs covering outputs. Its fee covers the minimum relay fee for its masses; `assert_valid_masses` checks both. It is not relayable as built, because the caller's funding input uses an OpTrue script as a stand-in, which mempool standardness rejects (`mining/src/mempool/check_transaction_standard.rs:52-54`). Its compute mass also leaves out a real signature check. It passes for K = 1, 3 and 8. At K = 8 the controller uses 32,240 script units (budget 3), compute mass is 8,997 and storage mass is 952.
 
 It rejects four attacks. Each test asserts that the controller (input 0) refuses with `VerifyError`:
 - an extra output;
@@ -124,7 +124,7 @@ A forged count (3, 5 or 0 instead of 4) is rejected at depth 23 with both hashes
 
 ## Q4. What storage mass does a ticket output have, and what minimum deposit does that imply?
 
-**Answer: storage mass per covenant output is 4·10¹² / value. A ticket needs at least 0.08 KAS to be valid, and about 5 KAS before storage mass stops being the block bottleneck.**
+**Answer: storage mass per covenant output is 4·10¹² / value. In the worst case a ticket needs at least 0.0844 KAS to be valid (R for K = 16, price 0.1 KAS). It needs about 5 KAS before storage mass stops being the block bottleneck in steady state.**
 
 **Formula.**
 - KIP-9 storage mass is C·(Σ_O p²/o − |I|/A(I))⁺ with C = 10¹² (`kips/kip-0009.md:29, 86`; `rusty-kaspa-v2.1.0/consensus/core/src/constants.rs:26`; `consensus/core/src/mass/mod.rs:439-513, 463`).
@@ -134,47 +134,68 @@ A forged count (3, 5 or 0 instead of 4) is rejected at depth 23 with both hashes
 
 **Ticket deposit** (`tests/m0_mass.rs::q4_minimum_ticket_deposit`). A one-ticket `buy()` has:
 - inputs: shard and funding;
-- outputs: shard successor, ticket and change;
+- outputs: shard successor, ticket and buyer change;
 - the shard sigscript sized at the measured 3,418 B.
 
 Its compute mass is 6,612 and its transient mass is 15,648, giving a minimum fee of 0.0078 KAS. Compute limits a block to 75 buys; transient mass limits it to 63.
 
-| Deposit (KAS) | 0.01 | 0.08 | 0.1 | 0.5 | 1 | 2 | 5 | 10 |
-|---|---|---|---|---|---|---|---|---|
-| Storage mass | 4,000,007 (invalid) | 500,007 (invalid) | 400,007 | 80,007 | 40,007 | 20,007 | 8,007 | 4,007 |
-| Buys per block by storage | 0 | 0 | 1 | 6 | 12 | 24 | 62 | 124 |
+The worst case covers two variables:
+- **Shard pot:** 0 (the first buy on a fresh shard holding only R, so its successor is a small R + price output) or 1,000 KAS.
+- **Buyer change:** 1 KAS (adds C/1 KAS) or 10⁷ KAS (removes input relief).
 
-- **Smallest valid deposit:** 0.0800 KAS for one ticket per `buy()`. With n tickets in one transaction it is 0.08·n KAS (0.16 for 2, 0.40 for 5, 0.80 for 10).
-- **Smallest deposit at which storage is not the block bottleneck:** 5.0441 KAS.
+Minimums below are rounded up to 0.0001 KAS; exact sompi values are printed by the test.
+
+Worst-case storage for one ticket, with R = 1.44 KAS (K = 16) and price 0.1 KAS:
+
+| Deposit (KAS) | 0.01 | 0.08 | 0.09 | 0.1 | 0.5 | 1 | 2 | 5 | 10 |
+|---|---|---|---|---|---|---|---|---|---|
+| Worst storage mass | 4,025,974 (invalid) | 525,974 (invalid) | 470,418 | 425,974 | 105,974 | 65,974 | 45,974 | 33,974 | 32,804 |
+| Buys per block by storage | 0 | 0 | 1 | 1 | 4 | 7 | 10 | 14 | 15 |
+
+Minimum deposit so that every one-ticket `buy()` is valid (storage ≤ 500,000):
+
+| K (sets R) | R (KAS) | Price 0.1 KAS | Price 1 KAS |
+|---|---|---|---|
+| 16 | 1.4400 | 0.0844 | 0.0828 |
+| 32 | 2.7200 | 0.0824 | 0.0818 |
+| 64 | 5.2799 | 0.0817 | 0.0817 |
+
+With n tickets in one `buy()` (K = 16, price 0.1 KAS), the minimum deposit is 0.1683 KAS for 2, 0.4173 for 5 and 0.8312 for 10.
+
+**Throughput.**
+- In the worst case every `buy()` carries a storage floor of 35,974 that no deposit removes: the fresh-shard successor at R + price (about 26,000) plus a 1 KAS change output (10,000). That limits such buys to 13 per block.
+- A larger R and larger change outputs shrink the floor.
+- For steady-state buys (shard pot 1,000 KAS, large change), the deposit at which storage stops being the block bottleneck (63 buys per block) is 5.0646 KAS.
 
 **Protocol-object reserve R** (decision 2026-10-09, `tests/m0_mass.rs::q4_reserve_r_by_k`).
 - Setup: `close()` creates the marker, the controller and K shards, each carrying R. The caller posts the marker's R and receives the reward in its own change output.
 - The worst case is taken over gross sales of 0, 10⁴ and 10⁶ KAS, and over caller funding of 1, 10³ and 10⁷ KAS beyond the posted reserve. Large values remove the input relief term; a small caller output adds its own C/value.
 - The measured values match the no-relief closed form R ≈ 4·10¹²·(K+2)/(limit − ~10,000) sompi to within 5%, and the test asserts this.
 
-| K | Min R (KAS), storage ≤ 500,000 | Min R (KAS), storage ≤ 50,000 (10% of a block) |
+| K | Min R (KAS, rounded up), storage ≤ 500,000 | Min R (KAS, rounded up), storage ≤ 50,000 (10% of a block) |
 |---|---|---|
 | 1 | 0.2400 | 2.4000 |
-| 4 | 0.4800 | 4.7996 |
-| 8 | 0.8000 | 7.9984 |
-| 16 | 1.4400 | 14.3988 |
+| 4 | 0.4800 | 4.7997 |
+| 8 | 0.8000 | 7.9985 |
+| 16 | 1.4400 | 14.3989 |
 | 32 | 2.7200 | 27.1924 |
-| 64 | 5.2798 | 52.7704 |
-| 128 | 10.3977 | 103.8961 |
+| 64 | 5.2799 | 52.7705 |
+| 128 | 10.3978 | 103.8962 |
 
 `draw()` creates one fresh R-output per paying tier, each pool funded by the caller. The same closed form applies with K+2 replaced by the number of pools created. R must satisfy whichever of `close()` and `draw()` creates more fresh R-outputs. Check this again when the tier table is fixed.
 
-**Minimum claim payout** (`tests/m0_mass.rs::q4_minimum_claim_payout`). The test uses R = 1.44 KAS (K = 16) and d = 0.08 KAS, with the claim taking the pool down to exactly R. It takes the worst case over submitter funding of 10 KAS and 10⁷ KAS:
+**Minimum claim payout** (`tests/m0_mass.rs::q4_minimum_claim_payout`). The test uses R = 1.44 KAS (K = 16) and d = 0.0844 KAS (the worst-case minimum), with the claim taking the pool down to exactly R. It takes the worst case over submitter funding of 10 KAS and 10⁷ KAS:
 
 | Prize (KAS) | 0 | 0.001 | 0.01 | 1 | 100 |
 |---|---|---|---|---|---|
-| Storage mass | 152,775 | 151,232 | 138,886 | 37,036 | 27,876 |
+| Storage mass | 146,283 | 144,895 | 133,727 | 36,998 | 27,876 |
 
 The smallest valid payout output (prize plus deposit) is 0.0212 KAS. That is below the minimum deposit, so every claim's payout is valid, even when floor(slice/h) = 0; the test asserts this. The deposit sets the minimum claim payout; the prize itself has no lower bound. Only R for K = 16 was measured; a larger R only lowers the pool term.
 
 **Impact on the design.** The reserve decision (DECISIONS 2026-10-09) changes §5.5, §6 and §7.2–7.4. The design update is pending, owned by the user.
-- The ticket deposit becomes a game parameter with a floor of 0.08 KAS per ticket.
-- Whether to require about 5 KAS, so that storage mass is never the throughput limit, is an economic choice for 4.6/14.
+- The ticket deposit becomes a game parameter with a floor of about 0.085 KAS per ticket. The exact floor depends on R and the ticket price; it is 0.0844 KAS for K = 16 and price 0.1 KAS.
+- Whether to require about 5 KAS, so that storage mass is not the steady-state throughput limit, is an economic choice for 4.6/14.
+- The first buy on each fresh shard carries a fixed storage cost from the R-valued shard successor. That argues for a larger R than the `close()` minimum (M6).
 
 **Remaining risks:**
 - The numbers assume one shard input and P2PK funding. Wallets with many small funding UTXOs raise the input relief term, which only lowers storage mass.
@@ -241,7 +262,7 @@ The controller script grows by about 420 B per shard because the loop is unrolle
 | Minimum fee | 100 sompi per gram of max(compute, transient/2) | `mining/src/mempool/config.rs:20`; transient is 4 grams per byte (`consensus/core/src/constants.rs:31`) |
 
 The remaining Appendix A items were cross-checked by the reading agent:
-- Pruning depth 1,080,000: `max(lower_bound, BPS × PRUNING_DURATION)` with PRUNING_DURATION = 108,000 s (`consensus/core/src/config/bps.rs:96-108`) and 10 BPS.
+- Pruning depth 1,080,000: `max(lower_bound, BPS × PRUNING_DURATION)` with PRUNING_DURATION = 108,000 s (`consensus/core/src/config/bps.rs:96-108`, `consensus/core/src/config/constants.rs:73`) and 10 BPS.
 - Checked 64-bit arithmetic: `opcodes/mod.rs:592-651`.
 - All listed opcodes exist: `opcodes/mod.rs:874-1421`.
 

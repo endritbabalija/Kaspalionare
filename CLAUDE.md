@@ -35,7 +35,7 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
 - Commands (run from `crates/`; same in Git Bash and PowerShell; `crates/rust-toolchain.toml` pins Rust 1.94.0 and rustup installs it on first use; the first build fetches rusty-kaspa v2.1.0 and SilverScript v1.0.0 from git, ~2 min):
   - Build: `cargo build --tests`
   - All tests: `cargo test`
-  - One test file with printed measurements: `cargo test --test m0_mass -- --nocapture --test-threads=1` (also `covenant_smoke`, `m0_merkle`, `m0_shapes`; `m0_mass` takes about 70 s in debug builds)
+  - One test file with printed measurements: `cargo test --test m0_mass -- --nocapture --test-threads=1` (also `covenant_smoke`, `m0_merkle`, `m0_shapes`; `m0_mass` takes about 1–2 min in debug builds)
   - Covenant sources are compiled at test time from `covenants/` by `harness::compile_file`; there is no separate compile step.
 
 ## How we work
