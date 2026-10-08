@@ -1,0 +1,14 @@
+pragma silverscript ^0.1.0;
+
+// M0 probe only, not protocol code (question 1). A second template in the same
+// covenant family as ControllerProbe. It may only be spent next to input 0 of
+// the same family; the controller checks everything else.
+contract ShardProbe(int init_count) {
+    int count = init_count;
+
+    entry closeLeg() {
+        byte[32] covid = OpInputCovenantId(this.activeInputIndex);
+        require(this.activeInputIndex >= 1);
+        require(OpInputCovenantId(0) == covid);
+    }
+}

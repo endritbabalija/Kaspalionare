@@ -1,0 +1,23 @@
+[workspace]
+members = ["harness"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "ISC"
+
+[workspace.dependencies]
+# rusty-kaspa: pinned release v2.1.0 (see docs/DECISIONS.md). Script engine and mass calculator.
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+# SilverScript compiler v1.0.0. It links its own rusty-kaspa revision internally;
+# only compiled bytecode crosses into the v2.1.0 engine above.
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
+silverscript-abi = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
+# Off-chain reference hashing for tests (same crates the script engine uses).
+blake2b_simd = "1.0.2"
+blake3 = "1.8.5"

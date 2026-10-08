@@ -32,7 +32,11 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
 - Covenants are tested first in the local rusty-kaspa script engine, then on testnet-10.
 - rusty-kaspa: design section 2 records v2.0.1 (`cfafeb4c…`) as the baseline; M0 chooses the release to pin and records it in `docs/DECISIONS.md`. Use that release.
 - Development machine is Windows. Prefer commands that work in Git Bash and PowerShell.
-- Commands: none yet. After milestone M0, replace this line with the exact build and test commands.
+- Commands (run from `crates/`; same in Git Bash and PowerShell; `crates/rust-toolchain.toml` pins Rust 1.94.0 and rustup installs it on first use; the first build fetches rusty-kaspa v2.1.0 and SilverScript v1.0.0 from git, ~2 min):
+  - Build: `cargo build --tests`
+  - All tests: `cargo test`
+  - One test file with printed measurements: `cargo test --test m0_mass -- --nocapture --test-threads=1` (also `covenant_smoke`, `m0_merkle`, `m0_shapes`; `m0_mass` takes about 70 s in debug builds)
+  - Covenant sources are compiled at test time from `covenants/` by `harness::compile_file`; there is no separate compile step.
 
 ## How we work
 - One milestone per session; use the `/milestone` skill. Start in plan mode and get the plan approved before writing code.

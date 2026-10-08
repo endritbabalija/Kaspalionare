@@ -1,0 +1,44 @@
+pragma silverscript ^0.1.0;
+
+// M0 probe only, not protocol code (question 1). A close()-shaped transition
+// across two templates in one KIP-20 covenant family:
+//   inputs : 0 = controller, 1..k = shards, k+1 = caller funding (exactly 2 + k)
+//   outputs: 0 = controller successor, 1..k = fresh shards,
+//            k+1 = caller output carrying reward + change (exactly 2 + k; no covenant binding)
+// Values are not checked by this probe.
+contract ControllerProbe(int init_round, int shardPrefixLen, int shardSuffixLen, byte[32] shardTemplateHash) {
+    int constant MAX_K = 8;
+
+    int round = init_round;
+
+    struct ShardState {
+        int count;
+    }
+
+    entry close(int k) {
+        require(this.activeInputIndex == 0);
+        require(k >= 1);
+        require(k <= MAX_K);
+        byte[32] covid = OpInputCovenantId(0);
+
+        require(tx.inputs.length == 2 + k);
+        require(tx.outputs.length == 2 + k);
+        require(OpCovInputCount(covid) == 1 + k);
+        require(OpCovOutputCount(covid) == 1 + k);
+
+        require(OpOutputCovenantId(0) == covid);
+        validateOutputState(0, State { round: round + 1 });
+
+        for(i, 0, k, MAX_K) {
+            require(OpInputCovenantId(1 + i) == covid);
+            ShardState prev = readInputStateWithTemplate(1 + i, shardPrefixLen, shardSuffixLen, shardTemplateHash);
+            require(prev.count >= 0);
+            require(OpOutputCovenantId(1 + i) == covid);
+            validateOutputStateWithInputTemplate(1 + i, ShardState { count: 0 }, 1 + i, shardPrefixLen, shardSuffixLen, shardTemplateHash);
+        }
+
+        // OpOutputAuthorizingInput is not exposed by SilverScript v1.0.0; an unbound
+        // output reports the zero covenant id (rusty-kaspa opcodes/mod.rs:1412).
+        require(OpOutputCovenantId(1 + k) == byte[32](0x0000000000000000000000000000000000000000000000000000000000000000));
+    }
+}

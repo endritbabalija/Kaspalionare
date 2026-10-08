@@ -1,0 +1,3 @@
+[toolchain]
+# silverscript v1.0.0 requires rust-version 1.94.0 (refs/silverscript/Cargo.toml:18).
+channel = "1.94.0"

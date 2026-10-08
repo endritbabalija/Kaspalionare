@@ -9,7 +9,7 @@ Out of scope until later: a real seed source (randomness is parked), economic tu
 ---
 
 ## M0 — Feasibility (no protocol code)
-Status: todo
+Status: done (2026-10-09, see `docs/feasibility.md`)
 
 Clone SilverScript, rusty-kaspa and the KIPs into `refs/`. Read SilverScript's TUTORIAL.md and DECL.md. Answer, with evidence (file paths and line numbers, measurements, links):
 

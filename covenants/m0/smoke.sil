@@ -1,0 +1,12 @@
+pragma silverscript ^0.1.0;
+
+// M0 smoke covenant: a singleton counter. Not protocol code.
+// Adapted from refs/silverscript/docs/DECL.md:224-227.
+contract Counter(int init_value) {
+    int value = init_value;
+
+    #[covenant.singleton(mode = transition)]
+    function bump(State prev_state, int delta) : (State) {
+        return(State { value: prev_state.value + delta });
+    }
+}

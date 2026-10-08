@@ -1,0 +1,16 @@
+[package]
+name = "harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kaspa-consensus-core.workspace = true
+kaspa-txscript.workspace = true
+kaspa-txscript-errors.workspace = true
+kaspa-hashes.workspace = true
+silverscript-lang.workspace = true
+silverscript-abi.workspace = true
+blake2b_simd.workspace = true
+blake3.workspace = true

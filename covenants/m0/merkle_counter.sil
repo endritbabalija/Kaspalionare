@@ -1,0 +1,37 @@
+pragma silverscript ^0.1.0;
+
+// M0 measurement only, not protocol code (design 8.2, question 2).
+// One Merkle path used twice: check the old leaf against the current root and
+// compute the new root with the count incremented. The test harness rewrites
+// DEPTH (16 or 23) and the hash function (blake2b or blake3) before compiling.
+//
+// Leaf  = H(0x00 || index as byte[4] || count as byte[8])
+// Node  = H(0x01 || left || right)
+// Bit i of `index` selects whether the running node is the right child at level i.
+contract MerkleCounter(byte[32] init_root) {
+    int constant DEPTH = 23;
+
+    byte[32] root = init_root;
+
+    #[covenant.singleton(mode = transition)]
+    function increment(State prev_state, int index, int count, byte[32][DEPTH] siblings) : (State) {
+        require(index >= 0);
+        require(count >= 0);
+        byte[32] oldNode = blake2b(byte[](0x00) + byte[](index as byte[4]) + byte[](count as byte[8]));
+        byte[32] newNode = blake2b(byte[](0x00) + byte[](index as byte[4]) + byte[]((count + 1) as byte[8]));
+        int bits = index;
+        for(i, 0, DEPTH, DEPTH) {
+            if (bits % 2 == 0) {
+                oldNode = blake2b(byte[](0x01) + byte[](oldNode) + byte[](siblings[i]));
+                newNode = blake2b(byte[](0x01) + byte[](newNode) + byte[](siblings[i]));
+            } else {
+                oldNode = blake2b(byte[](0x01) + byte[](siblings[i]) + byte[](oldNode));
+                newNode = blake2b(byte[](0x01) + byte[](siblings[i]) + byte[](newNode));
+            }
+            bits = bits / 2;
+        }
+        require(bits == 0);
+        require(oldNode == prev_state.root);
+        return(State { root: newNode });
+    }
+}
