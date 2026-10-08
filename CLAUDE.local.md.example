@@ -1,0 +1,5 @@
+# Personal settings (copy this file to CLAUDE.local.md; it is git-ignored)
+
+- Testnet-10 node wRPC URL: <fill in>
+- Test wallet folder (testnet only, outside this repo): <fill in>
+- Faucet or mining method for testnet KAS: <fill in>
