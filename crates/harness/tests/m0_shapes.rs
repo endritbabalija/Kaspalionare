@@ -19,6 +19,10 @@ fn close_shape_across_two_templates_passes() {
         let (t, e, units) = run_close(&Shape::ok(k)).unwrap_or_else(|e| panic!("k={k}: valid shape rejected: {e:?}"));
         let m = masses(&t, &e);
         assert_valid_masses(&m, PROBE_FEE);
+        // Consensus requires the storage-mass commitment to equal the calculated value
+        // (tx_validation_in_utxo_context.rs:126-133); harness::tx leaves it at 0.
+        // (The engine run above does not cover the commitment check itself; testnet-10 does, Q7.)
+        commit_storage_mass(&t, &e);
         println!(
             "k={k}: controller redeem {} B, shard redeem {} B, units per input {:?}, budgets {:?}, masses {:?}, min fee {} sompi",
             bytecode(&controller(7, 8)).len(),

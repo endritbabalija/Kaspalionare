@@ -14,3 +14,6 @@ CLAUDE.local.md
 *mnemonic*
 *seed*.txt
 wallets/
+
+# tn10 probe output
+crates/tn10/results-*.md

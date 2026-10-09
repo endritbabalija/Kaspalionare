@@ -14,6 +14,9 @@ use common::*;
 const COMPUTE_LIMIT: u64 = 500_000;
 const STORAGE_LIMIT: u64 = 500_000;
 const TRANSIENT_LIMIT: u64 = 1_000_000;
+const fn limit_hard() -> u64 {
+    STORAGE_LIMIT
+}
 const FEE: u64 = KAS / 100;
 const COV: Hash = PROBE_COV;
 
@@ -68,9 +71,10 @@ fn kas_up(v: u64) -> String {
 
 // ---------------------------------------------------------------- close()
 
-/// close() under decision "reserve R": inputs controller (R+O), K shards (R + S/K),
-/// caller funding (R + funding_extra); outputs marker (R + S - reward + O), controller' (R),
-/// K shards' (R), caller output (funding - R + reward - fee). Sigscript sizes and budgets given.
+/// close() under decision "reserve R": inputs controller (R + O, O = boost pot and fee
+/// accumulator), K shards (R + S/K), caller funding (R + funding_extra); outputs marker
+/// (R + S - reward), controller' (R + O, design 5.5), K shards' (R), caller output
+/// (funding - R + reward - fee). Sigscript sizes and budgets given.
 #[allow(clippy::too_many_arguments)]
 fn close_tx(
     k: usize,
@@ -93,7 +97,7 @@ fn close_tx(
     }
     inputs.push(input(1 + k as u32, vec![0; P2PK_SIGSCRIPT], p2pk_budget()));
     entries.push(plain_entry(funding));
-    let mut outputs = vec![cov_out(r + sales - reward + o, 0), cov_out(r, 0)];
+    let mut outputs = vec![cov_out(r + sales - reward, 0), cov_out(r + o, 0)];
     for i in 0..k {
         outputs.push(cov_out(r, 1 + i as u16));
     }
@@ -101,22 +105,28 @@ fn close_tx(
     (tx(inputs, outputs), entries)
 }
 
-/// Gross sales levels and caller funding sizes (beyond the posted reserve) for the worst case.
-/// Large values remove the input relief term; a ~1 KAS caller output adds about C/1 KAS = 10,000.
+/// Gross sales, controller value O (boost pot + fee accumulator) and caller funding (beyond the
+/// posted reserve) for the worst case. A large O or funding input removes the input relief term;
+/// a ~1 KAS caller output adds about C/0.99 KAS = 10,101. Below about 3.96 KAS (K < 48) the binding
+/// case is O = 0 with large funding (K + 2 R-outputs, no relief); above it, a large O with a 1 KAS
+/// caller output (K + 1 R-outputs plus the small caller output, no relief).
 const SALES: [u64; 3] = [0, 10_000 * KAS, 1_000_000 * KAS];
+const BOOST: [u64; 3] = [0, 10_000 * KAS, 1_000_000 * KAS];
 const FUNDING_EXTRA: [u64; 3] = [KAS, 1_000 * KAS, 10_000_000 * KAS];
 
 /// Minimum reserve R such that close() storage mass <= `limit`, worst case over sales and funding.
 fn min_reserve_close(k: usize, limit: u64) -> u64 {
     let mut worst = 0;
     for sales in SALES {
-        for extra in FUNDING_EXTRA {
-            let r = min_value(10_000 * KAS, |r| {
-                let (t, e) = close_tx(k, r, sales, 0, extra, 0, 0, 0, 0);
-                masses(&t, &e).storage <= limit
-            })
-            .expect("some reserve fits");
-            worst = worst.max(r);
+        for o in BOOST {
+            for extra in FUNDING_EXTRA {
+                let r = min_value(10_000 * KAS, |r| {
+                    let (t, e) = close_tx(k, r, sales, o, extra, 0, 0, 0, 0);
+                    masses(&t, &e).storage <= limit
+                })
+                .expect("some reserve fits");
+                worst = worst.max(r);
+            }
         }
     }
     worst
@@ -125,18 +135,20 @@ fn min_reserve_close(k: usize, limit: u64) -> u64 {
 #[test]
 fn q4_reserve_r_by_k() {
     println!("\nMinimum reserve R per protocol object; close() creates marker + controller + K shards (K + 2 covenant outputs)");
-    println!("Worst case over gross sales {{0, 1e4, 1e6}} KAS and caller funding {{1, 1e3, 1e7}} KAS beyond the posted reserve.");
+    println!("Worst case over gross sales {{0, 1e4, 1e6}} KAS, controller value O {{0, 1e4, 1e6}} KAS and caller funding {{1, 1e3, 1e7}} KAS beyond the posted reserve.");
     println!("| K | min R (KAS), storage <= 500,000 | min R (KAS), storage <= 50,000 (10 % of block) |");
     println!("|---|---|---|");
     for k in [1usize, 4, 8, 16, 32, 64, 128] {
         let hard = min_reserve_close(k, STORAGE_LIMIT);
         let soft = min_reserve_close(k, STORAGE_LIMIT / 10);
         println!("| {k} | {} | {} |", kas_up(hard), kas_up(soft));
-        // Cross-check against the no-relief closed form: each fresh covenant output (plurality 2)
-        // adds C*4/R, plus about C/1 KAS for the smallest caller output tested.
-        let closed_form = 4 * 1_000_000_000_000u64 * (k as u64 + 2) / (STORAGE_LIMIT - 10_200);
-        assert!(hard <= closed_form + 1, "k={k}: measured {hard} above closed form {closed_form}");
-        assert!(hard * 100 >= closed_form * 95, "k={k}: measured {hard} far below closed form {closed_form}");
+        // Cross-check against the no-relief closed form. Each fresh covenant output (plurality 2)
+        // adds 4C/R. Either all K + 2 outputs sit at R (O = 0, large funding), or the controller
+        // keeps a large O and a ~0.99 KAS caller output adds C/0.99 KAS = 10,101.
+        let c4 = 4 * 1_000_000_000_000u64;
+        let closed_form = (c4 * (k as u64 + 2) / limit_hard()).max(c4 * (k as u64 + 1) / (limit_hard() - 10_101));
+        assert!(hard <= closed_form + closed_form / 200, "k={k}: measured {hard} above closed form {closed_form}");
+        assert!(hard * 1000 >= closed_form * 995, "k={k}: measured {hard} below closed form {closed_form}");
     }
 }
 
@@ -194,18 +206,26 @@ fn q5_largest_k_for_close() {
 
 // ---------------------------------------------------------------- buy()
 
-/// buy(): inputs shard (R + pot), funding; outputs shard' (R + pot + n*price), n tickets (d), change.
-/// `funding_extra` is what the buyer's change output keeps.
-fn buy_tx(n: usize, d: u64, price: u64, r: u64, pot: u64, funding_extra: u64) -> (Transaction, Vec<UtxoEntry>) {
-    let funding = n as u64 * (price + d) + funding_extra + FEE;
+/// buy() of a bundle of b combinations (design 7.1): inputs shard (R + pot), funding; outputs
+/// shard' (R + pot + b*price - referral), one ticket holding `ticket` (= d x b), the optional
+/// plain referral output, change. `funding_extra` is what the buyer's change output keeps.
+fn buy_tx_ref(b: usize, ticket: u64, price: u64, r: u64, pot: u64, funding_extra: u64, referral: Option<u64>) -> (Transaction, Vec<UtxoEntry>) {
+    let paid = b as u64 * price;
+    let rf = referral.unwrap_or(0);
+    let funding = paid + ticket + funding_extra + FEE;
     let inputs = vec![input(0, vec![0; MERKLE_SIGSCRIPT], MERKLE_BUDGET), input(1, vec![0; P2PK_SIGSCRIPT], p2pk_budget())];
     let entries = vec![cov_entry(r + pot), plain_entry(funding)];
-    let mut outputs = vec![cov_out(r + pot + n as u64 * price, 0)];
-    for _ in 0..n {
-        outputs.push(cov_out(d, 0));
+    let mut outputs = vec![cov_out(r + pot + paid - rf, 0), cov_out(ticket, 0)];
+    if let Some(v) = referral {
+        outputs.push(TransactionOutput::new(v, p2pk_spk()));
     }
     outputs.push(TransactionOutput::new(funding_extra, p2pk_spk()));
     (tx(inputs, outputs), entries)
+}
+
+/// One-combination buy() without a referral output.
+fn buy_tx(n: usize, d: u64, price: u64, r: u64, pot: u64, funding_extra: u64) -> (Transaction, Vec<UtxoEntry>) {
+    buy_tx_ref(n, d * n as u64, price, r, pot, funding_extra, None)
 }
 
 /// Worst case over the shard's pot (0 = first buy on a fresh shard holding only R, or 1,000 KAS)
@@ -214,14 +234,23 @@ const POTS: [u64; 2] = [0, 1_000 * KAS];
 const CHANGE: [u64; 2] = [KAS, 10_000_000 * KAS];
 
 fn worst_buy_storage(n: usize, d: u64, price: u64, r: u64) -> u64 {
+    worst_buy_storage_ref(n, d * n as u64, price, r, None)
+}
+
+fn worst_buy_storage_ref(b: usize, ticket: u64, price: u64, r: u64, referral: Option<u64>) -> u64 {
     let mut worst = 0;
     for pot in POTS {
         for change in CHANGE {
-            let (t, e) = buy_tx(n, d, price, r, pot, change);
+            let (t, e) = buy_tx_ref(b, ticket, price, r, pot, change, referral);
             worst = worst.max(masses(&t, &e).storage);
         }
     }
     worst
+}
+
+/// Minimum ticket value (d x b) with every buy() of this shape valid, worst case; None if no value fits.
+fn min_ticket_value(b: usize, price: u64, r: u64, referral: Option<u64>) -> Option<u64> {
+    min_value(100 * KAS, |v| worst_buy_storage_ref(b, v, price, r, referral) <= STORAGE_LIMIT)
 }
 
 /// Minimum deposit d with every buy() of n tickets valid (storage <= 500,000), worst case.
@@ -290,8 +319,26 @@ worst-case storage floor per buy() independent of d (fresh shard, 1 KAS change):
         "steady-state minimum deposit so storage is not the block bottleneck (>= {bottleneck} buys/block), K = 16, price 0.1: {} KAS",
         kas_up(balanced)
     );
-    for n in [2usize, 5, 10] {
-        println!("  {n} tickets in one buy() (K = 16, price 0.1 KAS): minimum deposit {} KAS", kas_up(min_deposit(n, KAS / 10, r16)));
+    // Bundles (design 7.1): one ticket UTXO holds d x b, so the floor applies to the ticket's value.
+    println!("\nBundle of b combinations, one ticket UTXO (K = 16, price 0.1 KAS, no referral): minimum ticket value d x b");
+    for b in [1usize, 2, 5, 10] {
+        println!("  b = {b}: {} KAS", kas_up(min_ticket_value(b, KAS / 10, r16, None).unwrap()));
+    }
+
+    // With the plain referral output (design 5.1): it adds C / referral, so the floor depends on M_ref.
+    println!("\nOne combination with a referral output (K = 16): minimum ticket value");
+    println!("| referral output (KAS) | price 0.1 KAS | price 1 KAS |");
+    println!("|---|---|---|");
+    for rf in [None, Some(KAS / 100), Some(KAS / 10), Some(KAS / 2), Some(KAS)] {
+        let cells: Vec<String> = PRICES
+            .iter()
+            .map(|&p| match rf {
+                Some(v) if v > p => "n/a (referral above price)".to_string(),
+                _ => min_ticket_value(1, p, r16, rf).map(kas_up).unwrap_or_else(|| "none".into()),
+            })
+            .collect();
+        let label = rf.map(kas).unwrap_or_else(|| "none".into());
+        println!("| {label} | {} | {} |", cells[0], cells[1]);
     }
 }
 
@@ -315,6 +362,24 @@ fn claim_tx(r: u64, rem: u64, d: u64, prize: u64, funding: u64) -> (Transaction,
 }
 
 const CLAIM_FUNDING: [u64; 2] = [10 * KAS, 10_000_000 * KAS];
+
+/// Non-final claim on a bundle (design 7.4): inputs pool (R + rem), ticket (d x b), fee funding;
+/// outputs pool' (R + rem - prize), ticket successor (d x b), payout (prize only), submitter change.
+fn nonfinal_claim_tx(r: u64, rem: u64, ticket: u64, prize: u64, funding: u64) -> (Transaction, Vec<UtxoEntry>) {
+    let inputs = vec![
+        input(0, vec![0; MERKLE_SIGSCRIPT], MERKLE_BUDGET),
+        input(1, vec![0; 200], 1),
+        input(2, vec![0; P2PK_SIGSCRIPT], p2pk_budget()),
+    ];
+    let entries = vec![cov_entry(r + rem), cov_entry(ticket), plain_entry(funding)];
+    let outputs = vec![
+        cov_out(r + rem - prize, 0),
+        cov_out(ticket, 1),
+        TransactionOutput::new(prize, p2pk_spk()),
+        TransactionOutput::new(funding - FEE, p2pk_spk()),
+    ];
+    (tx(inputs, outputs), entries)
+}
 
 #[test]
 fn q4_minimum_claim_payout() {
@@ -353,5 +418,52 @@ fn q4_minimum_claim_payout() {
         .max()
         .unwrap();
     println!("minimum payout output (prize + deposit), pool at R: {} KAS", kas_up(min_payout));
-    assert!(min_payout <= d, "deposit must cover the minimum payout");
+    assert!(min_payout <= d, "deposit must cover the minimum payout on a ticket's last claim");
+
+    // Earlier claims on a bundle pay the prize alone (the deposit stays in the ticket successor),
+    // so the prize itself needs a floor; a zero prize would be a zero-value output, which
+    // consensus rejects (tx_validation_in_isolation.rs:150-151).
+    println!("\nNon-final claim on a bundle (payout = prize only), pool taken to R, d = {} KAS per combination:", kas_up(d));
+    for b in [2u64, 5, 10] {
+        let min_prize = CLAIM_FUNDING
+            .into_iter()
+            .map(|f| {
+                min_value(100 * KAS, |p| {
+                    let (t, e) = nonfinal_claim_tx(r, p, d * b, p, f);
+                    masses(&t, &e).storage <= STORAGE_LIMIT
+                })
+                .unwrap()
+            })
+            .max()
+            .unwrap();
+        println!("  b = {b}: minimum prize {} KAS", kas_up(min_prize));
+    }
+}
+
+// ---------------------------------------------------------------- fee for priority
+
+/// The relay floor ignores storage mass, but the mempool ranks transactions by fee over the
+/// normalized max of compute, transient and storage mass (feerate_key.rs:86-98). Shows the fee
+/// each worst-case shape needs to rank at the minimum feerate of 100 sompi per gram.
+#[test]
+fn fee_for_priority_includes_storage() {
+    let r16 = min_reserve_close(16, STORAGE_LIMIT);
+    let d = min_deposit(1, KAS / 10, r16);
+    println!("\n| shape | compute | transient | storage | relay floor (KAS) | fee at 100 sompi/gram of priority mass (KAS) |");
+    println!("|---|---|---|---|---|---|");
+    let row = |name: &str, t: &Transaction, e: &[UtxoEntry]| {
+        let m = masses(t, e);
+        println!("| {name} | {} | {} | {} | {} | {} |", m.compute, m.transient, m.storage, kas(min_relay_fee(&m)), kas(priority_fee(&m)));
+        m
+    };
+    let (t, e) = buy_tx(1, d, KAS / 10, r16, 0, KAS);
+    let (t, e) = buy_tx(1, d, KAS / 10, r16, 0, 10_000_000 * KAS);
+    let worst_buy = row("buy(), d at minimum, fresh shard, large change (worst)", &t, &e);
+    let (t, e) = buy_tx(1, 5 * KAS, KAS / 10, r16, 1_000 * KAS, 10_000_000 * KAS);
+    row("buy(), d = 5 KAS, steady state", &t, &e);
+    let ctl = controller_at(16);
+    let (t, e) = close_tx(16, r16, 0, 0, 10_000_000 * KAS, ctl.0, MERKLE_SIGSCRIPT, ctl.1, 1);
+    let worst_close = row("close(), K = 16, R at minimum, O = 0, large funding (worst at K = 16)", &t, &e);
+    assert!(priority_fee(&worst_buy) > min_relay_fee(&worst_buy));
+    assert!(priority_fee(&worst_close) > min_relay_fee(&worst_close));
 }

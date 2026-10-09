@@ -1,5 +1,6 @@
 [workspace]
-members = ["harness"]
+members = ["harness", "tn10"]
+default-members = ["harness"]
 resolver = "2"
 
 [workspace.package]

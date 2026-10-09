@@ -88,7 +88,12 @@ fn run(depth: usize, h: H, claimed_count: i64) -> Run {
     let probe = tx(vec![input(0, genuine_sig, 0)], vec![out.clone()]);
     let units = execute(&probe, &entries, 0, false).expect("genuine update runs");
     let budget = budget_for(units);
-    let t = tx(vec![input(0, sig.clone(), budget)], vec![out]);
+    // The successor under test is the tree with the *claimed* count incremented, so it is
+    // consistent with the claimed leaf and only the old-root check can reject a forged count.
+    let claimed_root = root(h, index, claimed_count + 1, &siblings);
+    let claimed_next = compile_source(&src, &[ArtifactValue::Bytes(claimed_root.to_vec())]);
+    let claimed_out = TransactionOutput::with_covenant(1_000_000_000, p2sh(&claimed_next), Some(CovenantBinding::new(0, COV)));
+    let t = tx(vec![input(0, sig.clone(), budget)], vec![claimed_out]);
     let result = execute(&t, &entries, 0, true);
     Run { redeem: bytecode(&active).len(), sigscript: sig.len(), units, budget, m: masses(&t, &entries), result }
 }

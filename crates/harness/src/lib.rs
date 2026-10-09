@@ -10,7 +10,7 @@ pub use kaspa_consensus_core::{
     Hash,
     config::params::MAINNET_PARAMS,
     hashing::sighash::SigHashReusedValuesUnsync,
-    mass::{ComputeBudget, Gram, MassCalculator, ScriptUnits},
+    mass::{ComputeBudget, Gram, Mass, MassCalculator, ScriptUnits},
     subnets::SubnetworkId,
     tx::{
         CovenantBinding, PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput,
@@ -130,6 +130,9 @@ pub struct Masses {
     pub compute: u64,
     pub transient: u64,
     pub storage: u64,
+    /// Normalized max over compute, transient and storage: the mass the mempool divides the
+    /// fee by when it ranks transactions (mining/src/mempool/model/frontier/feerate_key.rs:86-98).
+    pub priority: u64,
 }
 
 /// Masses of `tx` under mainnet consensus parameters.
@@ -138,5 +141,20 @@ pub fn masses(tx: &Transaction, entries: &[UtxoEntry]) -> Masses {
     let nc = mc.calc_non_contextual_masses(tx);
     let populated = PopulatedTransaction::new(tx, entries.to_vec());
     let st = mc.calc_contextual_masses(&populated).expect("storage mass computable");
-    Masses { compute: nc.compute_mass, transient: nc.transient_mass, storage: st.storage_mass }
+    let priority = Mass::new(nc, st).normalized_max(&MAINNET_PARAMS.block_mass_limits.cofactors());
+    Masses { compute: nc.compute_mass, transient: nc.transient_mass, storage: st.storage_mass, priority }
+}
+
+/// Write the storage-mass commitment consensus checks (tx_validation_in_utxo_context.rs:126-133).
+pub fn commit_storage_mass(tx: &Transaction, entries: &[UtxoEntry]) {
+    tx.set_storage_mass(masses(tx, entries).storage);
+}
+
+/// Minimum feerate 100 sompi per gram (mining/src/mempool/config.rs:20, :138-141).
+pub const MIN_FEERATE_SOMPI_PER_GRAM: u64 = 100;
+
+/// Fee for the minimum feerate over the priority mass: what a transaction needs to rank at
+/// the floor when blocks are full. The relay floor itself ignores storage mass.
+pub fn priority_fee(m: &Masses) -> u64 {
+    m.priority * MIN_FEERATE_SOMPI_PER_GRAM
 }

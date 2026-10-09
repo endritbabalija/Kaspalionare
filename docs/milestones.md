@@ -27,13 +27,11 @@ Done when: `docs/feasibility.md` answers all six; the chosen release and hash ar
 ## M1 — Shard, bundles and `buy()`
 Status: todo
 
-**First task, before any protocol code: mass-limit check (design section 12; research G1–G3).**
-- Determine which per-transaction mass limits (storage, transient, compute) the v2.1.0 mempool enforces.
-- Measure M0's probe shapes for `buy()` and for `close()` at K = 16/32/64, plus a `draw()`-sized probe, with the node's mass calculator. Use worst-case caller funding: KIP-9 input relief depends on the caller's inputs and cannot be relied on.
-- Submit each through a testnet-10 node's mempool, with real signatures on the funding inputs (M0's OpTrue stand-in is non-standard).
-- Record that the wallet SDK generator caps transactions at 100,000 mass, so our builder must build protocol transactions itself.
-- Repeat the check with the real `close()` and `draw()` in M2, M3 and M6.
-- Record in `docs/DECISIONS.md` whether d ≈ 0.08 KAS, R = 0.08 × (K + 2) and the largest K (62/37/23) hold under relay. If they don't, recompute them before writing the spec.
+**Mass-limit check (research G1–G3): done before M1, 2026-10-10** (feasibility Q7, `docs/tn10-mass-check.md`).
+- v2.1.0 nodes enforce the block limits per transaction. M0's d, R and largest K hold under relay on testnet-10.
+- Still to do: repeat the check with the real `buy()` and `close()` here and in M2, and with `draw()` in M3 and M6. Use `cargo run -p tn10 -- probe ...`, adding cases for the real scripts.
+- The wallet SDK generator's 100,000 cap means our builder builds protocol transactions itself.
+- The M0 probe hygiene gaps listed in DECISIONS (2026-10-10) are M1 requirements.
 
 The spec also settles five open decisions:
 - the covenant family structure;
@@ -79,7 +77,7 @@ Done when:
   - a wrong m (too small, too large or out of range);
   - a marker or controller with altered sums;
 - `set_params()` tests reject s_F > 10%, s_R > 15%, a second change in one round, a wrong key, a replayed or stale-nonce signature, a signature for another round or covenant ID, and any change to other fields or to the controller's value;
-- `close()` at the largest K runs with worst-case scripts within the mass limits found in M1; a shard dragged into a close under a different leader route is rejected.
+- `close()` at the largest K runs with worst-case scripts within the per-transaction mass limits confirmed before M1 (feasibility Q7); a shard dragged into a close under a different leader route is rejected.
 
 ## M3 — `draw()` with a test seed
 Status: todo
@@ -164,6 +162,6 @@ Done when several consecutive rounds run on testnet-10, including:
 - the project indexer and a published launch bundle (genesis outpoint, authorized genesis outputs, covenant ID, template preimages, live UTXOs), with `sil-debug` and kascov preflight used in review.
 
 Release gate (not a milestone):
-- no mainnet value until the mass-limit question and the SilverScript/rusty-kaspa revision check are resolved;
+- no mainnet value until the SilverScript/rusty-kaspa revision check is resolved and the mass-limit result (feasibility Q7) has been re-run against the release in use;
 - the reviewer checklist passes on every shape;
 - an independent audit is scheduled.

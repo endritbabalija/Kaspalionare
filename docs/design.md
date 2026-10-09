@@ -77,9 +77,9 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 | Game-size rule, jackpot fixing, boost hold-back | Decided; details proposed (4.6) | M2, M3 specs |
 | House vault settlement at draw | Proposed | M3, M5 |
 | Claim window of at least 7 days | Decided | — |
-| Reserve R, ticket deposit, largest K for `close()` | Measured lower bounds (feasibility Q4–Q5) | Final values in M6 |
+| Reserve R, ticket deposit, largest K for `close()` | Measured lower bounds (feasibility Q4–Q5); M0 shapes accepted on testnet-10 up to K = 62 (Q7) | Final values in M6 |
 | Largest bundle per `buy()` (b_max) and m_max | **Open** | M1, M3, M6 measurements |
-| Which per-transaction mass limit the network relays | **Verify** (source read in M0 says block limits) | First task of M1 (section 12) |
+| Which per-transaction mass limit the network relays | Resolved: the block limits, per transaction (feasibility Q7) | Re-run the testnet-10 probes on each rusty-kaspa bump |
 | Covenant family structure and shape policy | **Open** | M1 spec (section 6) |
 | Native randomness | **Parked** | Section 11 |
 
@@ -294,7 +294,7 @@ Top-up moves edge above target to players. Because m is a whole number, the edge
 
 ## 5.1 Ticket split
 
-A bundle of b combinations costs P = b × p. Shares are committed in basis points and sum to 10,000.
+The ticket price is p = 1 KAS per combination, and a bundle of b combinations costs P = b × p. Shares are committed in basis points and sum to 10,000.
 
 | Share | Starting value | Goes to | When |
 |:--|--:|:--|:--|
@@ -637,7 +637,7 @@ Kaspa nodes keep only the hash of a covenant's state. The data itself is in tran
 | One payout satisfying two obligations (double satisfaction) | Solved in model | One ticket per claim; plain outputs at fixed indices with exact values (R7) |
 | Vault share-price manipulation | Mitigated | Internal accounting, dead shares or offset, round-down (5.4) |
 | Admin signature replay | Solved in model | Signature over domain tag, covenant ID, target round, parameters and monotonic nonce (5.6) |
-| Network refuses large `close()` or small outputs | **Verify** | Mass-limit check at the start of M1 (section 12) |
+| Network refuses large `close()` or small outputs | Measured | v2.1.0 nodes apply the block limits per transaction. M0's `buy()`, claim and `close()` shapes (K ≤ 62) were accepted and mined on testnet-10 (feasibility Q7). Outputs below 0.02 KAS plain or 0.08 KAS covenant-bound are invalid. |
 | Arithmetic overflow | Implementation gate | Checked 64-bit arithmetic; ordered operations and bounded values (4.6) |
 | Lost shard data after 30 h, including a round that overruns because a `draw()` is late | Mitigated | Wallets keep all K shard trees; any single copy suffices, checked against the roots |
 | Miner manipulation of the seed | **Parked** | Section 11 |
@@ -661,8 +661,12 @@ Earlier project research on deriving the seed from Kaspa block data is the start
 
 M0 measured the building blocks with probe scripts (`docs/feasibility.md`, `docs/costs.md`):
 - a depth-23 Merkle verify-and-update uses about 1% of per-transaction compute (Q2);
-- the reserve R grows with the number of fresh protocol outputs per transaction, for example 1.44 KAS at K = 16 (Q4);
-- the minimum ticket deposit is about 0.085 KAS (Q4);
+- the reserve R grows with the number of fresh protocol outputs per transaction:
+
+  > R = max(4C(K + 2) / L, 4C(K + 1) / (L − 10,101)), with C = 10¹² and L = 500,000
+
+  That is 1.44 KAS at K = 16, 2.72 KAS at K = 32 and 5.31 KAS at K = 64 (Q4). The first term is K + 2 fresh R-outputs with no input relief. The second is a controller that keeps a large boost pot while the caller's output is about 1 KAS; it binds from about 3.96 KAS (K ≥ 48). `draw()` has its own condition, which also counts its pools, its settlement record and its reserve refunds (Q4), and R must satisfy the tighter of the two;
+- the minimum ticket value at p = 1 KAS is 0.0828 KAS without a referral output, and 0.1045 KAS with the 0.1 KAS referral output (Q4);
 - `close()` is bound by transient mass, not compute (Q5);
 - storage mass makes small standalone outputs invalid or throughput-limiting, which sets M_ref and the fee payout minimum.
 
@@ -675,12 +679,17 @@ M0 measured the building blocks with probe scripts (`docs/feasibility.md`, `docs
 
 Platform limits: Appendix A.
 
-**Which mass limit governs (open; first task of M1).** M0 read the v2.1.0 source and found no separate standard-transaction mass cap: the mempool checks each transaction against the block limits (`mining/src/mempool/check_transaction_limits.rs:15-44`). The reserve, ticket-deposit and largest-K figures are sized to those limits, i.e. 0.08 KAS × (K + 2) and transient mass just under 1,000,000. KIP-9's text still states a 100,000-gram standard limit. If any relay limit of that size applied:
-- R would need to be about 5× larger;
-- a covenant ticket would need about 0.4 KAS;
-- a 212–230 kB `close()` would not be relayed.
+**Which mass limit governs (resolved; feasibility Q7, `docs/tn10-mass-check.md`).** v2.1.0 nodes apply the block limits to each transaction: storage 500,000, transient 1,000,000 and compute 500,000.
+- The mempool checks against the block limits (`mining/src/mempool/check_transaction_limits.rs:15-44`).
+- On testnet-10, storage of 501,000 and transient of 1,009,896 were rejected, while 499,000 and 989,896 were accepted.
+- KIP-9's 100,000-gram standard limit is not applied.
+- There is no dust rule: the smallest valid output is 0.02 KAS plain and 0.08 KAS covenant-bound, so M_ref ≥ 0.02 KAS.
+- M0's `buy()`, claim and `close()` shapes, up to K = 62, were accepted and mined.
 
-M1 starts by measuring `buy()`, `close()` at K = 16/32/64 and `draw()` with the node's mass calculator. It also submits each through a testnet-10 node's mempool. A transaction that only a miner would accept directly would be a keeper in disguise. The official wallet SDK's transaction generator still caps transactions at 100,000 mass (`MAXIMUM_STANDARD_TRANSACTION_MASS`, `wallet/core/src/tx/mass.rs:25`; used in `generator/generator.rs`). Our builder must therefore construct protocol transactions itself rather than through that generator, and player wallets built on the SDK may refuse large `buy()` or `claim()` transactions.
+Three consequences remain:
+- **Fees under load.** The mempool ranks transactions by fee per gram of the normalized maximum of compute, transient and storage mass (`mining/src/mempool/model/frontier/feerate_key.rs:86-98`). A shape near the storage limit therefore needs about 0.5 KAS to rank at the minimum feerate, while its relay floor is about 0.008 KAS for `buy()` and 0.13 KAS for `close()`. Caller rewards and wallet fee estimates must account for this (M2 spec).
+- **The wallet SDK cap.** The official wallet SDK's transaction generator caps max(compute, storage) at 100,000 (`wallet/core/src/tx/mass.rs:25`). Our builder constructs protocol transactions itself.
+- **Re-checks.** The check is repeated with the real `buy()` and `close()` scripts in M1 and M2, and with `draw()` in M3 and M6. It is also re-run on each rusty-kaspa bump (`cargo run -p tn10 -- probe all`).
 
 # 13. Prototype plan
 
@@ -698,6 +707,7 @@ No real-value launch while randomness is parked.
 -   Claim-based design: buy → close → draw → claim; no keepers.
 -   Fixed 5/30 game plus a bonus 1..m; only m changes between rounds.
 -   Per-combination counters in K sharded Merkle trees. Buyers pick any shard, and counts are summed over K. Prizes are per-combination slices, with duplicate holders splitting.
+-   Ticket price p = 1 KAS per combination.
 -   Ticket split per purchase. Starting values (testnet may adjust): s_F = 5%, s_R = 10%, s_C + s_D ≈ 1%, s_t ≈ 10% in total, s_H = the remainder.
 -   The backer vault is the house for the jackpot and the second prize and is settled exactly at every `draw()`. Starting values: e = 15%, j = 10% of the vault, g = 1% of J. Lower tiers are funded from the same round's sales, and their leftovers go to the boost pot.
 -   Game-size rule at `close()`: the edge rule plus the whale check, with m in [m_min, m_max]. J is fixed per round at the previous `draw()`.
@@ -715,14 +725,13 @@ No real-value launch while randomness is parked.
 -   Proposals to confirm: the J-fixing order, hold-back and cap on total liability (4.6); s_C + s_D in the whale check (4.6); the counter-leaf layout (8.2); output binding through the authorized-output index (R2); the late-buy bound and D_min (7.1, 7.2); the vault request mechanics (5.4); parameter storage (5.6); M_ref; the `return_deposit()` condition and D_ret (7.5).
 -   b_max and its effect on K (7.1).
 -   Empty-leaf rule (M1).
--   Which per-transaction mass limit the network relays (section 12; first task of M1).
 -   Covenant family structure: each round a new genesis or a continuation of one ID, and roles sharing one covenant ID or using separate IDs (M1 spec).
 -   Shape policy and who pays fees (R2 options, M1 spec); late-buy bound (7.1).
 -   Refund paths for a round that cannot close or draw, and vault-request timeouts.
 -   Lower-tier money of other players in the whale check (4.6).
 -   Vault request and conversion transactions (M5).
 -   Round length, given the roughly 30-hour data window (section 9).
--   Ticket deposit d, ticket price and final R and K (M6).
+-   Ticket deposit d and final R and K (M6).
 -   Ticket transfer.
 -   Admin key rotation.
 -   Missed-draw fallback, and what happens to locked funds if `draw()` never succeeds (with randomness).
