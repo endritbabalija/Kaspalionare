@@ -16,7 +16,8 @@
 - single-level referrals;
 - ticket bundles;
 - a reserve on every protocol UTXO;
-- the pinned releases.
+- the pinned releases;
+- covenant hygiene rules R5–R8 and the open checks from `docs/research/kaspa-best-practices.md`.
 
 Randomness remains parked (section 11).
 
@@ -78,6 +79,8 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 | Claim window of at least 7 days | Decided | — |
 | Reserve R, ticket deposit, largest K for `close()` | Measured lower bounds (feasibility Q4–Q5) | Final values in M6 |
 | Largest bundle per `buy()` (b_max) and m_max | **Open** | M1, M3, M6 measurements |
+| Which per-transaction mass limit the network relays | **Verify** (source read in M0 says block limits) | First task of M1 (section 12) |
+| Covenant family structure and shape policy | **Open** | M1 spec (section 6) |
 | Native randomness | **Parked** | Section 11 |
 
 **Pinned releases:**
@@ -108,7 +111,7 @@ Supporting functions:
 | Time | Event |
 |:----------------|:-----------------------------------------|
 | Round open | Players `buy()` at any time |
-| Deadline T | `close()` becomes valid once round r−1 has been drawn. It freezes round r, chooses m for round r+1 and opens round r+1 in one transaction. Sales never pause |
+| Deadline T | `close()` becomes valid once round r−1 has been drawn. It freezes round r, chooses m for round r+1 and opens round r+1 in one transaction. After T each shard accepts at most one more buy (7.1), so sales slow to a stop until `close()` |
 | After the seed block | `draw()` for round r settles round r and fixes the jackpot J of round r+1 |
 | Draw + 7 days | Claim deadline. From then on, any later `draw()` may absorb what is left in round r's pools into the boost pot. `return_deposit()` becomes valid as described in 7.5 |
 
@@ -282,7 +285,7 @@ Top-up moves edge above target to players. Because m is a whole number, the edge
 - Base: J_house = 1,000,000 KAS and G2 = 10,000 KAS.
 - m: the edge rule needs 1,000,000 + 10,000 (m − 1) ≤ 89,636 m, so m = 13 and C = 1,852,578.
 - Top-up: raises J_house to 1,040,421 KAS (the edge exactly 15%), if the cap allows it. With G2 = floor(J × g / 10⁴) = 10,404 KAS, liability L = 1,165,269 KAS, about 11.7% of V'.
-- Whale check: 1,852,578 × 0.79 = 1,463,537 ≥ margin × 1,165,272, which holds for any margin ≤ 1.256.
+- Whale check: 1,852,578 × 0.79 = 1,463,537 ≥ margin × 1,165,269, which holds for any margin ≤ 1.256.
 - Other jackpots at this price: J = 5,000,000 needs m = 125.
 
 **Arithmetic.** Each comparison is ordered so that every intermediate fits in signed 64 bits. For example, the allowance per combination a = floor(p × (10⁴ − e) × s_H / 10⁸) is computed first, then multiplied by C. Rounding always favours the checks. The M2 spec lists the order of operations and the maximum of every quantity.
@@ -349,7 +352,18 @@ The vault is the house for the jackpot and the second prize. At `draw()` of roun
 
 This settlement is exact, so backers' results are final at every draw. No vault money is locked after a draw except the next round's liability L(r+1) (4.4).
 
-**Shares, deposits and withdrawals.** Backers hold vault shares. Deposit and withdrawal requests convert at the share price set by `draw()` (V' ÷ shares, after settlement). A request made before a draw converts at that draw's price, as in MegaPot's pending-deposit and pending-withdrawal model [S12]. Withdrawals cannot take the vault below L of the round whose jackpot is fixed, until that round is drawn. J(r+1) is fixed from V' before any of that draw's conversions, so a new backer cannot capture returns from earlier rounds. The request and conversion transactions, and how they keep `draw()`'s shape fixed, are specified in M5.
+**Shares, deposits and withdrawals.** Backers hold vault shares. Deposit and withdrawal requests convert at the share price set by the next `draw()` after the request (V' ÷ shares, after settlement), as in MegaPot's pending-deposit and pending-withdrawal model [S12]. Withdrawals cannot take the vault below L of the round whose jackpot is fixed, until that round is drawn. J(r+1) is fixed from V' before any of that draw's conversions, so a new backer cannot capture returns from earlier rounds. The request and conversion transactions, and how they keep `draw()`'s shape fixed, are specified in M5, subject to these requirements:
+- **Internal accounting.** The vault state holds total_assets and total_shares, and the UTXO value equals total_assets + R at every transition. Outside value is never counted.
+- **Requests** *(proposal; confirm in the M5 spec)*. Creating a request spends the vault and adds the request to the vault's pending totals; a deposit's KAS enters the vault's value at that point. The request targets the vault's next draw and is irrevocable.
+  - `draw()` converts the pending totals in aggregate, at its post-settlement price: it mints shares for pending deposits and burns pending withdrawal shares. It moves the withdrawn assets into that draw's settlement record, so `draw()` never gathers individual requests.
+  - Withdrawals are capped so the vault keeps L(r+1). The excess stays pending, pro rata, for the next draw.
+  - Each owner later settles their own request against that draw's record: a share position for a deposit, a payout for a withdrawal. Amounts are fixed at the draw, so the owner's timing gives no option.
+  - There is no cancellation. A refund exists only if the target draw never happens (parked missed-draw item).
+  - Because the price is set after the round's own settlement, knowing that round's seed early gives no advantage. The research doc's "lock before the seed" requirement (E4) is therefore not needed. *Flag: deviation from the research doc.*
+  - Requests serialize on the vault UTXO; backer actions are rare, so this contention is accepted.
+- **Rounding.** Shares round down on deposit and assets round down on withdrawal. Zero-share mints and payouts below the minimum output are rejected. Products of shares and prices are range-checked (R8).
+- **Share-price attacks.** Dead shares or a virtual offset at genesis defend against share-price manipulation (offset chosen in M5).
+- **Inflows.** Inflows that raise the share price without minting shares, such as the house share, enter only at `draw()`.
 
 ## 5.5 Conservation
 
@@ -381,7 +395,8 @@ This settlement is exact, so backers' results are final at every draw. No vault 
   - the jackpot pool (J × [h_J ≥ 1]);
   - the second-prize pool (n2 × G2);
   - the lower-tier pools (ΣB_t);
-  - the vault V' (5.4);
+  - the vault, holding V' after settlement, then adjusted by that draw's aggregate conversions (5.4);
+  - the draw's settlement record, holding the converted withdrawals (5.4);
   - the fee payout (A + F, when ≥ the minimum output);
   - the caller's output (C_draw);
   - the controller of round r+1, holding O' + A' (A' = 0 if the fee was paid, else A + F);
@@ -403,7 +418,9 @@ An admin key, committed at deployment, can change s_F, s_R and the fee address. 
 - `set_params()` spends the open round's controller. It is authorised by the admin key and allowed at most once per round. It checks the caps and writes the pending slot.
 - The next `close()` copies the pending values into the parameters of the round it opens, and snapshots s_R and the price into the new shards.
 - `close()` already spends the controller, so reading the parameters needs no extra input and causes no contention.
-- If the admin key is lost, the parameters are frozen at their last values.
+- If the admin key is lost, the parameters are frozen at their last values. The protocol never needs the admin key to act.
+- The controller stores blake2b(admin pubkey). The admin signature covers (domain tag, covenant ID, target round, new parameters, nonce), and the controller stores a monotonic nonce, which prevents replay onto another round or a look-alike family. The key is declared as a KCC-02 `p2pkh-schnorr/v1` principal, pinned to the draft revision used.
+- **Admin key and value-holding UTXOs.** The admin key has no spend path on pools, the vault or tickets. `set_params()` does spend the controller, which holds the boost pot and the fee accumulator. The script requires the controller's value and every non-parameter field to be unchanged. *Flag: best practice K3 says the admin should have no spend path on value-holding UTXOs. The alternative is a separate parameter UTXO that `close()` also spends. Decide in the M2 spec.*
 
 # 6. State objects
 
@@ -415,20 +432,32 @@ An admin key, committed at deployment, can change s_F, s_R and the fee address. 
 | Frozen marker | Round, all K roots, S, P_R, m, J, J_boost, G2, shares, absolute seed reference, reserve funder. Value: S − P_R − C_close + J_boost (+ R) | Until `draw()` |
 | Prize pool (jackpot, second prize, each lower tier) | Round, tier, slice (J, G2 or slice_t), winning numbers, m, K roots, claim deadline, reserve funder | Until absorbed after the window |
 | Round result record | Winning numbers, roots, slices, m, claim deadline, pool reserve funder: the public data claimants need and pools are rebuilt from | Kept by wallets and indexers (section 9) |
-| House vault | Capital, total shares, last share price, locked liability L | Permanent, touched every draw |
-| Vault request | Requester, amount or shares, round | Until converted (M5) |
+| House vault | Last drawn round, total_assets, total_shares, pending deposit assets, pending withdrawal shares, locked liability L. Value: total_assets + pending deposits + R | Permanent, touched every draw and every request |
+| Vault request | Owner payout script, deposit amount or withdrawal shares, target draw | Until settled against its draw's record |
+| Draw settlement record (per draw) | Round, share price, totals converted. Value: withdrawn assets of that draw (+ R) | Until all its withdrawals are settled |
+
+Every state begins with a role byte and its round number (R5).
 
 **Design rules:**
 
 -   **R1 Full state bytes.** Every successor's state is built from bytes present in the transaction, so state is published whenever it changes.
 -   **R2 Enumerated shapes.** Every transition fixes input and output counts, indices and covenant bindings, and rejects extra outputs. These checks are hand-written, because SilverScript's covenant declarations count only an input's authorized outputs and allow extra outputs (feasibility Q1):
-    - `tx.inputs.length`, `tx.outputs.length`, OpCovInputCount and OpCovOutputCount;
-    - explicit indices;
-    - OpOutputCovenantId on each output index (proposal: per index rather than on output 0 only; confirm in the M1 spec). Bound outputs carry the family's covenant ID; unbound outputs, such as caller, referral, fee and payout outputs, report the zero ID.
+    - `tx.inputs.length` and `tx.outputs.length`, with explicit indices;
+    - for each covenant family the transaction touches, exact OpCovInputCount and exact OpAuthOutputCount, plus OpCovOutputCount = OpAuthOutputCount. KIP-20 allows several authorization groups with the same covenant ID in one transaction, so without these checks a second protocol UTXO could ride along unvalidated;
+    - continuation outputs selected with OpAuthOutputIdx(active input, k), or by asserting OpCovOutputIdx(cov, 0) = 0;
+    - OpOutputCovenantId only for genesis outputs, and to check that unbound outputs (caller, referral, fee, payout, change) report the zero ID.
 
-    SilverScript v1.0.0 does not expose OpOutputAuthorizingInput, so these ID checks replace it.
+    SilverScript v1.0.0 does not expose OpOutputAuthorizingInput; the authorized-output index is its exposed equivalent. *(Proposal; confirm in the M1 spec. It replaces the per-index covenant-ID check proposed with v0.4.1 (DECISIONS rows on R2 and the design rename), which proves membership but not which input authorized the output.)*
 -   **R3 Absolute time.** Deadlines and the seed reference are stored as absolute DAA scores and never derived from when an object was last spent.
 -   **R4 Reconstructible state.** Prize pools, which can stay idle for days, carry only data reconstructible from the round result record and their UTXO value. The controller and the vault are spent at least once per round.
+-   **R5 Authenticated roles.** Every state starts with a role byte and the round number. Every consumer checks covenant ID + role + round before using an input.
+    - Another role's state is read only with `readInputStateWithTemplate` and written only with `validateOutputStateWithTemplate` or `validateOutputStateWithInputTemplate`.
+    - Template hashes come from state or constants, never from the caller. They are computed with `templateHash(prefix, suffix)`. The controller holds the route table of role template hashes.
+    - SilverScript's `#[covenant…]` declaration wrappers are used only for same-template hops, such as a shard updating itself. Cross-role routes are hand-written (feasibility Q1; SilverScript DECL.md).
+-   **R6 Leader and delegates.** `close()` and `draw()` have one leader at covenant input 0 that validates the whole transition: the controller for `close()`, the frozen marker for `draw()`. Every other covenant input is a delegate. A delegate rejects index 0, requires OpAuthOutputCount = 0 when it authorizes nothing, and authenticates the leader's template. Every non-delegate entry of a shard requires OpCovInputCount = 1; the companion shard-logic fallback (7.1) would change this count. In `claim()` the pool validates the shape and the ticket checks that a genuine pool of its round is present. `claim()` and `return_deposit()` each spend exactly one ticket.
+-   **R7 Exact values and fixed plain outputs.** Every covenant output has an exact value, and every split has an explicit remainder rule (b = total − a). Plain outputs carry no covenant binding, so the authorized-output iterators cannot pair them with an input. Each one (payout, referral, fee, caller output, reserve refund, change) sits at a fixed declared index with an exact value. Every newly created UTXO, such as a ticket or a vault request, has its initial state validated at creation.
+-   **R8 Defined behaviour.** In SilverScript, overflow and division by zero are undefined behaviour that the compiler may remove, not guaranteed failures. Scripts range-check every integer before + − × ÷ %, check byte lengths before casts and slices, and bound loops explicitly. Each entry point checks its full precondition set. Arguments the transaction does not commit to, such as proofs and selectors, are checked against committed data.
+-   **Shape policy (open, M1 spec).** As written, R2 is strict: every input and output, including the caller's funding input and change output, has a fixed index, and nothing else is allowed. The research recommends a looser alternative: exact covenant counts and values, plus at most one plain fee input and one change output, with no covenant ID. *Flag: that alternative loosens the CLAUDE.md non-negotiable "extra outputs are rejected" and needs your decision.* Either way the reserve R never pays fees.
 
 # 7. Transitions
 
@@ -447,7 +476,8 @@ These are two enumerated shapes, with and without the referral output. The shard
 -   For each combination in order, a Merkle path proves the current leaf of its five main numbers, and the successor root is that tree with the bonus count incremented (8.2). Combinations sharing main numbers update the same leaf one after another.
 -   The shard value increases by exactly b × p − r. S increases by b × p and P_R by r.
 -   If the referral output is present, it pays exactly r = floor(b × p × s_R / 10⁴) ≥ M_ref to a standard script class.
--   The ticket output carries d × b, the bundle bytes, a zero claimed bitmap and a payout script of a standard class. It is created under the round's covenant family (KIP-20), so tickets cannot be created any other way.
+-   The ticket output carries d × b, the bundle bytes, a zero claimed bitmap and a payout script of a standard class. Its full initial state is validated (R7). It is created under the round's covenant family (KIP-20), so tickets cannot be created any other way.
+-   *Late-buy bound (proposal; confirm in the M1 spec).* The spent shard's creation DAA score (OpTxInputDaaScore) must be below the round deadline T. A shard created at or after T accepts only `close()`. Each shard therefore takes at most one buy after T, so buyers cannot starve `close()` by respending shards. Lock time can prove only "after T", so the cut-off is structural: `close()` spends the shards, plus this rule. Buys can still land between T and `close()`.
 
 **Bundle size and K.** Scripts have no loops, so the per-combination checks are unrolled b_max times in the shard script. Every shard input of `close()` carries the shard's whole redeem script, and shard script size bounds K (feasibility Q5: K ≤ 23 at a 10 kB shard sigscript). b_max is therefore a committed constant, small enough to keep K at its target. M1 measures script size per bundle slot. If a useful b_max costs too much K, there are two fallbacks:
 - a companion shard-logic UTXO that is spent alongside the shard in `buy()` and holds the per-combination checks, so the shard's own script stays small for `close()`;
@@ -467,7 +497,9 @@ Valid only after the round deadline (lower-bound locktime) and only if the contr
 -   K empty shards for round r+1, each recording m, the price, d and s_R;
 -   the caller's output with C_close and change (the caller also posts the marker's R).
 
-Because round r's shards are consumed, no purchase can change round r's counters after `close()`. Purchases in flight against old shards fail and rebuild against round r+1. This is the sales cutoff; no transaction-expiry primitive is needed. Requiring round r−1 to be drawn first keeps the rounds strictly ordered. If a `draw()` is late, the open round simply keeps selling until it happens.
+Because round r's shards are consumed, no purchase can change round r's counters after `close()`. Purchases in flight against old shards fail and rebuild against round r+1. This is the sales cutoff; no transaction-expiry primitive is needed. Requiring round r−1 to be drawn first keeps the rounds strictly ordered. If a `draw()` is late, the next round's shards each accept one buy after its deadline and then wait for `close()`, so sales pause until the late draw happens.
+
+`close()` sets the next deadline T(r+1) = max(scheduled deadline, its own DAA score + D_min), where D_min is a committed minimum sales period. Its own DAA score is the maximum creation DAA score of its inputs, as for the seed reference. New shards are therefore always created before their round's deadline, so a late `close()` cannot open a round that sells nothing *(proposal with the late-buy bound; confirm in the M1/M2 specs)*.
 
 ## 7.3 draw()
 
@@ -498,10 +530,11 @@ Spends one ticket and the prize pool of the claimed combination's tier. Creates:
 
 The covenant checks:
 
+-   the transaction spends exactly one ticket, so one payout output cannot satisfy two claims;
 -   the ticket belongs to the pool's round and covenant family, and the bundle index is unclaimed;
 -   that combination matches the winning numbers at this pool's tier;
--   K Merkle proofs, one per shard, of the leaf of the combination's main numbers against the K frozen roots. h is the sum of the combination's bonus count over the K leaves. All K are required, so h cannot be under-reported;
--   the payout is floor(slice / h) to the ticket's payout script, plus d × b if the ticket is consumed;
+-   K Merkle proofs, one per shard. Proof i is checked against root i of the pool's round. h is the sum of the combination's bonus count over the K leaves. All K are required, so h cannot be under-reported;
+-   the payout is floor(slice / h) to the ticket's payout script, at its fixed index, plus d × b if the ticket is consumed;
 -   the pool decreases by exactly the prize.
 
 Anyone may submit a claim, because the payout script is fixed in the ticket; the submitter pays the transaction fee. Claims within one tier contend for that tier's single pool. With claims spread over at least 7 days this is acceptable, and conflicting claims are simply resubmitted. The proof is about K × (18 × 32 + leaf bytes): about 9.9 kB at K = 16 and m = 10.
@@ -524,7 +557,9 @@ For each round, the number of holdings of each exact combination. It is one of M
 ## 8.2 Structure *(leaf layout: proposal, confirmed in the M1 spec)*
 
 -   Each of the K shards of a round holds the root of a sparse Merkle tree. The key is the rank of the five main numbers in 0..142,505, so every path has fixed depth 18.
--   A leaf holds m fixed-width counts, one per bonus value. Leaf hash is H(0x00 ‖ rank ‖ counts), node hash H(0x01 ‖ left ‖ right), with OpBlake2b. The empty-leaf rule (an absent key means all counts 0) is specified in M1.
+-   A leaf holds m fixed-width counts, one per bonus value. Hashing is domain-separated, with distinct tags for leaf, internal and empty nodes: leaf H(0x00 ‖ rank ‖ counts), node H(0x01 ‖ left ‖ right), and a separate empty-node tag. The hash is OpBlake2b. The empty-leaf rule (an absent key means all counts 0) is specified in M1.
+-   Siblings are passed as one flat byte string of 32 × depth bytes, and its length is checked before slicing. The stack holds at most 244 items, so one item per hash would overflow at K paths.
+-   Before the hash is frozen, M1 benchmarks OpBlake3 against OpBlake2b for K-path claims. The research estimate is about half the script units per hash; M0 measured only a 4.5% saving on a whole single path (feasibility Q2).
 -   A buyer may use any shard, so a combination's holdings are spread over shards. Its count h is the sum of its bonus count across the K leaves for its main numbers.
 -   A purchase supplies, per combination, the leaf bytes and the Merkle path. The script uses the same path twice: to check the old leaf against the current root and to compute the new root with one count incremented.
 
@@ -559,7 +594,12 @@ Kaspa nodes keep only the hash of a covenant's state. The data itself is in tran
 
 **Residual dependency:** a winner whose wallet missed that period needs a copy of the shard trees from any indexer or archive. Any copy works and can be checked against the frozen roots. This is the same one-copy assumption every Kaspa covenant application carries. Long-lived objects follow R4 and can be refreshed.
 
-**Timing constraint:** round length plus the time to obtain the shard trees must stay under about 30 hours. Daily rounds leave about 6 hours; shorter rounds leave more. Round length is therefore an open parameter (section 14). A round can overrun when its predecessor's `draw()` is late. Its earliest purchases then leave normal nodes, so buyers and winners depend on wallets that followed the round or on any indexer copy, checked against the roots.
+**Indexer and launch bundle.**
+- No node RPC lists UTXOs by covenant ID, so the project runs its own indexer. It tracks the covenant IDs, live UTXOs, creating transactions, redeem-script preimages, genesis data and template hashes, and handles the v2 RPC fields (`covenant`, `covenant_id`, `computeBudget`, `storage_mass`).
+- A launch bundle is published and archived against pruning: genesis outpoint, authorized genesis outputs, derived covenant ID, template preimages and live UTXOs. With it, anyone can verify the instance independently.
+- The transaction builder sizes each v1 input's compute budget with `ComputeBudget::checked_covering_script_units`. It takes fees from the node's estimator, at least 100 sompi per gram.
+
+**Timing constraint:** round length plus the time to obtain the shard trees must stay under about 30 hours. Daily rounds leave about 6 hours; shorter rounds leave more. Round length is therefore an open parameter (section 14). A round can overrun when its predecessor's `draw()` is late. Its sales then pause after its deadline (7.2), but its earliest purchases may leave normal nodes before `close()`. Winners and the `draw()` caller then depend on wallets that followed the round or on any indexer copy, checked against the roots.
 
 # 10. Safety and liveness review
 
@@ -582,15 +622,22 @@ Kaspa nodes keep only the hash of a covenant's state. The data itself is in tran
 | Full-coverage whale | Solved in model | Whale check and boost hold-back (4.6); other players' lower-tier money is an open item |
 | Backers losing their edge to rounding or a large boost | Solved in model | Edge rule evaluated with G2 from the whole J; rounding favours the check |
 | Backer exits before a jackpot hit | Solved in model | Liability L of the round whose jackpot is fixed stays locked until that round is drawn |
-| New backer capturing old returns | Mitigated | Conversion at the draw's share price, after J(r+1) is fixed |
+| New backer capturing old returns | Mitigated | Irrevocable requests converted in aggregate at the next draw's post-settlement price; no owner-timed conversion (5.4) |
 | Admin key (trust assumption) | Accepted, bounded | Can set s_F ≤ 10%, s_R ≤ 15% and the fee address, for later rounds only, once per round. Cannot touch prize or vault money or live rounds. A compromised key can take up to 25% of future sales as fee and referral. Users must trust the key holder within those caps |
 | Admin griefing liveness by spending the controller | Mitigated | `set_params()` at most once per round |
 | `return_deposit()` before the window ends | Solved in model | Co-spent pool past its deadline, or T + D_ret (7.5) |
 | Late winner raced by `return_deposit()` after the deadline | Accepted | The guaranteed window is 7 days (4.5) |
-| Nobody calls `close()` | Liveness only | Sales continue; anyone, including players, can call; caller reward |
-| Nobody calls `draw()` in time | **Parked** | The seed block is only verifiable for about 12 h [S4]. Until `draw()` succeeds, round r's funds and the vault liability stay locked, and round r+1 cannot close (it keeps selling). A non-rerollable fallback belongs to the randomness work |
+| Nobody calls `close()` | Liveness only | Sales pause after the deadline (one buy per shard); anyone, including players, can call; caller reward |
+| Nobody calls `draw()` in time | **Parked** | The seed block is only verifiable for about 12 h [S4]. Until `draw()` succeeds, round r's funds and the vault liability stay locked, and round r+1 cannot close (its sales pause after its deadline). A non-rerollable fallback belongs to the randomness work |
 | Wrong jackpot or second-prize proof at draw | Solved in model | K leaves verified against the frozen roots |
 | Shard contention under heavy load | Mitigated | K shards, free shard choice, wallet retries |
+| Post-deadline buys starving `close()` | Solved in model (proposal) | Shard created at or after T accepts only `close()` (7.1) |
+| Extra protocol UTXO riding along in a parallel authorization group | Solved in model | Exact OpCovInputCount, OpAuthOutputCount and OpCovOutputCount per family (R2) |
+| Look-alike or wrong-role UTXO presented as a shard, pool or ticket | Solved in model | Covenant ID + role + round + template-checked reads (R5) |
+| One payout satisfying two obligations (double satisfaction) | Solved in model | One ticket per claim; plain outputs at fixed indices with exact values (R7) |
+| Vault share-price manipulation | Mitigated | Internal accounting, dead shares or offset, round-down (5.4) |
+| Admin signature replay | Solved in model | Signature over domain tag, covenant ID, target round, parameters and monotonic nonce (5.6) |
+| Network refuses large `close()` or small outputs | **Verify** | Mass-limit check at the start of M1 (section 12) |
 | Arithmetic overflow | Implementation gate | Checked 64-bit arithmetic; ordered operations and bounded values (4.6) |
 | Lost shard data after 30 h, including a round that overruns because a `draw()` is late | Mitigated | Wallets keep all K shard trees; any single copy suffices, checked against the roots |
 | Miner manipulation of the seed | **Parked** | Section 11 |
@@ -606,7 +653,9 @@ This draft does not choose a seed source. The interface is fixed: `close()` stor
 - miner withholding and selection under Kaspa's rules are modelled;
 - the maximum jackpot is bounded by the cost of manipulation.
 
-Earlier project research on deriving the seed from Kaspa block data is the starting point.
+Earlier project research on deriving the seed from Kaspa block data is the starting point. Two constraints already apply to it:
+- Under KIP-21, OpChainblockSeqCommit succeeds only for a selected-chain block within finality depth (about 12 hours), and it is re-evaluated after a reorg. Any seed design therefore needs a missed-window fallback; that fallback is part of the parked work.
+- The test-only seed path must be impossible to build for mainnet.
 
 # 12. Costs and limits
 
@@ -625,6 +674,13 @@ M0 measured the building blocks with probe scripts (`docs/feasibility.md`, `docs
 | `claim()` | K paths and leaves, bundle index | Script and proof size (M4) |
 
 Platform limits: Appendix A.
+
+**Which mass limit governs (open; first task of M1).** M0 read the v2.1.0 source and found no separate standard-transaction mass cap: the mempool checks each transaction against the block limits (`mining/src/mempool/check_transaction_limits.rs:15-44`). The reserve, ticket-deposit and largest-K figures are sized to those limits, i.e. 0.08 KAS × (K + 2) and transient mass just under 1,000,000. KIP-9's text still states a 100,000-gram standard limit. If any relay limit of that size applied:
+- R would need to be about 5× larger;
+- a covenant ticket would need about 0.4 KAS;
+- a 212–230 kB `close()` would not be relayed.
+
+M1 starts by measuring `buy()`, `close()` at K = 16/32/64 and `draw()` with the node's mass calculator. It also submits each through a testnet-10 node's mempool. A transaction that only a miner would accept directly would be a keeper in disguise. The official wallet SDK's transaction generator still caps transactions at 100,000 mass (`MAXIMUM_STANDARD_TRANSACTION_MASS`, `wallet/core/src/tx/mass.rs:25`; used in `generator/generator.rs`). Our builder must therefore construct protocol transactions itself rather than through that generator, and player wallets built on the SDK may refuse large `buy()` or `claim()` transactions.
 
 # 13. Prototype plan
 
@@ -656,9 +712,13 @@ No real-value launch while randomness is parked.
 **Open**
 
 -   Set in milestone specs: split of s_t across tiers, the whale margin (≤ 1.256 at the starting values, 4.6), m_min, m_max and the cap (maximum liability share of the vault); the exact s_C/s_D split. M2 sets these, and M3 confirms the tier split.
--   Proposals to confirm: the J-fixing order, hold-back and cap on total liability (4.6); s_C + s_D in the whale check (4.6); the counter-leaf layout (8.2); per-index covenant-ID checks (R2); parameter storage (5.6); M_ref; the `return_deposit()` condition and D_ret (7.5).
+-   Proposals to confirm: the J-fixing order, hold-back and cap on total liability (4.6); s_C + s_D in the whale check (4.6); the counter-leaf layout (8.2); output binding through the authorized-output index (R2); the late-buy bound and D_min (7.1, 7.2); the vault request mechanics (5.4); parameter storage (5.6); M_ref; the `return_deposit()` condition and D_ret (7.5).
 -   b_max and its effect on K (7.1).
 -   Empty-leaf rule (M1).
+-   Which per-transaction mass limit the network relays (section 12; first task of M1).
+-   Covenant family structure: each round a new genesis or a continuation of one ID, and roles sharing one covenant ID or using separate IDs (M1 spec).
+-   Shape policy and who pays fees (R2 options, M1 spec); late-buy bound (7.1).
+-   Refund paths for a round that cannot close or draw, and vault-request timeouts.
 -   Lower-tier money of other players in the whale check (4.6).
 -   Vault request and conversion transactions (M5).
 -   Round length, given the roughly 30-hour data window (section 9).

@@ -27,6 +27,23 @@ Done when: `docs/feasibility.md` answers all six; the chosen release and hash ar
 ## M1 — Shard, bundles and `buy()`
 Status: todo
 
+**First task, before any protocol code: mass-limit check (design section 12; research G1–G3).**
+- Determine which per-transaction mass limits (storage, transient, compute) the v2.1.0 mempool enforces.
+- Measure M0's probe shapes for `buy()` and for `close()` at K = 16/32/64, plus a `draw()`-sized probe, with the node's mass calculator. Use worst-case caller funding: KIP-9 input relief depends on the caller's inputs and cannot be relied on.
+- Submit each through a testnet-10 node's mempool, with real signatures on the funding inputs (M0's OpTrue stand-in is non-standard).
+- Record that the wallet SDK generator caps transactions at 100,000 mass, so our builder must build protocol transactions itself.
+- Repeat the check with the real `close()` and `draw()` in M2, M3 and M6.
+- Record in `docs/DECISIONS.md` whether d ≈ 0.08 KAS, R = 0.08 × (K + 2) and the largest K (62/37/23) hold under relay. If they don't, recompute them before writing the spec.
+
+The spec also settles five open decisions:
+- the covenant family structure;
+- the shape policy and who pays fees;
+- output binding through the authorized-output index (R2);
+- the late-buy bound (7.1);
+- D_min, with M2.
+
+It adopts R5–R8 and the Merkle rules (domain tags, flat sibling string, BLAKE3 vs BLAKE2b benchmark).
+
 Fixed 5/30 + bonus game (4.1). Shard state with m, price, d, s_R, S and P_R (section 6). Counter leaf keyed by the 5-number rank with per-bonus counts, and the empty-leaf rule (8.2). Bundle ticket. `buy()` (7.1) in any shard, with the ticket split and the optional referral output (5.1). Fee accumulation starts here: the shard records S and P_R, from which `close()` and `draw()` derive the fee, house share, caller rewards and boost pot. The spec confirms the leaf layout, b_max and M_ref.
 
 Done when:
@@ -37,13 +54,15 @@ Done when:
 - a referral output pays exactly floor(b × p × s_R / 10⁴) and only when ≥ M_ref; omitting it leaves the share in the shard;
 - value is conserved: the shard value + referral output + ticket deposit equals the buyer's spend, minus change and fee; a test derives F, H, ΣB_t and b_r from S and P_R and checks b_r ≥ 0;
 - the ticket records the round deadline T;
+- tests also reject a parallel authorization group with the same covenant ID, an extra covenant output, a wrong-role or wrong-round input, a wrong-template read, a malformed sibling string, and a second buy on a shard created after T;
+- tests run with production engine flags and real compute budgets, and an under-funded compute budget is rejected;
 - tests reject a forged count, a wrong leaf or root, a non-canonical combination, a bonus outside 1..m, b = 0 or b > b_max, the wrong price or deposit, an inflated, deflated or below-threshold referral, a non-standard payout or referral script, and extra outputs;
 - measured and recorded in `docs/costs.md`: shard script size per bundle slot (and the K it allows at `close()`, feasibility Q5), and the minimum referral output M_ref.
 
 ## M2 — `close()`, game-size rule and admin parameters
 Status: todo
 
-Frozen marker, next-round controller and shards (7.2). Game-size rule: edge rule, whale check, m_min/m_max, estimate Ĵ (4.6). Parameter snapshot and `set_params()` (5.6). The spec sets the open parameters (s_t split and paying tiers, margin within the 4.6 bound, m_min, m_max, cap, s_C/s_D) and confirms the whale-check and parameter-storage proposals. It also lists the arithmetic order and maximum values.
+Frozen marker, next-round controller and shards (7.2). Game-size rule: edge rule, whale check, m_min/m_max, estimate Ĵ (4.6). Parameter snapshot and `set_params()` (5.6). The spec sets the open parameters (s_t split and paying tiers, margin within the 4.6 bound, m_min, m_max, cap, s_C/s_D) and confirms the whale-check and parameter-storage proposals. It also lists the arithmetic order and maximum values, with range checks (R8). The admin signature covers domain tag, covenant ID, target round, parameters and nonce, and the controller's nonce is monotonic. The spec decides research item K3: whether the admin spends the controller or a separate parameter UTXO. `close()` is built as leader with the shards as delegates (R6). `close()` sets T(r+1) = max(schedule, its DAA + D_min); a test shows that a late `close()` still opens a round that sells.
 
 Done when:
 - the marker records all K roots, S, P_R, m, J, J_boost, G2, the shares and the seed reference (the maximum creation DAA score of the inputs plus the committed offset, stored as an absolute value). It holds S − P_R − C_close + J_boost;
@@ -59,7 +78,8 @@ Done when:
   - a late buy against an old shard;
   - a wrong m (too small, too large or out of range);
   - a marker or controller with altered sums;
-- `set_params()` tests reject s_F > 10%, s_R > 15%, a second change in one round, a wrong key, and any change to other fields or to the controller's value.
+- `set_params()` tests reject s_F > 10%, s_R > 15%, a second change in one round, a wrong key, a replayed or stale-nonce signature, a signature for another round or covenant ID, and any change to other fields or to the controller's value;
+- `close()` at the largest K runs with worst-case scripts within the mass limits found in M1; a shard dragged into a close under a different leader route is rejected.
 
 ## M3 — `draw()` with a test seed
 Status: todo
@@ -76,7 +96,9 @@ Done when:
 - unclaimed or absorbed pool money and unheld J_boost go to the boost pot, never to the vault;
 - value is conserved;
 - tests reject a wrong or missing leaf among the K, a wrong h_J or n2, a vault paid more than J_house × [h_J ≥ 1] + G2 × n2, a J(r+1) that fails either check or the cap, a redirected fee, and the absorption of a pool before its deadline;
-- measured: `draw()` script size as a function of K and m_max.
+- the test-only seed is behind a build feature that cannot be enabled for a mainnet build;
+- the marker leads `draw()` (R6); fee, caller and reserve-refund outputs sit at fixed indices with exact values (R7);
+- measured: `draw()` script size as a function of K and m_max, and `draw()` at maximum K with worst-case proofs within the mass limits.
 
 ## M4 — `claim()`, `return_deposit()` and `refresh()`
 Status: todo
@@ -102,10 +124,17 @@ Done when:
 ## M5 — House vault shares
 Status: todo
 
-Vault shares, deposit and withdrawal requests, conversion at each draw's share price, and the liability lock (5.4). The spec proposes the request and conversion transactions and keeps `draw()`'s shape fixed. Record the choice in `docs/DECISIONS.md`.
+Vault shares, deposit and withdrawal requests, conversion at each draw's share price, and the liability lock (5.4). The spec proposes the request and conversion transactions and keeps `draw()`'s shape fixed. Record the choice in `docs/DECISIONS.md`. Requirements (5.4):
+- internal accounting;
+- dead shares or a virtual offset;
+- round down, and reject zero-share mints;
+- irrevocable requests added to the vault's pending totals;
+- aggregate conversion at the next draw into a per-draw settlement record, with withdrawals capped to keep L(r+1);
+- owners settle against the record at any time.
 
 Done when:
 - requests convert at the share price set by the next draw, so a new backer cannot capture returns from earlier rounds;
+- tests reject a zero-share deposit, cancelling a request, settling against the wrong draw's record, a second settlement, a withdrawal that takes the vault below L(r+1), and share × price overflow boundaries;
 - J(r+1) is fixed before that draw's conversions;
 - tests reject withdrawing below the liability L = J_house + G2 × (m − 1) of the round whose jackpot is fixed, before that round is drawn, a conversion at a stale or future price, and a double conversion;
 - value is conserved.
@@ -130,4 +159,11 @@ Done when several consecutive rounds run on testnet-10, including:
 - backer deposit and withdrawal;
 - a claim built from shard trees the wallet kept during the round, more than 30 hours later;
 - a claim built from an independent indexer copy;
-- a round that overruns 30 hours because a `draw()` is late, and still sells using an indexer copy (section 9).
+- a round that overruns 30 hours because a `draw()` is late: its sales pause after the deadline, and its claims and `draw()` proof are built from an indexer copy (section 9);
+- every shape submitted through the public mempool, not directly to a miner;
+- the project indexer and a published launch bundle (genesis outpoint, authorized genesis outputs, covenant ID, template preimages, live UTXOs), with `sil-debug` and kascov preflight used in review.
+
+Release gate (not a milestone):
+- no mainnet value until the mass-limit question and the SilverScript/rusty-kaspa revision check are resolved;
+- the reviewer checklist passes on every shape;
+- an independent audit is scheduled.

@@ -4,6 +4,7 @@
 A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Players `buy()` tickets and `claim()` prizes; anyone can call `close()` and `draw()`. Every lottery rule is enforced by L1 covenants. Off-chain code (our Rust transaction builder) only assembles transactions and Merkle proofs that the covenants verify. No keeper bots, no off-chain lottery logic.
 
 - Design: `docs/design.md` — read the relevant section before any covenant work. Do not import it here; open it when needed.
+- Kaspa best practices and open checks: docs/research/kaspa-best-practices.md — read before covenant work.
 - Build order and current milestone: `docs/milestones.md`
 - Decisions made while building: `docs/DECISIONS.md`
 - Per-milestone specs: `docs/specs/`
