@@ -1,10 +1,12 @@
 # Milestones
 
-Status: `todo` · `in progress` · `done`. Update the status line when a milestone finishes. Each milestone gets a spec in `docs/specs/` before any code. Section numbers refer to `docs/design-v0.4.md`.
+Status: `todo` · `in progress` · `done`. Update the status line when a milestone finishes. Each milestone gets a spec in `docs/specs/` before any code. Section numbers refer to `docs/design.md`.
 
-Every covenant milestone also checks value conservation for its transitions (5.5): inputs equal outputs plus caller rewards and fees, with transaction fees paid from external inputs.
+Every covenant milestone checks value conservation for its transitions (5.5). It is stated over economic value, with reserves R moving per the reserve rule. Inputs must equal outputs plus referral, fee, house share, boost pot and caller rewards. Transaction fees are paid from external inputs.
 
-Out of scope until later: a real seed source (randomness is parked), economic tuning, any front end, mainnet.
+Proposals in `docs/DECISIONS.md` marked "confirm in spec Mx" are settled in that milestone's spec before any code.
+
+Out of scope until later: a real seed source (randomness is parked), economic tuning beyond the starting values, ticket transfer, any front end, mainnet.
 
 ---
 
@@ -22,65 +24,110 @@ Clone SilverScript, rusty-kaspa and the KIPs into `refs/`. Read SilverScript's T
 
 Done when: `docs/feasibility.md` answers all six; the chosen release and hash are recorded in `docs/DECISIONS.md`; a Rust workspace exists; `cargo test` runs at least one covenant test in the local script engine; the exact build and test commands are written into `CLAUDE.md`.
 
-## M1 — One shard and `buy()`
+## M1 — Shard, bundles and `buy()`
 Status: todo
 
-Shard state (with game size and ticket price, section 6), ticket output, sparse Merkle counter, `buy()` transition (7.1), including several tickets for the same shard in one transaction.
-
-Done when: valid buys increment the counter and the pot and create tickets under the round's covenant family; tests reject a forged count, the wrong shard, a non-canonical combination, the wrong price, extra outputs and a non-standard payout script.
-
-## M2 — `close()` with one shard
-Status: todo
-
-Frozen marker, next-round controller and shard, game-size ladder rule (4.6, 7.2).
+Fixed 5/30 + bonus game (4.1). Shard state with m, price, d, s_R, S and P_R (section 6). Counter leaf keyed by the 5-number rank with per-bonus counts, and the empty-leaf rule (8.2). Bundle ticket. `buy()` (7.1) in any shard, with the ticket split and the optional referral output (5.1). Fee accumulation starts here: the shard records S and P_R, from which `close()` and `draw()` derive the fee, house share, caller rewards and boost pot. The spec confirms the leaf layout, b_max and M_ref.
 
 Done when:
-- the marker records all roots, gross sales S, rolling pot O, ticket count, game size, floor and the seed reference (maximum creation DAA score of the inputs plus the committed offset, stored as an absolute value), and holds S minus the `close()` reward plus O as its value;
-- the next round opens in the same transaction with the size chosen by the ladder rule, an empty rolling pot and its "previous round drawn" flag cleared, and new shards that record the new game size and price;
-- the `close()` caller reward is paid and value is conserved;
-- tests reject a close before the deadline, a close before the previous round is drawn, and a late buy against the old shard.
+- valid bundles increment each combination's bonus count and the shard's S and P_R;
+- the shard value grows by exactly b × p − r;
+- the ticket carries the bundle, a zero claimed bitmap, d × b and its payout script, under the round's covenant family;
+- a bundle that repeats a combination, or combinations sharing main numbers, updates correctly;
+- a referral output pays exactly floor(b × p × s_R / 10⁴) and only when ≥ M_ref; omitting it leaves the share in the shard;
+- value is conserved: the shard value + referral output + ticket deposit equals the buyer's spend, minus change and fee; a test derives F, H, ΣB_t and b_r from S and P_R and checks b_r ≥ 0;
+- the ticket records the round deadline T;
+- tests reject a forged count, a wrong leaf or root, a non-canonical combination, a bonus outside 1..m, b = 0 or b > b_max, the wrong price or deposit, an inflated, deflated or below-threshold referral, a non-standard payout or referral script, and extra outputs;
+- measured and recorded in `docs/costs.md`: shard script size per bundle slot (and the K it allows at `close()`, feasibility Q5), and the minimum referral output M_ref.
+
+## M2 — `close()`, game-size rule and admin parameters
+Status: todo
+
+Frozen marker, next-round controller and shards (7.2). Game-size rule: edge rule, whale check, m_min/m_max, estimate Ĵ (4.6). Parameter snapshot and `set_params()` (5.6). The spec sets the open parameters (s_t split and paying tiers, margin within the 4.6 bound, m_min, m_max, cap, s_C/s_D) and confirms the whale-check and parameter-storage proposals. It also lists the arithmetic order and maximum values.
+
+Done when:
+- the marker records all K roots, S, P_R, m, J, J_boost, G2, the shares and the seed reference (the maximum creation DAA score of the inputs plus the committed offset, stored as an absolute value). It holds S − P_R − C_close + J_boost;
+- the next round opens in the same transaction, with:
+  - m(r+1) = the smallest m in range that passes both checks at Ĵ, or m_max if none does, matching a reference calculation over a grid of vault values, boost pots and prices;
+  - the boost pot and fee accumulator carried over;
+  - the flags cleared;
+  - K shards recording m, the price, d and s_R;
+- pending admin parameters are applied to the round being opened and never to an open round;
+- the caller receives C_close in its own output; reserves follow the reserve rule; value is conserved;
+- tests reject:
+  - a close before the deadline, or before the previous round is drawn;
+  - a late buy against an old shard;
+  - a wrong m (too small, too large or out of range);
+  - a marker or controller with altered sums;
+- `set_params()` tests reject s_F > 10%, s_R > 15%, a second change in one round, a wrong key, and any change to other fields or to the controller's value.
 
 ## M3 — `draw()` with a test seed
 Status: todo
 
-Winning numbers from the test seed, tier budgets and slices, jackpot proof, vault settlement for the floor (5.2–5.3), rolling pot, prize pools (7.3).
+Winning numbers from the test-only seed. Lower-tier budgets and slices. Jackpot and second-prize counts from K leaves (8.4). Vault settlement (5.4). Fixing J(r+1) with base, hold-back and top-up (4.6). Boost pot. Fee payout. Prize pools and absorption (7.3). The spec confirms the J-fixing, top-up, fee-threshold and cap proposals, and the tier split.
 
 Done when:
-- all outputs match a reference calculation in the tests, for jackpot won and jackpot not won;
-- `draw()` adds the new rolling pot to the round r+1 controller, records its floor and sets its flag;
-- the protocol fee and `draw()` caller reward are paid and value is conserved;
-- tests reject a wrong jackpot proof and the absorption of a pool before its deadline.
+- all outputs match a reference calculation for these cases:
+  - jackpot held once, held several times and not held;
+  - n2 = 0, 1 and m − 1;
+  - a boost pot below and above the safe level;
+  - a fee below and above the minimum output;
+- J(r+1) is recorded in the round r+1 controller and both checks hold for it. V_rec is recorded and the flag is set;
+- unclaimed or absorbed pool money and unheld J_boost go to the boost pot, never to the vault;
+- value is conserved;
+- tests reject a wrong or missing leaf among the K, a wrong h_J or n2, a vault paid more than J_house × [h_J ≥ 1] + G2 × n2, a J(r+1) that fails either check or the cap, a redirected fee, and the absorption of a pool before its deadline;
+- measured: `draw()` script size as a function of K and m_max.
 
-## M4 — `claim()`, `reclaim()` and `refresh()`
+## M4 — `claim()`, `return_deposit()` and `refresh()`
 Status: todo
 
-Claims (7.4), reclaim and refresh (7.5).
+Bundle claims with K-leaf proofs (7.4), deposit return after the window, and refresh (7.5). The spec confirms the `return_deposit()` condition (co-spent pool past its deadline, or T + D_ret).
 
 Done when:
-- duplicate holders split a slice exactly, and a claim pays floor(slice / h) plus the ticket's deposit to the ticket's own payout script;
-- the pool decreases by exactly the prize;
-- tests reject a double claim, a forged count, the wrong tier, a ticket from another round or covenant family, a redirected or inflated payout, and a claim against an absorbed pool;
-- `reclaim()` is rejected before its delay and without satisfying the payout script;
+- duplicate holdings split a slice exactly; h is the sum over K leaves;
+- a claim pays floor(slice / h) to the ticket's payout script, marks the index claimed, and returns d × b on the ticket's last claim;
+- the pool decreases by exactly the prize, for lower tiers, the jackpot and the second prize;
+- tests reject:
+  - a double claim of an index;
+  - a forged or under-reported h (missing or stale leaf);
+  - the wrong tier;
+  - a ticket from another round or covenant family;
+  - a redirected or inflated payout;
+  - a claim against an absorbed pool;
+- `return_deposit()` is rejected before its condition holds (pool deadline not passed, or before T + D_ret) and pays only to the ticket's payout script;
+- value is conserved for every claim and deposit return;
+- measured: `claim()` script and proof size as a function of K and m;
 - `refresh()` produces a byte-identical successor and moves no deadline or seed reference.
 
-## M5 — Backer vault
+## M5 — House vault shares
 Status: todo
 
-Vault mechanics are **open** in the design (5.4, 14). The spec for this milestone must first propose them; record the choice in `docs/DECISIONS.md` and bring it back for a design update before building.
+Vault shares, deposit and withdrawal requests, conversion at each draw's share price, and the liability lock (5.4). The spec proposes the request and conversion transactions and keeps `draw()`'s shape fixed. Record the choice in `docs/DECISIONS.md`.
 
-Done when: deposit and withdrawal requests convert at the next draw's share price, so a new backer cannot capture returns from earlier rounds; tests reject withdrawing capital that secures the current floor before the round is drawn.
+Done when:
+- requests convert at the share price set by the next draw, so a new backer cannot capture returns from earlier rounds;
+- J(r+1) is fixed before that draw's conversions;
+- tests reject withdrawing below the liability L = J_house + G2 × (m − 1) of the round whose jackpot is fixed, before that round is drawn, a conversion at a stale or future price, and a double conversion;
+- value is conserved.
 
 ## M6 — K shards and limits
 Status: todo
 
-Done when: the largest workable K for `close()` is measured; purchase conflict rate is measured; `docs/costs.md` lists size and mass per transition and the minimum ticket deposit and minimum prize.
+Done when:
+- the largest workable K for `close()`, b_max and m_max are measured with the real scripts;
+- R is checked against the larger of `close()` and `draw()` fresh outputs;
+- purchase conflict rate is measured;
+- `docs/costs.md` lists size and mass per transition, the minimum ticket deposit, M_ref and the minimum fee payout;
+- final R, d, K, b_max and m_max are recorded in `docs/DECISIONS.md`.
 
 ## M7 — Testnet-10 end to end
 Status: todo
 
 Done when several consecutive rounds run on testnet-10, including:
-- a game-size change and a duplicated jackpot combination;
+- an m change, a duplicated jackpot combination and a held second prize;
+- a referral payout and a below-threshold referral;
+- an admin parameter change that takes effect only in the next opened round;
 - backer deposit and withdrawal;
-- a claim built from a shard tree the wallet kept during the round, more than 30 hours later;
+- a claim built from shard trees the wallet kept during the round, more than 30 hours later;
 - a claim built from an independent indexer copy;
 - a round that overruns 30 hours because a `draw()` is late, and still sells using an indexer copy (section 9).

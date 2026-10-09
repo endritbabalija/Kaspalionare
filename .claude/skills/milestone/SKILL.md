@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 Run milestone $ARGUMENTS from `docs/milestones.md`.
 
-1. **Read.** The milestone entry, the design sections it touches in `docs/design-v0.4.md`, `docs/DECISIONS.md`, and any earlier specs in `docs/specs/`.
+1. **Read.** The milestone entry, the design sections it touches in `docs/design.md`, `docs/DECISIONS.md`, and any earlier specs in `docs/specs/`.
 2. **Spec.** If `docs/specs/$ARGUMENTS.md` does not exist, interview me with the AskUserQuestion tool about anything the design leaves open for this milestone: byte layouts, encodings, hash choices, limits, test cases. Do not ask what the design already answers. Then write the spec with:
    - state layouts at byte level
    - each transition's inputs, outputs and checks
