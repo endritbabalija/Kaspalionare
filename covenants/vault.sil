@@ -1,0 +1,62 @@
+pragma silverscript ^0.1.0;
+
+// House vault (role 0x06), spec M3 A3.2 (design 5.4, 6; D40, D50).
+//
+// Value: total_assets + pend_dep + R. Created at genesis (round 0) and recreated by every
+// draw(), which validates every field (spec M3 A4 check 23). total_shares and the pending
+// fields are carried unchanged until M5 adds requests and the settlement record.
+//
+// Entries: draw_leg() only (delegate of Drawer.draw_test_seed() at input 2). M5 adds the
+// request entries.
+contract Vault(
+    byte[32] drawerTemplateHash,
+    int init_round,
+    int init_total_assets,
+    int init_total_shares,
+    int init_pend_dep,
+    int init_pend_wsh,
+    int init_liability
+) {
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+
+    // Drawer state layout (spec M3 A3.1), for readInputStateWithTemplate.
+    struct DrawerState {
+        byte role;
+        int round;
+        byte[32] pool_tpl;
+        byte[32] vault_tpl;
+        int f_min;
+        int claim_window;
+        int draw_window;
+    }
+
+    byte role = 0x06;
+    int round = init_round;
+    int total_assets = init_total_assets;
+    int total_shares = init_total_shares;
+    int pend_dep = init_pend_dep;
+    int pend_wsh = init_pend_wsh;
+    int liability = init_liability;
+
+    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, vault L1-L4).
+    entry draw_leg(int drawer_pl, int drawer_sl) {
+        // L1: the vault slot of draw()
+        require(this.activeInputIndex == 2); // mut:VL1
+        // L2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(2);
+        require(OpInputCovenantId(0) == cov); // mut:VL2
+        // L3: this input authorizes no output
+        require(OpAuthOutputCount(2) == 0); // mut:VL3
+        // L4: the leader is the drawer of the round after this vault's last drawn round,
+        // under the committed template
+        require(drawer_pl >= 0);
+        require(drawer_pl <= SCRIPT_MAX);
+        require(drawer_sl >= 0);
+        require(drawer_sl <= SCRIPT_MAX);
+        DrawerState drw = readInputStateWithTemplate(0, drawer_pl, drawer_sl, drawerTemplateHash);
+        require(unsigned(drw.role) == 10); // mut:VL4_role
+        require(drw.round == round + 1); // mut:VL4_round
+    }
+}

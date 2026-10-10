@@ -131,7 +131,7 @@ At the old R = 1.44 KAS the same K = 16 worst case is 527,763 (105.6 %), which i
 - Smallest d per combination: 0.0823 / 0.0408 / 0.0271 / 0.0203 KAS for b = 1..4 without a referral, and 0.1038 / 0.0455 / 0.0291 / 0.0214 KAS with one.
 - `set_params()`: 16,980.
 - Genesis at K = 16: 413,196 (testnet-10 below).
-- `draw()` (M3) must re-check R against its own outputs.
+- `draw()` (M3) re-checked R against its own outputs: M3-d below (supremum 58.4 %).
 
 **M2-d: priority fee against C_close** (C_close = s_C · S, s_C = 50 bp; fee = 100 sompi per gram of max(compute, transient/2, storage)):
 
@@ -144,6 +144,111 @@ At the old R = 1.44 KAS the same K = 16 worst case is 527,763 (105.6 %), which i
 Below about 90 KAS of round sales at K = 16, the caller pays part of the fee out of pocket. This is the D19 liveness note. The relay floor alone (max(compute, transient/2)) is 0.4284 KAS at K = 16.
 
 **M2-e** (testnet-10): genesis plus a real K = 16 `close()` were accepted and mined. Storage was 435,348 and the fee 0.4354 KAS (`docs/tn10-mass-check.md`).
+
+## M3: drawer, vault, pool and `draw()` with a TEST-ONLY seed (real scripts)
+
+Source: `crates/lottery/tests/m3_measure.rs` (`cargo test -p lottery --release --test m3_measure -- --nocapture --test-threads=1`), scripts `covenants/drawer.sil`, `vault.sil`, `pool.sil`, `marker.sil` (with `draw_leg`) and `controller.sil` (with `draw_leg`), 2026-10-10. B_MAX = 4, R = 1.69 KAS.
+
+**Limits, re-verified against the pinned rusty-kaspa v2.1.0 (`refs/rusty-kaspa-v2.1.0`):**
+- compute 500,000, storage 500,000, transient 1,000,000 per block: `consensus/core/src/config/params.rs:626` (MAINNET_PARAMS) and `:683` (TESTNET_PARAMS). They are enforced per block in `consensus/src/pipeline/body_processor/body_validation_in_isolation.rs:88-95`, so a transaction above one of them can never be mined.
+- Storage mass (KIP-9): `consensus/core/src/mass/mod.rs:439-512`. Plurality `:83-99`: ⌈(63 + script length + 32 if a covenant ID) / 100⌉, so a covenant P2SH output has p = 2 (130 B) and a standard P2PK or P2SH output p = 1. C = STORAGE_MASS_PARAMETER = 10¹² (`consensus/core/src/constants.rs:26`).
+- A zero-value output is invalid: `consensus/src/processes/transaction_validator/tx_validation_in_isolation.rs:150-151`.
+
+**M3-a: redeem sizes.**
+
+| Object | Prefix B | Suffix B | State B | Redeem B |
+|---|---|---|---|---|
+| drawer (`draw_test_seed`) | 1 | 41,940 | 104 | 42,045 |
+| marker (`draw_leg`; M2: 756 B placeholder) | 1 | 610 | 715 | 1,326 |
+| vault (`draw_leg`) | 1 | 537 | 56 | 594 |
+| pool (`absorb_leg` + placeholder `claim`) | 1 | 620 | 607 | 1,228 |
+| controller (`close` + `draw_leg`; M2: 26,321 B) | 1 | 27,266 | 427 | 27,694 |
+
+**M3-b: `draw()` script units per input and masses.** Worst proofs: every shard's leaf at the winning rank is non-empty with every bonus held (h_J = K, n2 = m − 1). Fee paid, one funding input. np = 5 is the spec's shape (the fixture funds three lower tiers). np = 7 is the script maximum (jackpot, second prize and five lower tiers, all tier shares > 0).
+
+| np | K | m | a | Drawer units / sigscript B | Marker | Vault | Controller | Pool (max) | Compute | Transient | Storage | Priority | % c / t / s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5 | 4 | 10 | 0 | 926,955 / 45,178 | 297,436 | 295,973 | 63,734 | — | 96,752 | 304,448 | 29,588 | 152,224 | 19.4 / 30.4 / 5.9 |
+| 5 | 4 | 10 | 5 | 970,981 / 45,178 | 297,436 | 295,973 | 63,734 | 297,259 | 120,287 | 331,388 | 59,173 | 165,694 | 24.1 / 33.1 / 11.8 |
+| 5 | 4 | 50 | 0 | 939,002 / 45,499 | 297,436 | 295,973 | 63,734 | — | 97,173 | 305,732 | 29,588 | 152,866 | 19.4 / 30.6 / 5.9 |
+| 5 | 4 | 50 | 5 | 983,028 / 45,499 | 297,436 | 295,973 | 63,734 | 297,259 | 120,708 | 332,672 | 59,173 | 166,336 | 24.1 / 33.3 / 11.8 |
+| 5 | 16 | 10 | 0 | 1,306,880 / 52,331 | 297,436 | 295,973 | 63,734 | — | 107,705 | 333,060 | 29,588 | 166,530 | 21.5 / 33.3 / 5.9 |
+| 5 | 16 | 10 | 5 | 1,350,906 / 52,331 | 297,436 | 295,973 | 63,734 | 297,259 | 131,240 | 360,000 | 59,173 | 180,000 | 26.2 / 36.0 / 11.8 |
+| 5 | 16 | 50 | 0 | 1,352,534 / 53,611 | 297,436 | 295,973 | 63,734 | — | 109,485 | 338,180 | 29,588 | 169,090 | 21.9 / 33.8 / 5.9 |
+| 5 | 16 | 50 | 5 | 1,396,560 / 53,611 | 297,436 | 295,973 | 63,734 | 297,259 | 132,920 | 365,120 | 59,173 | 182,560 | 26.6 / 36.5 / 11.8 |
+| 7 | 16 | 50 | 5 | 1,426,348 / 53,611 | 297,436 | 295,973 | 63,734 | 297,259 | 134,134 | 365,816 | 59,175 | 182,908 | 26.8 / 36.6 / 11.8 |
+
+The np = 7 rows at K = 4 and the other K = 16 shapes are 0.1–0.3 points above their np = 5 rows (the full table is printed by `m3b_draw_units_and_masses`). Each delegate leg reads the drawer's 42 kB script once (about 296,000 units, mostly the 1-unit-per-pushed-byte charge), so the legs, not the K proofs, dominate compute. Transient mass is about 4 grams per byte (the drawer and controller redeems are pushed once each).
+
+**DP21** (K = 16, m = M_DRAW = 50, a = A_MAX = 5, worst proofs; accepted, value conserved):
+
+| np | Funding inputs | Compute | Transient | Storage | % c / t / s |
+|---|---|---|---|---|---|
+| 5 | 1 | 132,920 | 365,120 | 59,173 | 26.6 / 36.5 / 11.8 |
+| 5 | 8 (F_MAX) | 140,760 | 368,480 | 59,173 | 28.2 / 36.8 / 11.8 |
+| 7 | 1 | 134,134 | 365,816 | 59,175 | 26.8 / 36.6 / 11.8 |
+| 7 | 8 (F_MAX) | 141,974 | 369,176 | 59,175 | 28.4 / 36.9 / 11.8 |
+
+**M3-c: drawer redeem B by the template constants K_MAX and M_DRAW** (state 104 B; each variant compiled from drawer.sil with only those two constants changed):
+
+| K_MAX | M_DRAW 10 | 25 | 50 | 100 |
+|---|---|---|---|---|
+| 4 | 23,928 | 25,161 | 27,211 | 31,311 |
+| 8 | 28,872 | 30,105 | 32,155 | 36,257 |
+| **16** | 38,762 | 39,995 | **42,045 (committed)** | 46,145 |
+
+Each shard of K_MAX adds about 1,236 B (one unrolled leaf and 18 levels). Each 1 of M_DRAW adds about 82 B (the unrolled check 10 loop).
+
+Worst shape at K = 16 (a = 5, np = 7, F_MAX funding inputs) by m with the committed drawer: m = 10: 28.1 / 36.4 / 11.8 %; m = 25: 28.2 / 36.6 / 11.8 %; m = 50: 28.4 / 36.9 / 11.8 % (compute / transient / storage). All are within 90 %, so **m_max stays at M_DRAW = 50** (D49; genesis requires m_max ≤ M_DRAW). This is not the stop case (m_max below 50).
+
+M_DRAW = 100 cannot run as committed: the drawer's 128-byte zero buffer covers only 2m ≤ 128. An estimate from +4,100 B of script and +1,600 B of leaves at 4 grams per byte gives transient ≈ 391,976 (39.2 %). Script units were not estimated.
+
+**M3-d: R re-check for `draw()` storage mass.** Outputs:
+- drawer' R;
+- vault' V' + pend + R ≥ R;
+- controller' O' + A' + R ≥ R;
+- up to 7 new pools, each amount + R > R;
+- these 3 + 7 are covenant outputs with p = 2;
+- the fee T_F ≥ f_min, the marker refund R and a pool refunds R, all with p = 1;
+- the caller output, which is not bounded by the script.
+
+The input relief only lowers the mass. So the supremum is 10·4C/R + (1 + a)·C/R + C/f_min + C/caller. At R = 1.69 KAS, f_min = F_MIN = 1 KAS, caller ≥ 1 KAS (`close::MIN_CALLER_OUTPUT`, used here as a builder policy), a = 5:
+
+| a | Caller output (KAS) | Storage (every covenant output at or near R, V' = 0, T_F = f_min) | % of limit | Supremum |
+|---|---|---|---|---|
+| 0 | 1 | 224,018 | 44.8 | 262,597 |
+| 0 | ≥ 10⁶ | 252,394 | 50.5 | 262,597 |
+| 5 | 1 | 169,847 | 34.0 | 292,182 |
+| 5 | 1,000 | 278,493 | 55.7 | 292,182 |
+| 5 | ≥ 10⁶ | 281,979 | 56.4 | 292,182 |
+
+**Supremum at a = A_MAX: 292,182 (58.4 %), which is within 90 %, so R stays at 1.69 KAS.** `draw()` alone would need R ≥ 1.07 KAS, so `close()` (M2-c) sets R.
+
+The fee term C/T_F depends on f_min, which the genesis builder currently accepts anywhere in [0, 10¹⁰] (A3.1):
+- At R = 1.69 KAS the supremum stays within 90 % only for f_min ≥ 5,958,837 sompi (0.0596 KAS).
+- f_min = 0 with T_F = 0 (no sales and acc = 0) requires a zero-value fee output, which is invalid. That round could never be drawn.
+
+This is an open item in the M3 handoff, not a measurement failure.
+
+**M3-e: priority fee of `draw()` against C_draw = s_D · S** (s_D = 50 bp; fee = 100 sompi per gram of max(compute, transient/2, storage)):
+
+| Shape | Priority mass | Fee for priority (KAS) | Sales S at which C_draw covers it (KAS) |
+|---|---|---|---|
+| K = 4, m = 10, a = 0, np = 5 | 152,224 | 0.1522 | 30.44 |
+| K = 16, m = 50, a = 5, np = 5 | 182,560 | 0.1826 | 36.51 |
+| K = 16, m = 50, a = 5, np = 7, 8 funding inputs | 184,588 | 0.1846 | 36.92 |
+| storage supremum (M3-d) | 292,182 | 0.2922 | 58.44 |
+
+Below about 37 KAS of round sales (58 KAS in the storage worst case), the caller pays part of the fee out of pocket. This is the same liveness note as D19 for `close()`.
+
+**M3-f: K = 16 `close()` re-measured** with the M3 controller (27,694 B, +1,373 B for `draw_leg`) and marker (1,326 B, +570 B). Same shape as M2-a: 1,000 KAS sales per shard, distinct roots.
+
+| K | Controller units | Compute | Transient | Storage | % c / t / s |
+|---|---|---|---|---|---|
+| 4 | 1,029,308 | 102,533 | 311,932 | 118,411 | 20.5 / 31.2 / 23.7 |
+| 16 | 3,372,019 | 293,841 | **864,604** | 402,301 | 58.8 / **86.5** / 80.5 |
+
+Transient mass rose by 7,780 (856,824 → 864,604) and stays within 90 % (D32), with 35,396 grams of headroom. The M2-c storage worst case (449,692, 89.9 %) is unchanged, because close()'s outputs did not change. Not the stop case.
 
 ## Scripts (M0 probes)
 

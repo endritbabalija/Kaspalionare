@@ -478,16 +478,21 @@ mod tests {
     fn genesis_and_ledger() {
         let mut ledger = Ledger::new();
         let spk = crate::buy::funding_spk();
-        let op = ledger.fund(1_000 * KAS, spk, 100);
+        let op = ledger.fund(crate::genesis::GENESIS_FUNDING, spk, 100);
         let entry = ledger.get(&op).unwrap().clone();
         let g = GenesisCase::new(4, vec![(op, entry)]);
         let f = g.build().finish();
         funding_ok(&f, 0);
         let cov = covenant_id(&f);
-        assert!(f.tx.outputs[..6].iter().all(|o| o.covenant.map(|b| b.covenant_id) == Some(cov)));
-        assert!(f.tx.outputs[6].covenant.is_none());
+        // Controller, params, 4 shards, vault, drawer (D50), then change.
+        assert!(f.tx.outputs[..8].iter().all(|o| o.covenant.map(|b| b.covenant_id) == Some(cov)));
+        assert!(f.tx.outputs[8].covenant.is_none());
+        assert_eq!(f.tx.outputs[g.vault_output()].value, g.vault_value());
+        assert_eq!(f.tx.outputs[g.vault_output()].script_public_key, g.build().templates.vault_spk(&g.vault));
+        assert_eq!(f.tx.outputs[g.drawer_output()].value, g.reserve());
+        assert_eq!(f.tx.outputs[g.drawer_output()].script_public_key, g.build().templates.drawer_spk(&g.drawer));
         let outs = ledger.apply(&f.tx, &f.entries, 200).unwrap();
-        assert_eq!(outs.len(), 7);
+        assert_eq!(outs.len(), 9);
         assert_eq!(ledger.get(&outs[2]).unwrap().covenant_id, Some(cov));
         // Spending the funding outpoint again is rejected.
         assert_eq!(ledger.apply(&f.tx, &f.entries, 300), Err(LedgerError::Missing { index: 0, outpoint: op }));

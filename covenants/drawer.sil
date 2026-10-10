@@ -1,0 +1,829 @@
+pragma silverscript ^0.1.0;
+
+// Drawer singleton (role 0x0A), spec M3 A3.1 and A4 (D37, D38, D42, D43, D49). Leader of
+// draw(). Value: R, posted at genesis and never refunded (as D30).
+//
+// TEST-ONLY: the entry takes an explicit test seed (D42). This source is compiled only by
+// `lottery::draw`, which exists only with the `test-seed` feature (D43); a mainnet build has
+// no drawer.
+//
+// Route of trust (D38): CONTROLLER_TPL is a constructor constant; pool_tpl and vault_tpl
+// are state (instance constants set at genesis, copied unchanged); the marker template
+// comes from the controller's route table.
+//
+// draw_test_seed() implements spec M3 A4 checks 1-25 and the A5 witness checks, in spec
+// order. Each check starts at a "// ==== check N" line, in order (the attribution
+// instrument in tests/common/m2.rs truncates the entry at these lines and closes the open
+// braces, so a marker must not sit inside an if/for body). `// mut:<ID>` tags mark the
+// requires the mutation tests remove one at a time.
+contract Drawer(
+    byte[32] controllerTemplateHash,
+    int init_round,
+    byte[32] init_pool_tpl,
+    byte[32] init_vault_tpl,
+    int init_f_min,
+    int init_claim_window,
+    int init_draw_window
+) {
+    // Spec M3 A2.
+    int constant K_MAX = 16;
+    int constant M_DRAW = 50;
+    int constant A_MAX = 5;
+    int constant F_MAX = 8;
+    int constant N = 142506;
+    int constant DEPTH = 18;
+    int constant TOTAL_MAX = 4611686018427387904;
+    int constant DAA_MAX = 500000000000;
+    int constant BP = 10000;
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+    // Sibling bytes per proof (32 x DEPTH) and the largest count (spec M1 3, M3 check 10).
+    int constant PATH = 576;
+    int constant COUNT_MAX = 32767;
+    // M2 A3 ranges re-checked on the controller and marker fields the drawer uses.
+    int constant S_F_CAP = 1000;
+    int constant S_R_CAP = 1500;
+    int constant PRICE_MAX = 100000000000;
+    int constant RESERVE_MAX = 10000000000;
+    // Upper bound of f_min (spec M3 A3.1 ranges): 10^10.
+    int constant F_MIN_MAX = 10000000000;
+    // A6 (user decision 2026-10-10): G2 <= TOTAL_MAX / 254 before n2 x G2, only when a
+    // second-prize pool is created. 2^62 / 254 = 18,156,244,167,036,960.
+    int constant G2_MAX = 18156244167036960;
+
+    byte role = 0x0a;
+    int round = init_round;
+    byte[32] pool_tpl = init_pool_tpl;
+    byte[32] vault_tpl = init_vault_tpl;
+    int f_min = init_f_min;
+    int claim_window = init_claim_window;
+    int draw_window = init_draw_window;
+
+    // Controller state layout (spec M2 A3.1).
+    struct ControllerState {
+        byte role;
+        int round;
+        int k;
+        int m;
+        int price;
+        int d;
+        int deadline;
+        int s_f;
+        int s_r;
+        byte fee_class;
+        byte[33] fee_key;
+        int jackpot;
+        int j_boost;
+        int g2;
+        int liability;
+        int v_rec;
+        int acc;
+        byte drawn;
+        byte[32] shard_tpl;
+        byte[32] marker_tpl;
+        byte[32] params_tpl;
+        int reserve;
+        int s_c;
+        int s_d;
+        int st1;
+        int st2;
+        int st3;
+        int st4;
+        int st5;
+        int e;
+        int j;
+        int g;
+        int margin;
+        int m_min;
+        int m_max;
+        int cap;
+        int round_len;
+        int d_min;
+        int seed_offset;
+    }
+
+    // Marker state layout (spec M2 A3.3, unchanged in M3).
+    struct MarkerState {
+        byte role;
+        int round;
+        int k;
+        byte[512] roots;
+        int sales;
+        int ref_paid;
+        int m;
+        int jackpot;
+        int j_boost;
+        int g2;
+        int s_f;
+        int s_r;
+        int s_c;
+        int s_d;
+        int st1;
+        int st2;
+        int st3;
+        int st4;
+        int st5;
+        int seed_ref;
+        byte funder_class;
+        byte[33] funder_key;
+    }
+
+    // Vault state layout (spec M3 A3.2).
+    struct VaultState {
+        byte role;
+        int round;
+        int total_assets;
+        int total_shares;
+        int pend_dep;
+        int pend_wsh;
+        int liability;
+    }
+
+    // Pool state layout (spec M3 A3.3).
+    struct PoolState {
+        byte role;
+        int round;
+        byte tier;
+        int slice;
+        byte[6] win;
+        int m;
+        int k;
+        byte[512] roots;
+        int deadline;
+        byte funder_class;
+        byte[33] funder_key;
+    }
+
+    // floor(x * s / 10^4) without a wide intermediate (spec M2 A6). Callers guarantee
+    // 0 <= x <= TOTAL_MAX and 0 <= s <= 10^4, so every step fits in 64 bits.
+    function muldiv(int x, int s): int {
+        return x / BP * s + (x % BP) * s / BP;
+    }
+
+    // pass(x, y) of spec M3 A5 (game::JackpotRule::pass), for x, y >= 0, 0 <= eL, wL,
+    // cv <= TOTAL_MAX, 0 <= g <= 10^4, d = m' - 1 >= 1. x + y is formed only after
+    // y <= wL - x, so x + y <= wL; every operand stays in [0, TOTAL_MAX].
+    function pass(int x, int y, int eL, int wL, int cv, int g, int d): bool {
+        bool ok = false;
+        if (x <= eL) {
+            if (x <= cv) {
+                if (y <= wL - x) {
+                    int gg = muldiv(x + y, g);
+                    ok = gg <= (eL - x) / d && gg <= (wL - x - y) / d && gg <= (cv - x) / d;
+                }
+            }
+        }
+        return ok;
+    }
+
+    // Version-0 scriptPubKey bytes (2-byte version, then the script) of a D11 payout class
+    // and 33-byte key, as state::Payout::spk (rusty-kaspa v2.1.0
+    // crypto/txscript/src/standard.rs:19-37): 0 P2PK Schnorr, 1 P2PK ECDSA, 2 P2SH. The
+    // caller has checked c <= 2.
+    function payoutSpk(int c, byte[33] key): byte[] {
+        byte[] s = byte[](0x0000aa20) + key.slice(0, 32) + byte[](0x87);
+        if (c == 0) {
+            s = byte[](0x000020) + key.slice(0, 32) + byte[](0xac);
+        }
+        if (c == 1) {
+            s = byte[](0x000021) + key + byte[](0xab);
+        }
+        return s;
+    }
+
+    // Spec M3 A4. Inputs: 0 drawer r, 1 marker r, 2 vault (r - 1), 3 controller r + 1,
+    // 4..3+a absorbed pools, then 1..F_MAX caller funding (zero ID). Outputs: 0 drawer',
+    // 1 vault', 2 controller', 3.. new pools in tier order, fee (if paid), marker refund,
+    // pool refunds, caller output (last, zero ID).
+    entry draw_test_seed(
+        byte[32] test_only_seed,
+        byte[5] win5,
+        byte[] leaves,
+        byte[] siblings,
+        int x1,
+        int y,
+        int x2,
+        int ctrl_pl,
+        int ctrl_sl,
+        int marker_pl,
+        int marker_sl,
+        int vault_pl,
+        int vault_sl,
+        int pool_pl,
+        int pool_sl,
+        byte[] pool_prefix,
+        byte[] pool_suffix,
+        byte funder_class,
+        byte[33] funder_key,
+        // The maximum creation DAA score over all inputs (check 19).
+        int own_daa
+    ) {
+        // ==== check 1: leader at input 0; own state ranges (A3.1); argument ranges
+        require(this.activeInputIndex == 0);
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 10);
+        require(round >= 1);
+        require(round < TOTAL_MAX);
+        require(f_min >= 0);
+        require(f_min <= F_MIN_MAX);
+        require(claim_window >= 0);
+        require(claim_window < DAA_MAX);
+        require(draw_window >= 0);
+        require(draw_window < DAA_MAX);
+        require(ctrl_pl >= 0);
+        require(ctrl_pl <= SCRIPT_MAX);
+        require(ctrl_sl >= 0);
+        require(ctrl_sl <= SCRIPT_MAX);
+        require(marker_pl >= 0);
+        require(marker_pl <= SCRIPT_MAX);
+        require(marker_sl >= 0);
+        require(marker_sl <= SCRIPT_MAX);
+        require(vault_pl >= 0);
+        require(vault_pl <= SCRIPT_MAX);
+        require(vault_sl >= 0);
+        require(vault_sl <= SCRIPT_MAX);
+        require(pool_pl >= 0);
+        require(pool_pl <= SCRIPT_MAX);
+        require(pool_sl >= 0);
+        require(pool_sl <= SCRIPT_MAX);
+
+        // ==== check 2: 4 + a covenant inputs (0 <= a <= A_MAX) at 0..3+a; then
+        // 1..F_MAX funding inputs with the zero ID
+        int a = OpCovInputCount(cov) - 4;
+        require(a >= 0); // mut:D2_a
+        require(a <= A_MAX); // mut:D2_a
+        {
+            int nFund = tx.inputs.length - 4 - a;
+            require(nFund >= 1); // mut:D2_fund
+            require(nFund <= F_MAX); // mut:D2_fund
+            for(ci, 1, 4 + a, 3 + A_MAX) {
+                require(OpInputCovenantId(ci) == cov); // mut:D2_cov
+            }
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 4 + a, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:D2_zero
+            }
+        }
+
+        // ==== check 3: controller r + 1 under CONTROLLER_TPL, drawn = 0; M2 A3 ranges of
+        // the fields used
+        ControllerState ctrl = readInputStateWithTemplate(3, ctrl_pl, ctrl_sl, controllerTemplateHash);
+        require(unsigned(ctrl.role) == 1); // mut:D3_role
+        require(ctrl.round == round + 1); // mut:D3_round
+        require(unsigned(ctrl.drawn) == 0); // mut:D3_drawn
+        require(ctrl.k >= 1);
+        require(ctrl.k <= K_MAX);
+        require(ctrl.m >= 2);
+        require(ctrl.m <= M_DRAW); // mut:D3_mdraw
+        require(ctrl.price >= 1);
+        require(ctrl.price <= PRICE_MAX);
+        require(ctrl.s_f >= 0);
+        require(ctrl.s_f <= S_F_CAP);
+        require(ctrl.s_r >= 0);
+        require(ctrl.s_r <= S_R_CAP);
+        require(ctrl.s_c >= 0);
+        require(ctrl.s_c <= BP);
+        require(ctrl.s_d >= 0);
+        require(ctrl.s_d <= BP);
+        require(ctrl.st1 >= 0);
+        require(ctrl.st1 <= BP);
+        require(ctrl.st2 >= 0);
+        require(ctrl.st2 <= BP);
+        require(ctrl.st3 >= 0);
+        require(ctrl.st3 <= BP);
+        require(ctrl.st4 >= 0);
+        require(ctrl.st4 <= BP);
+        require(ctrl.st5 >= 0);
+        require(ctrl.st5 <= BP);
+        require(ctrl.e >= 0);
+        require(ctrl.e <= 5000);
+        require(ctrl.j >= 0);
+        require(ctrl.j <= 5000);
+        require(ctrl.g >= 0);
+        require(ctrl.g <= 1000);
+        require(ctrl.margin >= BP);
+        require(ctrl.margin <= 2 * BP);
+        require(ctrl.cap >= 0);
+        require(ctrl.cap <= BP);
+        require(ctrl.acc >= 0);
+        require(ctrl.acc <= TOTAL_MAX);
+        require(ctrl.reserve >= 1);
+        require(ctrl.reserve <= RESERVE_MAX);
+
+        // ==== check 4: marker r under the controller's marker template; ranges; value
+        MarkerState mk = readInputStateWithTemplate(1, marker_pl, marker_sl, ctrl.marker_tpl);
+        require(unsigned(mk.role) == 3); // mut:D4_role
+        require(mk.round == round); // mut:D4_round
+        require(mk.k == ctrl.k); // mut:D4_k
+        require(mk.m >= 2);
+        require(mk.m <= M_DRAW); // mut:D4_mdraw
+        require(mk.s_f >= 0);
+        require(mk.s_f <= S_F_CAP);
+        require(mk.s_r >= 0);
+        require(mk.s_r <= S_R_CAP);
+        require(mk.s_c >= 0);
+        require(mk.s_c <= BP);
+        require(mk.s_d >= 0);
+        require(mk.s_d <= BP);
+        require(mk.st1 >= 0);
+        require(mk.st1 <= BP);
+        require(mk.st2 >= 0);
+        require(mk.st2 <= BP);
+        require(mk.st3 >= 0);
+        require(mk.st3 <= BP);
+        require(mk.st4 >= 0);
+        require(mk.st4 <= BP);
+        require(mk.st5 >= 0);
+        require(mk.st5 <= BP);
+        require(mk.ref_paid >= 0);
+        require(mk.ref_paid <= mk.sales);
+        require(mk.sales <= TOTAL_MAX);
+        require(mk.j_boost >= 0);
+        require(mk.j_boost <= mk.jackpot);
+        require(mk.jackpot <= TOTAL_MAX);
+        require(mk.g2 >= 0);
+        require(mk.g2 <= TOTAL_MAX);
+        require(mk.seed_ref >= 0);
+        require(mk.seed_ref < DAA_MAX);
+        // Braced blocks drop their locals (silverscript-lang compile/statement.rs:742-757),
+        // including the parameters of inlined functions: the drawer stays under the 244 live
+        // stack bindings the compiler enforces (the consensus stack limit).
+        {
+            int cClose = muldiv(mk.sales, mk.s_c);
+            // S - P_R - C_close >= 0 is required (not assumed from close()), and the sum is
+            // guarded (A6) before R is added.
+            int mkHeld = mk.sales - mk.ref_paid - cClose;
+            require(mkHeld >= 0);
+            require(mk.j_boost <= TOTAL_MAX - mkHeld);
+            require(tx.inputs[1].value == mkHeld + mk.j_boost + ctrl.reserve); // mut:D4_value
+        }
+
+        // ==== check 5: vault (r - 1) under vault_tpl; A3.2 ranges; value
+        VaultState vt = readInputStateWithTemplate(2, vault_pl, vault_sl, vault_tpl);
+        require(unsigned(vt.role) == 6); // mut:D5_role
+        require(vt.round == round - 1); // mut:D5_round
+        require(vt.total_assets >= 0);
+        require(vt.total_assets <= TOTAL_MAX);
+        require(vt.total_shares >= 0);
+        require(vt.total_shares <= TOTAL_MAX);
+        require(vt.pend_dep >= 0);
+        require(vt.pend_dep <= TOTAL_MAX);
+        require(vt.pend_wsh >= 0);
+        require(vt.pend_wsh <= TOTAL_MAX);
+        require(vt.liability >= 0);
+        require(vt.liability <= TOTAL_MAX);
+        require(vt.pend_dep <= TOTAL_MAX - vt.total_assets);
+        require(tx.inputs[2].value == vt.total_assets + vt.pend_dep + ctrl.reserve); // mut:D5_value
+
+        // ==== check 6: drawer value R; controller value O + A + R with O >= 0
+        require(tx.inputs[0].value == ctrl.reserve); // mut:D6_drawer
+        int pot = tx.inputs[3].value - ctrl.acc - ctrl.reserve;
+        require(pot >= 0); // mut:D6_pot
+
+        // ==== check 7: lower-bound lock at the seed reference (D51, R3)
+        require(tx.daa >= mk.seed_ref); // mut:D7
+
+        int bonus = 0;
+        int hJ = 0;
+        int n2 = 0;
+        // Checks 8-10 share one block (rank and the OR of the count strings are dropped at
+        // its end); the attribution tool closes open blocks when it truncates.
+        {
+        // ==== check 8: TEST-ONLY seed (D42): h, rank, bonus; win5 canonical with that rank
+        int rank = 0;
+        {
+        // h = blake2b("KLOT/test-seed" || cov || round (8 B LE) || test_only_seed);
+        // rank = u56(h[0..7]) mod N; bonus = u56(h[7..14]) mod m + 1 (game::seed_numbers).
+        byte[32] h = blake2b(byte[](0x4b4c4f542f746573742d73656564) + cov + (round as byte[8]) + test_only_seed);
+        rank = OpBin2Num(h.slice(0, 7) + byte[](0x00)) % N;
+        bonus = OpBin2Num(h.slice(7, 14) + byte[](0x00)) % mk.m + 1;
+        int n1 = OpBin2Num(win5.slice(0, 1) + byte[](0x00));
+        int n2v = OpBin2Num(win5.slice(1, 2) + byte[](0x00));
+        int n3 = OpBin2Num(win5.slice(2, 3) + byte[](0x00));
+        int n4 = OpBin2Num(win5.slice(3, 4) + byte[](0x00));
+        int n5 = OpBin2Num(win5.slice(4, 5) + byte[](0x00));
+        require(n1 >= 1); // mut:D8_canon
+        require(n1 < n2v); // mut:D8_canon
+        require(n2v < n3); // mut:D8_canon
+        require(n3 < n4); // mut:D8_canon
+        require(n4 < n5); // mut:D8_canon
+        require(n5 <= 30); // mut:D8_canon
+        int y2 = n2v - 1;
+        int y3 = n3 - 1;
+        int y4 = n4 - 1;
+        int y5 = n5 - 1;
+        int winRank = (n1 - 1) + y2 * (y2 - 1) / 2 + y3 * (y3 - 1) * (y3 - 2) / 6
+            + y4 * (y4 - 1) * (y4 - 2) * (y4 - 3) / 24
+            + y5 * (y5 - 1) * (y5 - 2) * (y5 - 3) * (y5 - 4) / 120;
+        require(winRank == rank); // mut:D8_rank
+        }
+
+        // ==== check 9: K count leaves at the winning rank, each proven against its root
+        require(leaves.length == 2 * mk.m * ctrl.k); // mut:D9_len
+        require(siblings.length == PATH * ctrl.k); // mut:D9_len
+        // Check 10 accumulators: the bitwise OR of the K count strings (each count's sign
+        // bit and nonzero-ness per bonus value) and the exact jackpot count sum h_J. The
+        // OR starts at shard 0's string (k >= 1; OR is idempotent).
+        byte[] orAll = leaves.slice(0, 2 * mk.m);
+        {
+        int lw = 2 * mk.m;
+        byte[32] z0 = blake2b(byte[](0x02));
+        // 128 zero bytes (OpNum2Bin is limited to 8 bytes): covers 2 x M_DRAW.
+        byte[] zeros = OpNum2Bin(0, 8);
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        byte[] zeroCounts = zeros.slice(0, lw);
+        byte[3] rk = rank as byte[3];
+        int so = 2 * (bonus - 1);
+        for(i, 0, ctrl.k, K_MAX) {
+            int lo = lw * i;
+            byte[] counts = leaves.slice(lo, lo + lw);
+            byte[32] node = z0;
+            if (counts != zeroCounts) {
+                node = blake2b(byte[](0x00) + rk + counts);
+            }
+            int bits = rank;
+            byte[] path = siblings.slice(PATH * i, PATH * i + PATH);
+            for(l, 0, DEPTH, DEPTH) {
+                byte[] sib = path.slice(32 * l, 32 * l + 32);
+                if (bits % 2 == 0) {
+                    node = blake2b(byte[](0x01) + node + sib);
+                } else {
+                    node = blake2b(byte[](0x01) + sib + node);
+                }
+                bits = bits / 2;
+            }
+            require(node == byte[32](mk.roots.slice(32 * i, 32 * i + 32))); // mut:D9_root
+            orAll = orAll | counts;
+            // Unsigned 16-bit value (bytes || 0x00); <= COUNT_MAX by the check 10 loop.
+            hJ = hJ + OpBin2Num(counts.slice(so, so + 2) + byte[](0x00));
+        }
+        }
+
+        // ==== check 10: counts in [0, 32,767]; h_J (summed above, exact); n2
+        // A count is above 32,767 (read unsigned) iff its sign bit is set, iff the OR has
+        // that bit set at its slot; the OR slot is nonzero iff some shard's count is >= 1.
+        for(b, 0, mk.m, M_DRAW) {
+            int v = OpBin2Num(orAll.slice(2 * b, 2 * b + 2) + byte[](0x00));
+            require(v <= COUNT_MAX); // mut:D10_range
+            if (b + 1 != bonus) {
+                if (v > 0) {
+                    n2 = n2 + 1; // mut:D10_n2
+                }
+            }
+        }
+        }
+
+        // ==== check 11: round amounts (design 5.1) from the marker's shares
+        int fAmt = 0;
+        int hAmt = 0;
+        int bR = 0;
+        // B_1..B_5 in the tier slot order (4+b, 4, 3+b, 3, 2+b).
+        int[] bud = int[]{0, 0, 0, 0, 0};
+        {
+            fAmt = muldiv(mk.sales, mk.s_f);
+            bud = int[]{muldiv(mk.sales, mk.st1), muldiv(mk.sales, mk.st2), muldiv(mk.sales, mk.st3), muldiv(mk.sales, mk.st4), muldiv(mk.sales, mk.st5)};
+            int cClose = muldiv(mk.sales, mk.s_c);
+            int sH = BP - mk.s_f - mk.s_r - mk.s_c - mk.s_d - mk.st1 - mk.st2 - mk.st3 - mk.st4 - mk.st5;
+            require(sH >= 0);
+            hAmt = muldiv(mk.sales, sH);
+            int cDraw = muldiv(mk.sales, mk.s_d);
+            bR = mk.sales - mk.ref_paid - fAmt - cClose - cDraw - bud[0] - bud[1] - bud[2] - bud[3] - bud[4] - hAmt;
+            require(bR >= 0);
+        }
+
+        // ==== check 12: which pools exist (D45)
+        bool jp = hJ >= 1 && mk.jackpot > 0;
+        bool sp = n2 >= 1 && mk.g2 > 0;
+        // W_t (D46, design 4.1) at the marker's m: <= 3,000 x 49 (A6). slice_t = B_t / W_t,
+        // lp_t = [slice_t >= 1].
+        int[] wt = int[]{125, 125 * (mk.m - 1), 3000, 3000 * (mk.m - 1), 23000};
+        // nCov = 3 + np, np = jp + sp + sum lp_t.
+        int nCov = 3 + (jp as int) + (sp as int);
+        for(t, 0, 5, 5) {
+            if (bud[t] / wt[t] >= 1) {
+                nCov = nCov + 1;
+            }
+        }
+
+        // ==== check 13: covenant outputs 0..2+np, all authorized by input 0 (R2)
+        require(OpAuthOutputCount(0) == nCov); // mut:D13
+        for(ai, 0, nCov, 10) {
+            require(OpAuthOutputIdx(0, ai) == ai); // mut:D13
+        }
+        require(OpCovOutputCount(cov) == nCov); // mut:D13
+
+        // ==== check 14: vault settlement (design 5.4): V' = V + H - J_house [jp] - n2 G2 [sp]
+        require(hAmt <= TOTAL_MAX - vt.total_assets);
+        int vP = vt.total_assets + hAmt;
+        if (jp) {
+            // J_house = J - J_boost >= 0 (check 4).
+            vP = vP - (mk.jackpot - mk.j_boost); // mut:D14_jp
+        }
+        if (sp) {
+            require(mk.g2 <= G2_MAX); // mut:D14_g2guard
+            vP = vP - mk.g2 * n2; // mut:D14_sp
+        }
+        require(vP >= 0); // mut:D14_nonneg
+
+        // ==== check 15: boost pot (design 5.5):
+        // O' = O + b_r + J_boost [not jp] + sum B_t [not lp_t] + sum Q, every addition guarded (A6)
+        require(bR <= TOTAL_MAX - pot);
+        int oP = pot + bR;
+        if (!jp) {
+            require(mk.j_boost <= TOTAL_MAX - oP);
+            oP = oP + mk.j_boost; // mut:D15_jboost
+        }
+        for(tb, 0, 5, 5) {
+            if (bud[tb] / wt[tb] < 1) {
+                require(bud[tb] <= TOTAL_MAX - oP);
+                oP = oP + bud[tb]; // mut:D15_lower
+            }
+        }
+        for(qi, 0, a, A_MAX) {
+            // Q_i = value - R >= 0 (A3 ranges).
+            int q = tx.inputs[4 + qi].value - ctrl.reserve;
+            require(q >= 0);
+            require(q <= TOTAL_MAX - oP);
+            oP = oP + q; // mut:D15_q
+        }
+
+        // ==== check 16: fee (D41): T_F = A + F; paid iff T_F >= f_min; A' = paid ? 0 : T_F
+        require(fAmt <= TOTAL_MAX - ctrl.acc);
+        int tF = ctrl.acc + fAmt;
+        bool paid = tF >= f_min; // mut:D16
+        int aNext = tF;
+        if (paid) {
+            aNext = 0;
+        }
+
+        // ==== check 17: fix J(r+1) by witness (A5, D47, D48) with the round r+1 rules
+        int g2Next = 0;
+        int lNext = 0;
+        {
+            // s_H' and w' from the controller's active shares (M2 checks 17/18).
+            int w2 = BP - ctrl.st1 - ctrl.st2 - ctrl.st3 - ctrl.st4 - ctrl.st5 - ctrl.s_r - ctrl.s_c - ctrl.s_d;
+            int sH2 = w2 - ctrl.s_f;
+            require(sH2 >= 0);
+            // E = a N m', W = q N m' (<= 3.6 x 10^18, M2 A6); Cv = muldiv(V', cap).
+            int nm = N * ctrl.m;
+            int eL = muldiv(ctrl.price * sH2, BP - ctrl.e) / BP * nm;
+            int wL = ctrl.price * w2 / ctrl.margin * nm;
+            int cv = muldiv(vP, ctrl.cap);
+            int dm = ctrl.m - 1;
+            require(x1 >= 0);
+            require(x1 <= TOTAL_MAX);
+            require(y >= 0);
+            require(x2 <= TOTAL_MAX);
+            // A5 witness check 1: x1 = the base x_b if it passes, else the largest passing
+            // value below it.
+            int xb = muldiv(vP, ctrl.j);
+            if (pass(xb, 0, eL, wL, cv, ctrl.g, dm)) {
+                require(x1 == xb); // mut:D17_x1_base
+            } else {
+                require(x1 < xb); // mut:D17_x1_below
+                require(pass(x1, 0, eL, wL, cv, ctrl.g, dm)); // mut:D17_x1_pass
+                require(!pass(x1 + 1, 0, eL, wL, cv, ctrl.g, dm)); // mut:D17_x1_max
+            }
+            // A5 witness check 2: y = O' if it passes, else the largest passing boost.
+            require(y <= oP); // mut:D17_y_pot
+            require(pass(x1, y, eL, wL, cv, ctrl.g, dm)); // mut:D17_y_pass
+            if (y != oP) {
+                require(!pass(x1, y + 1, eL, wL, cv, ctrl.g, dm)); // mut:D17_y_max
+            }
+            // A5 witness check 3: x2 = the largest house part passing with y (top-up).
+            require(x2 >= x1); // mut:D17_x2_ge
+            require(pass(x2, y, eL, wL, cv, ctrl.g, dm)); // mut:D17_x2_pass
+            require(!pass(x2 + 1, y, eL, wL, cv, ctrl.g, dm)); // mut:D17_x2_max
+            // pass(x2, y) gives x2 + y <= W and x2 + G2' (m' - 1) <= Cv: no overflow.
+            g2Next = muldiv(x2 + y, ctrl.g);
+            lNext = x2 + g2Next * dm;
+        }
+
+        // ==== check 18: absorbed pools: genuine, of an earlier round, past their deadline
+        // The refund scripts (check 21) are kept as one fixed 32-byte hash per pool.
+        byte[] refundHashes = leaves.slice(0, 0);
+        for(pi, 0, a, A_MAX) {
+            PoolState pl = readInputStateWithTemplate(4 + pi, pool_pl, pool_sl, pool_tpl);
+            require(unsigned(pl.role) == 4); // mut:D18_role
+            require(pl.round < round); // mut:D18_round
+            require(tx.daa >= pl.deadline); // mut:D18_deadline
+            int pc = unsigned(pl.funder_class);
+            require(pc <= 2); // mut:D18_class
+            refundHashes = refundHashes + blake2b(payoutSpk(pc, pl.funder_key));
+        }
+
+        // ==== check 19: claim deadline (D39): max(own, seed_ref + draw_window) + claim_window
+        // own is the argument own_daa, which must equal the maximum creation DAA score over
+        // all inputs (user decision 2026-10-10, spec correction of A4 check 19 and A9: the
+        // round result is then derivable from the transaction bytes alone).
+        int dClaim = 0;
+        {
+            int own = 0;
+            for(di, 0, tx.inputs.length, 4 + A_MAX + F_MAX) {
+                int dd = OpTxInputDaaScore(di);
+                if (dd > own) {
+                    own = dd;
+                }
+            }
+            require(own < DAA_MAX);
+            require(own_daa == own); // mut:D19_own
+            int base = own_daa;
+            int sw = mk.seed_ref + draw_window;
+            require(sw < DAA_MAX);
+            if (sw > base) {
+                base = sw; // mut:D19_max
+            }
+            dClaim = base + claim_window;
+            require(dClaim < DAA_MAX);
+        }
+
+        // Checks 20-21 share one block (the output layout indices are dropped at its end).
+        {
+        // ==== check 20: output count and values (R7)
+        int mRefund = nCov + (paid as int);
+        int nOut = mRefund + 1 + a + 1;
+        require(tx.outputs.length == nOut); // mut:D20_count
+        require(tx.outputs[0].value == ctrl.reserve); // mut:D20_drawer
+        require(vP <= TOTAL_MAX - vt.pend_dep);
+        require(tx.outputs[1].value == vP + vt.pend_dep + ctrl.reserve); // mut:D20_vault
+        require(aNext <= TOTAL_MAX - oP);
+        require(tx.outputs[2].value == oP + aNext + ctrl.reserve); // mut:D20_ctrl
+        // Pool amounts are <= TOTAL_MAX (J, n2 x G2 <= 49 x G2_MAX, B_t <= S) and R <=
+        // 10^10, so amount + R cannot overflow.
+        {
+        int vo = 3;
+        if (jp) {
+            require(tx.outputs[vo].value == mk.jackpot + ctrl.reserve); // mut:D20_pool
+            vo = vo + 1;
+        }
+        if (sp) {
+            require(tx.outputs[vo].value == mk.g2 * n2 + ctrl.reserve); // mut:D20_pool
+            vo = vo + 1;
+        }
+        for(tv, 0, 5, 5) {
+            if (bud[tv] / wt[tv] >= 1) {
+                require(tx.outputs[vo].value == bud[tv] + ctrl.reserve); // mut:D20_pool
+                vo = vo + 1;
+            }
+        }
+        }
+        if (paid) {
+            require(tx.outputs[nCov].value == tF); // mut:D20_fee
+        }
+        require(tx.outputs[mRefund].value == ctrl.reserve); // mut:D20_refund
+        for(rv, 0, a, A_MAX) {
+            require(tx.outputs[mRefund + 1 + rv].value == ctrl.reserve); // mut:D20_refund
+        }
+
+        // ==== check 21: plain outputs: zero ID; fee and refund scripts rebuilt (D11)
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, nCov, nOut, 2 + A_MAX + 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:D21_zero
+            }
+        }
+        if (paid) {
+            int fcl = unsigned(ctrl.fee_class);
+            require(fcl <= 2);
+            require(tx.outputs[nCov].scriptPubKey == payoutSpk(fcl, ctrl.fee_key)); // mut:D21_fee
+        }
+        {
+            int mcl = unsigned(mk.funder_class);
+            require(mcl <= 2);
+            require(tx.outputs[mRefund].scriptPubKey == payoutSpk(mcl, mk.funder_key)); // mut:D21_mrefund
+        }
+        for(rs, 0, a, A_MAX) {
+            require(blake2b(tx.outputs[mRefund + 1 + rs].scriptPubKey) == byte[32](refundHashes.slice(32 * rs, 32 * rs + 32))); // mut:D21_prefund
+        }
+        }
+
+        // ==== check 22: drawer' (round + 1, all else unchanged)
+        validateOutputState(0, State {
+            role: role,
+            round: round + 1,
+            pool_tpl: pool_tpl,
+            vault_tpl: vault_tpl,
+            f_min: f_min,
+            claim_window: claim_window,
+            draw_window: draw_window
+        });
+
+        // ==== check 23: vault' (round r, V', L'; shares and pending unchanged)
+        validateOutputStateWithInputTemplate(1, VaultState {
+            role: vt.role,
+            round: round,
+            total_assets: vP,
+            total_shares: vt.total_shares,
+            pend_dep: vt.pend_dep,
+            pend_wsh: vt.pend_wsh,
+            liability: lNext
+        }, 2, vault_pl, vault_sl, vault_tpl);
+
+        // ==== check 24: controller' (J', J_boost', G2', L', V_rec = V', A', drawn = 1)
+        validateOutputStateWithInputTemplate(2, ControllerState {
+            role: ctrl.role,
+            round: ctrl.round,
+            k: ctrl.k,
+            m: ctrl.m,
+            price: ctrl.price,
+            d: ctrl.d,
+            deadline: ctrl.deadline,
+            s_f: ctrl.s_f,
+            s_r: ctrl.s_r,
+            fee_class: ctrl.fee_class,
+            fee_key: ctrl.fee_key,
+            jackpot: x2 + y,
+            j_boost: y,
+            g2: g2Next,
+            liability: lNext,
+            v_rec: vP,
+            acc: aNext,
+            drawn: 0x01,
+            shard_tpl: ctrl.shard_tpl,
+            marker_tpl: ctrl.marker_tpl,
+            params_tpl: ctrl.params_tpl,
+            reserve: ctrl.reserve,
+            s_c: ctrl.s_c,
+            s_d: ctrl.s_d,
+            st1: ctrl.st1,
+            st2: ctrl.st2,
+            st3: ctrl.st3,
+            st4: ctrl.st4,
+            st5: ctrl.st5,
+            e: ctrl.e,
+            j: ctrl.j,
+            g: ctrl.g,
+            margin: ctrl.margin,
+            m_min: ctrl.m_min,
+            m_max: ctrl.m_max,
+            cap: ctrl.cap,
+            round_len: ctrl.round_len,
+            d_min: ctrl.d_min,
+            seed_offset: ctrl.seed_offset
+        }, 3, ctrl_pl, ctrl_sl, controllerTemplateHash);
+
+        // ==== check 25: the new pools in tier order under pool_tpl; reserve funder (D11)
+        int fc = unsigned(funder_class);
+        require(fc <= 2); // mut:D25_class
+        if (fc != 1) {
+            require(funder_key.slice(32, 33) == byte[](0x00)); // mut:D25_pad
+        }
+        byte[6] win = byte[6](win5 + (bonus as byte[1]));
+        int po = 3;
+        if (jp) {
+            validateOutputStateWithTemplate(po, PoolState {
+                role: 0x04,
+                round: round,
+                tier: 0x00,
+                slice: mk.jackpot,
+                win: win,
+                m: mk.m,
+                k: ctrl.k,
+                roots: mk.roots,
+                deadline: dClaim,
+                funder_class: funder_class,
+                funder_key: funder_key
+            }, pool_prefix, pool_suffix, pool_tpl);
+            po = po + 1;
+        }
+        if (sp) {
+            validateOutputStateWithTemplate(po, PoolState {
+                role: 0x04,
+                round: round,
+                tier: 0x01,
+                slice: mk.g2,
+                win: win,
+                m: mk.m,
+                k: ctrl.k,
+                roots: mk.roots,
+                deadline: dClaim,
+                funder_class: funder_class,
+                funder_key: funder_key
+            }, pool_prefix, pool_suffix, pool_tpl);
+            po = po + 1;
+        }
+        for(tp, 0, 5, 5) {
+            int slice = bud[tp] / wt[tp];
+            if (slice >= 1) {
+                validateOutputStateWithTemplate(po, PoolState {
+                    role: 0x04,
+                    round: round,
+                    tier: (tp + 2) as byte,
+                    slice: slice,
+                    win: win,
+                    m: mk.m,
+                    k: ctrl.k,
+                    roots: mk.roots,
+                    deadline: dClaim,
+                    funder_class: funder_class,
+                    funder_key: funder_key
+                }, pool_prefix, pool_suffix, pool_tpl);
+                po = po + 1;
+            }
+        }
+    }
+}

@@ -213,7 +213,8 @@ fn cp4_set_params_then_close() {
 
 // ---------------------------------------------------------------- CP5
 
-/// CP5: two consecutive rounds, with a fixture draw (D33) between them.
+/// CP5: two consecutive rounds, with a real draw() of round 1 between them (M3 Stage 3
+/// replaced the D33 fixture draw).
 #[test]
 fn cp5_two_consecutive_rounds() {
     let mut ch = Chain::genesis(4);
@@ -222,9 +223,9 @@ fn cp5_two_consecutive_rounds() {
     let (c1, ops) = ch.close_case(900_000);
     let f1 = ch.close(&c1, ops, TEST_DEADLINE as u64 + 10);
     check_close(&c1, &f1);
-    // Fixture draw() of round 1 (D33): the round 2 controller becomes drawn with fixture J
-    // values (the boost pot is 0 here, so J_boost = 0).
-    ch.fabricate_draw(900_000 * KAS as i64, 0, 9_000 * KAS as i64);
+    // draw() of round 1: the round 2 controller becomes drawn with J(2), J_boost(2), G2(2).
+    ch.draw_round([5u8; 32]);
+    assert_eq!(ch.controller.1.drawn, 1);
     let t2 = ch.controller.1.deadline;
     let (b, ops) = ch.buy_case(3);
     ch.buy(3, &b, ops, t2 as u64 - 1_000);
@@ -276,8 +277,8 @@ fn cp7_griefing_late_close() {
     assert!(b.shard_daa >= b.shard.deadline as u64);
     let e = shard_error(&ch.buy_built(&b, ops));
     assert!(matches!(e, TxScriptError::VerifyError), "{e:?}");
-    // The next close works.
-    ch.fabricate_draw(800_000 * KAS as i64, 0, 8_000 * KAS as i64);
+    // The next close works (after the real draw() of round 1).
+    ch.draw_round([7u8; 32]);
     let (mut c2, ops) = ch.close_case(late + 100);
     c2.lock_time = late + 100;
     let f2 = ch.close(&c2, ops, late + 200);

@@ -127,3 +127,45 @@ Compute and transient mass match the local M2-a figures exactly (289,977 and 856
 This probe ran before the review fix R2 added one `require` to `close()` check 2. The controller redeem is now 19 B larger (26,321 B), and a local K = 16 `close()` measures compute 289,996 and transient 856,824 (+19 and +76; storage unchanged; `docs/costs.md` M2-a). That is 85.7 % of the transient limit, as before, so the probe was not repeated.
 
 About 34.1 testnet KAS stay locked: 2 + 19 × 1.69, i.e. the round 2 controller (acc + R), params and 16 shards, plus the round 1 marker. They have no spend path yet: round 2 is not drawn, and the marker is the D28 placeholder. The caller output is ours.
+
+## M3: genesis, buy, K = 16 `close()` and `draw()` with a TEST-ONLY seed (spec M3-g, 2026-10-10)
+
+`cargo run -p tn10 -- probe draw-m3`. It runs the real drawer, marker, vault, controller, params and shard scripts (B_MAX = 4, R = 1.69 KAS). The `lottery` builder builds every transaction, and the local v2.1.0 engine checks it before submission.
+- **Genesis** is as in M2, plus the vault (V0 = 60 KAS) and the drawer, with J(1) = 10 KAS. Deadline T is the virtual DAA at build time + 600.
+  - `buy()` needs the shard created before T (shard.sil check 6).
+  - `close()` needs lock_time = T to be final, so the probe waits for T.
+- **`buy()`** on shard 0 sells the round 1 jackpot combination of the TEST-ONLY seed `[0x5e; 32]`, so the draw creates a jackpot pool.
+- **`close()`** (K = 16) is funded by the buy change. It sets seed_ref = own + 600.
+- **`draw_test_seed()`**:
+  - Inputs: drawer, marker, vault, controller, and one funding input (the close caller output). lock_time = seed_ref. Each input's creation DAA score is read from our UTXO index.
+  - Before submission the probe fetched the node's UTXO entry of every input. Each matched the builder's (amount, script, creation DAA score, covenant ID), and every input passed the local engine on the node's entries.
+- Node: `muon-10.kaspa.blue`, version 2.1.0, DAA ≈ 593,170,947. Covenant ID `278095041b9755b3bf5b8073d97887ce983985e0bca2fe1d2192505aa74d3db0`.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 10,766 | 8,024 | 437,512 | 437,512 | 1 | 0.4376 | accepted; visible after 1.3 s (DAA 593,170,984) | `1737e827875e2a277f5e1001ef23bf3776d58ae8d1590134253920b2cca61c86` |
+| setup: `buy()` of the jackpot combination [3, 19, 22, 25, 27] + 7 on shard 0 | 15,637 | 50,148 | 378,497 | 378,497 | 2 | 0.3786 | accepted; visible after 1.3 s | `ad8dc58558fe0120cdd677b028f53cd21f637345dac95d87742926957af82d60` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 293,841 | 864,604 | 426,540 | 432,302 | 19 | 0.4324 | accepted; visible after 1.3 s (DAA 593,171,615; seed_ref 593,171,609) | `90da213e31db83b0be39c9b58f5df03a9641c1fcd3df67ba85e077acac9a8b3e` |
+| **`draw_test_seed()`, real scripts, K = 16, a = 0, np = 4, h_J = 1, n2 = 0, fee paid** | **107,048** | **332,712** | **130,534** | 166,356 | 5 | 0.1665 | **accepted; visible after 1.3 s** | `459791070e5462e3256d7cab594f2b581105248b100de4636d977c941f901206` |
+
+The round result was derived from the draw transaction's bytes alone (`RoundResult::from_tx`, A9):
+- round 1, win (3, 19, 22, 25, 27, 7), D_claim 599,651,609 (= seed_ref + DRAW_WINDOW + CLAIM_WINDOW);
+- pools as (tier, slice, value in sompi):
+  - (0 jackpot, 10 KAS, 11.69 KAS);
+  - (2, 32,000, 1.73 KAS);
+  - (3, 2,666, 1.72 KAS);
+  - (4, 1,000, 1.72 KAS).
+
+Draw script units per input on the node's entries: drawer 1,288,729, marker 297,436, vault 295,973, controller 63,734, funding 100,001.
+
+Compute and transient mass match the local M3-b figures for this shape. The `close()` matches M3-f exactly (293,841 / 864,604, 86.5 % of transient). The draw is 21.4 % of compute and 33.3 % of transient. Its storage (26.1 %) is high because the four pools sit near R.
+
+**Earlier attempts in the same session:**
+1. **Run 1**: T was set below the current DAA, as in close-m2. The local engine rejected the buy (shard created at or after T) before submission. Only its genesis (`b800e4cf…7d45`) went to testnet.
+2. **Run 2**: genesis `7fb8fa44…49d1`, buy `c22e23c5…5081` and close `9c26731b…2602` were accepted. The draw `6a17386a…cf7` was **REJECTED** by the node ("script ran, but verification failed", a failed `require`), although the local engine had accepted the same transaction.
+   - That run had no entry check. Its close was read as mined at DAA 593,168,541, below its seed_ref of 593,168,551, and the read happened 0.4 s after the output first became visible.
+   - The cause was not identified. A possible cause is that a young input's creation DAA score changed between the read and the node's validation, which would break the exact `own_daa` equality of check 19. Its caller output was spent before it could be re-read.
+   - This is an open item in the M3 handoff (O-S4-4).
+3. **Run 3**: the probe above, with the entry check, was accepted.
+
+Locked on testnet (no spend path in M3): the round 2 objects, drawer', vault', controller', the 4 pools and the ticket of run 3. Runs 1 and 2 also left their genesis (and run 2's round 1 to 2) objects. The caller and marker refund outputs are ours. Balance after: 8,648.65 testnet KAS.

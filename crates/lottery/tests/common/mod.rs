@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod m2;
+pub mod m3;
 
 use harness::TxScriptError;
 use lottery::buy::{BuyCase, Built, Final, b_max};

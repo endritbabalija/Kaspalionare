@@ -1,5 +1,6 @@
 //! Protocol states as SilverScript runtime-state values: shard and ticket (spec M1
-//! section 4), controller, params and marker (spec M2 A3).
+//! section 4), controller, params and marker (spec M2 A3), drawer, vault and pool (spec M3
+//! A3).
 
 use std::collections::BTreeMap;
 
@@ -10,8 +11,11 @@ use crate::combo::{Combo, bundle_bytes};
 pub const ROLE_CONTROLLER: u8 = 0x01;
 pub const ROLE_SHARD: u8 = 0x02;
 pub const ROLE_MARKER: u8 = 0x03;
+pub const ROLE_POOL: u8 = 0x04;
 pub const ROLE_TICKET: u8 = 0x05;
+pub const ROLE_VAULT: u8 = 0x06;
 pub const ROLE_PARAMS: u8 = 0x09;
+pub const ROLE_DRAWER: u8 = 0x0A;
 /// Largest K (spec M2 A2); the marker stores 32 x K_MAX root bytes.
 pub const K_MAX: usize = 16;
 
@@ -105,6 +109,18 @@ impl Payout {
 
     pub fn spk(&self) -> ScriptPublicKey {
         ScriptPublicKey::new(0, self.script().into())
+    }
+
+    /// The payout a (class, 33-byte key) state field pair describes (D11). Panics on a
+    /// class above 2.
+    pub fn from_fields(class: u8, key: &[u8; 33]) -> Self {
+        let k32: [u8; 32] = key[..32].try_into().unwrap();
+        match class {
+            0 => Payout::Schnorr(k32),
+            1 => Payout::Ecdsa(*key),
+            2 => Payout::P2sh(k32),
+            c => panic!("payout class {c} is not a D11 standard script"),
+        }
     }
 }
 
@@ -315,7 +331,8 @@ impl ParamsState {
     }
 }
 
-/// Frozen marker, role 0x03 (spec M2 A3.3). M2 placeholder template (D28).
+/// Frozen marker, role 0x03 (spec M2 A3.3; layout unchanged in M3, A3.4). Its code has the
+/// `draw_leg` delegate and the drawer template hash as a constructor constant (D38).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkerState {
     pub round: i64,
@@ -384,7 +401,146 @@ impl MarkerState {
         self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
     }
 
-    pub fn ctor(&self) -> Vec<ArtifactValue> {
-        self.fields().into_iter().skip(1).map(|(_, v)| v).collect()
+    /// Constructor arguments: the drawer template hash (constant, D38), then the state.
+    pub fn ctor(&self, drawer_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(drawer_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
+    }
+}
+
+/// Drawer singleton, role 0x0A (spec M3 A3.1, D37, D49). Value R.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrawerState {
+    /// The round this drawer draws next.
+    pub round: i64,
+    pub pool_tpl: [u8; 32],
+    pub vault_tpl: [u8; 32],
+    pub f_min: i64,
+    pub claim_window: i64,
+    pub draw_window: i64,
+}
+
+impl DrawerState {
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_DRAWER)),
+            ("round", Int(self.round)),
+            ("pool_tpl", Bytes(self.pool_tpl.to_vec())),
+            ("vault_tpl", Bytes(self.vault_tpl.to_vec())),
+            ("f_min", Int(self.f_min)),
+            ("claim_window", Int(self.claim_window)),
+            ("draw_window", Int(self.draw_window)),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the controller template hash (constant, D38), then the state.
+    pub fn ctor(&self, controller_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(controller_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
+    }
+}
+
+/// House vault, role 0x06 (spec M3 A3.2, design 6, D40). Value total_assets + pend_dep + R.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultState {
+    /// The last drawn round (0 at genesis).
+    pub round: i64,
+    pub total_assets: i64,
+    pub total_shares: i64,
+    pub pend_dep: i64,
+    pub pend_wsh: i64,
+    pub liability: i64,
+}
+
+impl VaultState {
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_VAULT)),
+            ("round", Int(self.round)),
+            ("total_assets", Int(self.total_assets)),
+            ("total_shares", Int(self.total_shares)),
+            ("pend_dep", Int(self.pend_dep)),
+            ("pend_wsh", Int(self.pend_wsh)),
+            ("liability", Int(self.liability)),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the drawer template hash (constant, D38), then the state.
+    pub fn ctor(&self, drawer_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(drawer_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
+    }
+}
+
+/// Tier codes (spec M3 A2): 0 jackpot, 1 second prize, 2..6 the lower slots
+/// (4+b, 4, 3+b, 3, 2+b).
+pub const TIER_JACKPOT: u8 = 0;
+pub const TIER_SECOND: u8 = 1;
+/// Tier code of lower slot 0 (4+b); slot t has code TIER_LOWER0 + t.
+pub const TIER_LOWER0: u8 = 2;
+
+/// Prize pool, role 0x04 (spec M3 A3.3). Value remaining + R.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolState {
+    pub round: i64,
+    pub tier: u8,
+    /// J, G2 or slice_t.
+    pub slice: i64,
+    /// n1..n5, bonus.
+    pub win: [u8; 6],
+    pub m: i64,
+    pub k: i64,
+    /// 32 x K_MAX bytes, as the marker.
+    pub roots: Vec<u8>,
+    pub deadline: i64,
+    pub funder_class: u8,
+    pub funder_key: [u8; 33],
+}
+
+impl PoolState {
+    pub fn set_funder(&mut self, p: &Payout) {
+        self.funder_class = p.class();
+        self.funder_key = p.key33();
+    }
+
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_POOL)),
+            ("round", Int(self.round)),
+            ("tier", Byte(self.tier)),
+            ("slice", Int(self.slice)),
+            ("win", Bytes(self.win.to_vec())),
+            ("m", Int(self.m)),
+            ("k", Int(self.k)),
+            ("roots", Bytes(self.roots.clone())),
+            ("deadline", Int(self.deadline)),
+            ("funder_class", Byte(self.funder_class)),
+            ("funder_key", Bytes(self.funder_key.to_vec())),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the drawer template hash (constant, D38), then the state.
+    pub fn ctor(&self, drawer_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(drawer_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
     }
 }

@@ -1,0 +1,77 @@
+pragma silverscript ^0.1.0;
+
+// Prize pool (role 0x04), spec M3 A3.3 (design 4.2, 4.4, 4.5, 6; D45).
+//
+// Value: remaining + R. Created by draw() of its round, which validates every field
+// (spec M3 A4 check 25): tier 0 jackpot (slice = J), 1 second prize (slice = G2), 2..6 the
+// lower slots (slice = slice_t). win = n1..n5 || bonus; roots as the marker.
+//
+// Entries:
+//   absorb_leg(): delegate of Drawer.draw_test_seed() at input >= 4, after the deadline;
+//   claim():      M3 placeholder, always rejects (as D13); M4 replaces the code.
+contract Pool(
+    byte[32] drawerTemplateHash,
+    int init_round,
+    byte init_tier,
+    int init_slice,
+    byte[6] init_win,
+    int init_m,
+    int init_k,
+    byte[512] init_roots,
+    int init_deadline,
+    byte init_funder_class,
+    byte[33] init_funder_key
+) {
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+
+    // Drawer state layout (spec M3 A3.1), for readInputStateWithTemplate.
+    struct DrawerState {
+        byte role;
+        int round;
+        byte[32] pool_tpl;
+        byte[32] vault_tpl;
+        int f_min;
+        int claim_window;
+        int draw_window;
+    }
+
+    byte role = 0x04;
+    int round = init_round;
+    byte tier = init_tier;
+    int slice = init_slice;
+    byte[6] win = init_win;
+    int m = init_m;
+    int k = init_k;
+    byte[512] roots = init_roots;
+    int deadline = init_deadline;
+    byte funder_class = init_funder_class;
+    byte[33] funder_key = init_funder_key;
+
+    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, pool L1-L5).
+    entry absorb_leg(int drawer_pl, int drawer_sl) {
+        // L1: an absorbed-pool slot of draw() (inputs 4..3+a; the drawer fixes a)
+        require(this.activeInputIndex >= 4); // mut:PL1
+        // L2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(this.activeInputIndex);
+        require(OpInputCovenantId(0) == cov); // mut:PL2
+        // L3: this input authorizes no output
+        require(OpAuthOutputCount(this.activeInputIndex) == 0); // mut:PL3
+        // L4: the leader is a genuine drawer of a later round
+        require(drawer_pl >= 0);
+        require(drawer_pl <= SCRIPT_MAX);
+        require(drawer_sl >= 0);
+        require(drawer_sl <= SCRIPT_MAX);
+        DrawerState drw = readInputStateWithTemplate(0, drawer_pl, drawer_sl, drawerTemplateHash);
+        require(unsigned(drw.role) == 10); // mut:PL4_role
+        require(drw.round > round); // mut:PL4_round
+        // L5: lower-bound lock at the claim deadline (R3, design 4.5)
+        require(tx.daa >= deadline); // mut:PL5
+    }
+
+    // M4 placeholder: no claim path in M3.
+    entry claim() {
+        require(this.activeInputIndex < 0);
+    }
+}

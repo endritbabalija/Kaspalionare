@@ -96,6 +96,9 @@ async fn info() -> Result<(), String> {
     let total: u64 = utxos.iter().map(|u| u.utxo_entry.amount).sum();
     println!("Address: {addr}");
     println!("UTXOs: {}  balance: {} KAS", utxos.len(), total as f64 / 1e8);
+    for u in &utxos {
+        println!("  {}:{}  {} KAS  creation DAA {}", u.outpoint.transaction_id, u.outpoint.index, u.utxo_entry.amount as f64 / 1e8, u.utxo_entry.block_daa_score);
+    }
     Ok(())
 }
 
@@ -115,6 +118,7 @@ async fn run_probes(which: &str) -> Result<(), String> {
     if all || which == "buy-m1" { cases::buy_m1(&mut ctx).await?; }
     if all || which == "claim" { cases::claim(&mut ctx).await?; }
     if all || which == "close-m2" { cases::close_m2(&mut ctx).await?; }
+    if all || which == "draw-m3" { cases::draw_m3(&mut ctx).await?; }
     for k in [16usize, 32, 62] {
         if all || which == format!("close{k}") { cases::close(&mut ctx, k).await?; }
     }
@@ -136,7 +140,7 @@ async fn main() -> ExitCode {
         Some("keygen") => keygen(),
         Some("info") => info().await,
         Some("probe") => run_probes(args.get(1).map(String::as_str).unwrap_or("all")).await,
-        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|close16|close32|close62]>".into()),
+        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|close16|close32|close62]>".into()),
     };
     match res {
         Ok(()) => ExitCode::SUCCESS,

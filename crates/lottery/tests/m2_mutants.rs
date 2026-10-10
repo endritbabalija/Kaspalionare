@@ -174,7 +174,7 @@ fn route_control(which: Sil) {
         Sil::Shard => bad.controller.shard_tpl = real.shard.hash,
         Sil::Params => bad.controller.params_tpl = real.params.hash,
         Sil::Marker => bad.controller.marker_tpl = real.marker.hash,
-        Sil::Controller => unreachable!(),
+        Sil::Controller | Sil::Vault | Sil::Pool | Sil::Drawer => unreachable!(),
     }
     let mut bb = bad.build_with(fake.clone());
     // Keep the outputs of the good transaction: only the spent controller's route differs.

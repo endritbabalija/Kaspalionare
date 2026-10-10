@@ -69,6 +69,19 @@ pub fn root_from_path(rank: u32, leaf: Node, siblings: &[u8]) -> Node {
     cur
 }
 
+/// The K count proofs of `draw()` at one rank (spec M3 A4 check 9): `leaves` is the K
+/// count strings (2m bytes each, shard order), `siblings` the K sibling strings
+/// (PATH_BYTES = 576 bytes each, shard order).
+pub fn proofs_at(trees: &[Tree], rank: u32) -> (Vec<u8>, Vec<u8>) {
+    let mut leaves = Vec::new();
+    let mut siblings = Vec::new();
+    for t in trees {
+        leaves.extend(t.counts_bytes(rank));
+        siblings.extend(t.siblings(rank));
+    }
+    (leaves, siblings)
+}
+
 /// One shard's tree for a round with bonus range `m`.
 #[derive(Clone)]
 pub struct Tree {

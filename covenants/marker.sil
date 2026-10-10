@@ -1,12 +1,13 @@
 pragma silverscript ^0.1.0;
 
-// Frozen marker (role 0x03) of one round, spec M2 A3.3. M2 placeholder (D28): the final
-// state layout with one always-rejecting entry. M3 replaces the code (the draw() leader),
-// which changes the template hash in the controller's route table at genesis.
+// Frozen marker (role 0x03) of one round, spec M2 A3.3 (layout unchanged, spec M3 A3.4).
+// M3 replaces the M2 placeholder (D28) with one entry, draw_leg(): the marker is a delegate
+// of Drawer.draw_test_seed() at input 1 (spec M3 A4 delegate legs, D37, D38).
 //
 // Value: S - P_R - C_close + J_boost + R. Created only by Controller.close(), which
-// validates every field (spec A4 check 24).
+// validates every field (spec M2 A4 check 24).
 contract Marker(
+    byte[32] drawerTemplateHash,
     int init_round,
     int init_k,
     byte[512] init_roots,
@@ -54,8 +55,37 @@ contract Marker(
     byte funder_class = init_funder_class;
     byte[33] funder_key = init_funder_key;
 
-    // No spend path in M2.
-    entry locked() {
-        require(this.activeInputIndex < 0);
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+
+    // Drawer state layout (spec M3 A3.1), for readInputStateWithTemplate.
+    struct DrawerState {
+        byte role;
+        int round;
+        byte[32] pool_tpl;
+        byte[32] vault_tpl;
+        int f_min;
+        int claim_window;
+        int draw_window;
+    }
+
+    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, marker L1-L4).
+    entry draw_leg(int drawer_pl, int drawer_sl) {
+        // L1: the marker slot of draw()
+        require(this.activeInputIndex == 1); // mut:ML1
+        // L2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(1);
+        require(OpInputCovenantId(0) == cov); // mut:ML2
+        // L3: this input authorizes no output
+        require(OpAuthOutputCount(1) == 0); // mut:ML3
+        // L4: the leader is the drawer of this round under the committed template
+        require(drawer_pl >= 0);
+        require(drawer_pl <= SCRIPT_MAX);
+        require(drawer_sl >= 0);
+        require(drawer_sl <= SCRIPT_MAX);
+        DrawerState drw = readInputStateWithTemplate(0, drawer_pl, drawer_sl, drawerTemplateHash);
+        require(unsigned(drw.role) == 10); // mut:ML4_role
+        require(drw.round == round); // mut:ML4_round
     }
 }

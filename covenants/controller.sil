@@ -1,6 +1,7 @@
 pragma silverscript ^0.1.0;
 
-// Round controller (role 0x01), spec M2 A3.1 and A4. Leader of close().
+// Round controller (role 0x01), spec M2 A3.1 and A4. Leader of close(); delegate of
+// Drawer.draw_test_seed() at input 3 (draw_leg, spec M3 A3.5 and A4).
 //
 // Value: O + A + R (O = boost pot, A = fee accumulator, R = reserve).
 // State field order = byte order (spec A3.1); int = 8-byte payload.
@@ -586,5 +587,28 @@ contract Controller(
             funder_class: funder_class,
             funder_key: funder_key
         }, marker_prefix, marker_suffix, marker_tpl);
+    }
+
+    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, controller L1-L5). This is the
+    // round r+1 controller; the genuine marker of round r at input 1 authenticates the
+    // drawer through its own leg (D38).
+    entry draw_leg(int marker_pl, int marker_sl) {
+        // L1: the controller slot of draw()
+        require(this.activeInputIndex == 3); // mut:CL1
+        // L2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(3);
+        require(OpInputCovenantId(0) == cov); // mut:CL2
+        // L3: this input authorizes no output
+        require(OpAuthOutputCount(3) == 0); // mut:CL3
+        // L4: a marker of the previous round under the committed marker template
+        require(marker_pl >= 0);
+        require(marker_pl <= SCRIPT_MAX);
+        require(marker_sl >= 0);
+        require(marker_sl <= SCRIPT_MAX);
+        MarkerState mk = readInputStateWithTemplate(1, marker_pl, marker_sl, marker_tpl);
+        require(unsigned(mk.role) == 3); // mut:CL4_role
+        require(mk.round == round - 1); // mut:CL4_round
+        // L5: this round's jackpot is not fixed yet
+        require(unsigned(drawn) == 0); // mut:CL5
     }
 }

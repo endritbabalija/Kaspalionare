@@ -19,7 +19,9 @@ use silverscript_abi::{encode_contract_entry_sig_script, encode_runtime_state_sc
 
 use crate::combo::{Combo, bundle_bytes};
 use crate::smt::{Tree, counts_bytes, num_bytes};
-use crate::state::{ControllerState, K_MAX, MarkerState, ParamsState, Payout, ShardState, TicketState};
+use crate::state::{ControllerState, K_MAX, MarkerState, ParamsState, Payout, PoolState, ShardState, TicketState, VaultState};
+#[cfg(feature = "test-seed")]
+use crate::state::DrawerState;
 
 pub const KAS: u64 = 100_000_000;
 pub const M_REF: u64 = 10_000_000;
@@ -47,7 +49,7 @@ pub struct Template {
 }
 
 impl Template {
-    fn from(art: SilAbiArtifact) -> Self {
+    pub(crate) fn from(art: SilAbiArtifact) -> Self {
         let c = &art.contracts.values().next().unwrap().compiled;
         let (p, _, s) = c.script_parts(&c.bytecode).expect("state span");
         let (prefix, suffix, hash) = (p.to_vec(), s.to_vec(), c.template_hash);
@@ -108,9 +110,14 @@ pub struct Sources {
     pub shard: String,
     pub params: String,
     pub marker: String,
+    pub vault: String,
+    pub pool: String,
+    /// TEST-ONLY seed drawer (D43): only with the `test-seed` feature.
+    #[cfg(feature = "test-seed")]
+    pub drawer: String,
 }
 
-fn read_covenant(name: &str) -> String {
+pub(crate) fn read_covenant(name: &str) -> String {
     std::fs::read_to_string(covenant_path(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
 }
 
@@ -123,13 +130,21 @@ impl Sources {
             shard: shard_source(b_max),
             params: read_covenant("params.sil"),
             marker: read_covenant("marker.sil"),
+            vault: read_covenant("vault.sil"),
+            pool: read_covenant("pool.sil"),
+            #[cfg(feature = "test-seed")]
+            drawer: read_covenant("drawer.sil"),
         }
     }
 }
 
-/// Compiled templates. Compile order (spec M2 D27): ticket -> controller ->
-/// shard(ticket, controller) -> params(controller) -> marker. The controller depends on
-/// no template: its route table (shard, marker, params hashes) is state.
+/// Compiled templates. Compile order (spec M2 D27, M3 D38): ticket -> controller ->
+/// drawer(controller) -> marker, vault, pool(drawer) -> shard(ticket, controller) and
+/// params(controller). The controller depends on no template: its route table (shard,
+/// marker, params hashes) is state. The drawer holds pool_tpl and vault_tpl in state.
+///
+/// Without the `test-seed` feature there is no drawer (D43): marker, vault and pool are then
+/// compiled with a zero drawer hash, so their draw legs can never pass.
 pub struct Templates {
     pub b_max: usize,
     pub ticket: Arc<Template>,
@@ -137,6 +152,10 @@ pub struct Templates {
     pub shard: Arc<Template>,
     pub params: Arc<Template>,
     pub marker: Arc<Template>,
+    pub vault: Arc<Template>,
+    pub pool: Arc<Template>,
+    #[cfg(feature = "test-seed")]
+    pub drawer: Arc<Template>,
 }
 
 impl Templates {
@@ -168,9 +187,17 @@ impl Templates {
         let dummy_ticket = TicketState::new(&dummy_shard, &[Combo::new([1, 2, 3, 4, 5], 1)], &Payout::Schnorr([1; 32]), b_max);
         let ticket = Template::from(compile_source(&src.ticket, &dummy_ticket.ctor()));
         let controller = Template::from(compile_source(&src.controller, &dummy_controller().ctor()));
+        #[cfg(feature = "test-seed")]
+        let drawer = crate::draw::compile_drawer(&src.drawer, controller.hash);
+        #[cfg(feature = "test-seed")]
+        let drawer_hash = drawer.hash;
+        #[cfg(not(feature = "test-seed"))]
+        let drawer_hash = [0u8; 32];
+        let marker = Template::from(compile_source(&src.marker, &dummy_marker().ctor(drawer_hash)));
+        let vault = Template::from(compile_source(&src.vault, &dummy_vault().ctor(drawer_hash)));
+        let pool = Template::from(compile_source(&src.pool, &dummy_pool().ctor(drawer_hash)));
         let shard = Template::from(compile_source(&src.shard, &dummy_shard.ctor(ticket.hash, controller.hash)));
         let params = Template::from(compile_source(&src.params, &dummy_params().ctor(controller.hash)));
-        let marker = Template::from(compile_source(&src.marker, &dummy_marker().ctor()));
         Self {
             b_max,
             ticket: Arc::new(ticket),
@@ -178,7 +205,20 @@ impl Templates {
             shard: Arc::new(shard),
             params: Arc::new(params),
             marker: Arc::new(marker),
+            vault: Arc::new(vault),
+            pool: Arc::new(pool),
+            #[cfg(feature = "test-seed")]
+            drawer: Arc::new(drawer),
         }
+    }
+
+    /// The drawer template hash the marker, vault and pool commit to (zero without the
+    /// `test-seed` feature, D43).
+    pub fn drawer_hash(&self) -> [u8; 32] {
+        #[cfg(feature = "test-seed")]
+        return self.drawer.hash;
+        #[cfg(not(feature = "test-seed"))]
+        return [0u8; 32];
     }
 
     /// Shared compiled templates per B_MAX (compiling is slow).
@@ -220,8 +260,38 @@ impl Templates {
         pay_to_script_hash_script(&self.params_redeem(p))
     }
 
+    pub fn marker_redeem(&self, m: &MarkerState) -> Vec<u8> {
+        self.marker.redeem(&m.values())
+    }
+
     pub fn marker_spk(&self, m: &MarkerState) -> ScriptPublicKey {
-        pay_to_script_hash_script(&self.marker.redeem(&m.values()))
+        pay_to_script_hash_script(&self.marker_redeem(m))
+    }
+
+    pub fn vault_redeem(&self, v: &VaultState) -> Vec<u8> {
+        self.vault.redeem(&v.values())
+    }
+
+    pub fn vault_spk(&self, v: &VaultState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.vault_redeem(v))
+    }
+
+    pub fn pool_redeem(&self, p: &PoolState) -> Vec<u8> {
+        self.pool.redeem(&p.values())
+    }
+
+    pub fn pool_spk(&self, p: &PoolState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.pool_redeem(p))
+    }
+
+    #[cfg(feature = "test-seed")]
+    pub fn drawer_redeem(&self, d: &DrawerState) -> Vec<u8> {
+        self.drawer.redeem(&d.values())
+    }
+
+    #[cfg(feature = "test-seed")]
+    pub fn drawer_spk(&self, d: &DrawerState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.drawer_redeem(d))
     }
 }
 
@@ -286,6 +356,25 @@ fn dummy_marker() -> MarkerState {
         s_d: 50,
         st: [400, 300, 300, 0, 0],
         seed_ref: 0,
+        funder_class: 0,
+        funder_key: [0; 33],
+    }
+}
+
+fn dummy_vault() -> VaultState {
+    VaultState { round: 0, total_assets: 0, total_shares: 0, pend_dep: 0, pend_wsh: 0, liability: 0 }
+}
+
+fn dummy_pool() -> PoolState {
+    PoolState {
+        round: 1,
+        tier: 0,
+        slice: 0,
+        win: [1, 2, 3, 4, 5, 1],
+        m: 10,
+        k: 1,
+        roots: vec![0; 32 * K_MAX],
+        deadline: 0,
         funder_class: 0,
         funder_key: [0; 33],
     }

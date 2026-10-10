@@ -1,11 +1,12 @@
-//! Rust reference for the arithmetic of `close()` (spec M2 A4 checks 11, 17-20, and A6).
+//! Rust reference for the arithmetic of `close()` (spec M2 A4 checks 11, 17-20, and A6) and
+//! of `draw()` (spec M3 A4 checks 8-20, A5, A6).
 //!
 //! Every function mirrors the script step for step in signed 64-bit integers. Overflow
 //! panics here (checked ops), so a test that drives a quantity past its A6 bound fails
 //! loudly instead of wrapping; in SilverScript overflow is undefined behaviour (R8), so
 //! the script range-checks inputs to stay inside the same bounds.
 
-use crate::state::{ControllerState, ParamsState, TierShares};
+use crate::state::{ControllerState, MarkerState, ParamsState, TIER_JACKPOT, TIER_LOWER0, TIER_SECOND, TierShares};
 
 /// Basis points per unit.
 pub const BP: i64 = 10_000;
@@ -272,6 +273,334 @@ pub fn close_math(c: &ControllerState, p: &ParamsState, shards: &[(i64, i64)], c
         deadline: next_deadline(c.deadline, c.round_len, own, c.d_min),
         seed_ref: seed_ref(own, c.seed_offset),
     }
+}
+
+// =============================================================================== M3 draw()
+//
+// Rust reference for the arithmetic of `draw()` (spec M3 A4 checks 8-20, A5, A6). Each
+// function mirrors the script step for step. Functions return `None` where the script
+// rejects (a guard of A6 or a `>= 0` requirement fails).
+
+/// Largest m the drawer can draw (D49): its count loop is unrolled to M_DRAW.
+pub const M_DRAW: i64 = 50;
+/// Most expired pools one `draw()` absorbs (D44).
+pub const A_MAX: usize = 5;
+/// Minimum fee payout, 1 KAS (D41).
+pub const F_MIN: i64 = 100_000_000;
+/// Upper bound of the drawer's f_min (spec M3 A3 ranges).
+pub const F_MIN_MAX: i64 = 10_000_000_000;
+/// Claim window, 7 days at 10 BPS (D39).
+pub const CLAIM_WINDOW: i64 = 6_048_000;
+/// Seed-validity window, 12 h at 10 BPS (D39, design 11).
+pub const DRAW_WINDOW: i64 = 432_000;
+/// Domain tag of the TEST-ONLY seed hash (D42), 14 bytes.
+pub const SEED_TAG: &[u8; 14] = b"KLOT/test-seed";
+
+impl Shares {
+    /// The round-r shares frozen in a marker (spec M3 check 11).
+    pub fn of_marker(mk: &MarkerState) -> Self {
+        Self { s_f: mk.s_f, s_r: mk.s_r, s_c: mk.s_c, s_d: mk.s_d, st: mk.st }
+    }
+}
+
+/// Round amounts of round r from its marker (check 11): F, C_close, C_draw, B_1..5, H, b_r.
+pub fn draw_amounts(mk: &MarkerState) -> RoundAmounts {
+    round_amounts(mk.sales, mk.ref_paid, &Shares::of_marker(mk))
+}
+
+/// Winning combinations per lower slot (4+b, 4, 3+b, 3, 2+b) at bonus range m (D46, design
+/// 4.1): 125, 125 (m - 1), 3,000, 3,000 (m - 1), 23,000. At most 3,000 x 254 < 10^6 (A6).
+pub fn tier_w(m: i64) -> [i64; 5] {
+    assert!((2..=M_HARD).contains(&m), "m out of range: {m}");
+    [125, 125 * (m - 1), 3_000, 3_000 * (m - 1), 23_000]
+}
+
+/// h_J and n2 from the K count strings at the winning rank (check 10): h_J = sum over the
+/// shards of count[bonus]; n2 = #{b in 1..m, b != bonus : sum_i count_i[b] >= 1}. `counts[i]`
+/// is shard i's m counts (bonus values 1..m).
+pub fn win_counts(counts: &[Vec<u16>], bonus: u8, m: i64) -> (i64, i64) {
+    let total = |b: usize| counts.iter().map(|c| c[b - 1] as i64).sum::<i64>();
+    let h_j = total(bonus as usize);
+    let n2 = (1..=m as usize).filter(|&b| b != bonus as usize && total(b) >= 1).count() as i64;
+    (h_j, n2)
+}
+
+/// One new prize pool of `draw()` (A3.3): tier code, slice and economic value (without R).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NewPool {
+    pub tier: u8,
+    pub slice: i64,
+    pub value: i64,
+}
+
+/// The pools `draw()` creates (D45, check 12) and their indicators.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolSet {
+    /// jp = [h_J >= 1 and J > 0].
+    pub jp: bool,
+    /// sp = [n2 >= 1 and G2 > 0].
+    pub sp: bool,
+    /// lp_t = [slice_t >= 1].
+    pub lp: [bool; 5],
+    /// slice_t = floor(B_t / W_t).
+    pub slices: [i64; 5],
+    /// The pools that exist, in tier order 0..6 (output order 3..2+np).
+    pub pools: Vec<NewPool>,
+}
+
+impl PoolSet {
+    pub fn np(&self) -> usize {
+        self.pools.len()
+    }
+}
+
+/// D45 pool creation. `jackpot` = J, `g2` = G2 (marker), `b` the five lower budgets, `m` the
+/// marker's m. The second-prize pool holds n2 x G2 (n2 <= 254; overflow panics where the
+/// script's checked multiplication rejects).
+pub fn pool_set(h_j: i64, n2: i64, jackpot: i64, g2: i64, b: &[i64; 5], m: i64) -> PoolSet {
+    let jp = h_j >= 1 && jackpot > 0;
+    let sp = n2 >= 1 && g2 > 0;
+    let w = tier_w(m);
+    let slices: [i64; 5] = std::array::from_fn(|t| b[t] / w[t]);
+    let lp = slices.map(|s| s >= 1);
+    let mut pools = vec![];
+    if jp {
+        pools.push(NewPool { tier: TIER_JACKPOT, slice: jackpot, value: jackpot });
+    }
+    if sp {
+        pools.push(NewPool { tier: TIER_SECOND, slice: g2, value: n2.checked_mul(g2).expect("n2 x G2") });
+    }
+    for t in 0..5 {
+        if lp[t] {
+            pools.push(NewPool { tier: TIER_LOWER0 + t as u8, slice: slices[t], value: b[t] });
+        }
+    }
+    PoolSet { jp, sp, lp, slices, pools }
+}
+
+/// a + b for money amounts with the A6 guard a <= TOTAL_MAX - b (`None` = script rejects).
+pub fn guarded_add(a: i64, b: i64) -> Option<i64> {
+    (a >= 0 && (0..=TOTAL_MAX).contains(&b) && a <= TOTAL_MAX - b).then(|| a + b)
+}
+
+/// Vault settlement (design 5.4, check 14): V' = total_assets + H - J_house [jp] - G2 n2 [sp],
+/// required >= 0.
+pub fn vault_settle(total_assets: i64, h: i64, j_house: i64, jp: bool, g2: i64, n2: i64, sp: bool) -> Option<i64> {
+    let mut v = guarded_add(total_assets, h)?;
+    if jp {
+        v -= j_house;
+    }
+    if sp {
+        v -= n2.checked_mul(g2)?;
+    }
+    (v >= 0).then_some(v)
+}
+
+/// Boost pot after `draw()` (design 5.5, check 15):
+/// O' = O + b_r + J_boost [not jp] + sum B_t [not lp_t] + sum Q, every addition guarded.
+pub fn boost_after(o: i64, b_r: i64, j_boost: i64, jp: bool, b: &[i64; 5], lp: &[bool; 5], q: &[i64]) -> Option<i64> {
+    let mut v = guarded_add(o, b_r)?;
+    if !jp {
+        v = guarded_add(v, j_boost)?;
+    }
+    for t in 0..5 {
+        if !lp[t] {
+            v = guarded_add(v, b[t])?;
+        }
+    }
+    for &x in q {
+        v = guarded_add(v, x)?;
+    }
+    Some(v)
+}
+
+/// Fee outcome (D41, check 16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeSplit {
+    /// T_F = A + F.
+    pub t_f: i64,
+    /// A fee output of T_F exists.
+    pub paid: bool,
+    /// A' in the controller.
+    pub a_next: i64,
+}
+
+pub fn fee_split(acc: i64, f: i64, f_min: i64) -> Option<FeeSplit> {
+    let t_f = guarded_add(acc, f)?;
+    let paid = t_f >= f_min;
+    Some(FeeSplit { t_f, paid, a_next: if paid { 0 } else { t_f } })
+}
+
+/// The three bounds J(r+1) must respect (spec M3 A5, D47), with m' >= 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JackpotRule {
+    /// E = a N m' (edge rule).
+    pub e_lim: i64,
+    /// W = q N m' (whale check).
+    pub w_lim: i64,
+    /// Cv = muldiv(V', cap).
+    pub cv: i64,
+    pub m: i64,
+    pub g: i64,
+}
+
+impl JackpotRule {
+    /// From the round r+1 controller (its m, price, active shares and the immutable e, g,
+    /// margin, cap) and the settled vault V'.
+    pub fn new(ctrl: &ControllerState, v_prime: i64) -> Self {
+        let sh = Shares::of(ctrl);
+        assert!(sh.s_h() >= 0, "s_H' < 0");
+        let a = allowance(ctrl.price, sh.s_h(), ctrl.e);
+        let q = whale_allowance(ctrl.price, sh.w(), ctrl.margin);
+        let nm = N.checked_mul(ctrl.m).expect("N m'");
+        Self {
+            e_lim: a.checked_mul(nm).expect("a N m'"),
+            w_lim: q.checked_mul(nm).expect("q N m'"),
+            cv: muldiv(v_prime, ctrl.cap),
+            m: ctrl.m,
+            g: ctrl.g,
+        }
+    }
+
+    /// pass(x, y) of A5, in the script's order (no overflow: x + y is formed only after
+    /// y <= W - x, and W <= 3.6 x 10^18). Non-increasing in x and in y; pass(0, 0) holds.
+    pub fn pass(&self, x: i64, y: i64) -> bool {
+        assert!(x >= 0 && y >= 0 && self.m >= 2);
+        if x > self.e_lim || x > self.cv || y > self.w_lim - x {
+            return false;
+        }
+        let gg = muldiv(x + y, self.g);
+        let d = self.m - 1;
+        gg <= (self.e_lim - x) / d && gg <= (self.w_lim - x - y) / d && gg <= (self.cv - x) / d
+    }
+
+    /// The three inequalities in exact 128-bit arithmetic (test cross-check of `pass`):
+    /// edge x + G (m'-1) <= E, whale x + y + G (m'-1) <= W, cap x + G (m'-1) <= Cv.
+    pub fn pass_exact(&self, x: i64, y: i64) -> bool {
+        let (x, y) = (x as i128, y as i128);
+        let gg = (x + y) * self.g as i128 / BP as i128;
+        let l = gg * (self.m as i128 - 1);
+        x + l <= self.e_lim as i128 && x + y + l <= self.w_lim as i128 && x + l <= self.cv as i128
+    }
+}
+
+/// J(r+1) fixed by `draw()` (A5 and check 17).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JackpotFix {
+    /// Base x_b = muldiv(V', j).
+    pub x_b: i64,
+    pub x1: i64,
+    pub y: i64,
+    pub x2: i64,
+    /// J' = x2 + y.
+    pub jackpot: i64,
+    /// J_boost' = y.
+    pub j_boost: i64,
+    /// G2' = muldiv(J', g).
+    pub g2: i64,
+    /// L' = x2 + G2' (m' - 1).
+    pub liability: i64,
+}
+
+impl JackpotFix {
+    fn from_witness(rule: &JackpotRule, x_b: i64, x1: i64, y: i64, x2: i64) -> Self {
+        let jackpot = x2 + y;
+        let g2 = muldiv(jackpot, rule.g);
+        Self { x_b, x1, y, x2, jackpot, j_boost: y, g2, liability: x2 + g2 * (rule.m - 1) }
+    }
+}
+
+/// Largest v in [lo, hi] with pred(v), given pred(lo) and pred non-increasing.
+fn largest(mut lo: i64, mut hi: i64, pred: impl Fn(i64) -> bool) -> i64 {
+    debug_assert!(pred(lo));
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if pred(mid) { lo = mid } else { hi = mid - 1 }
+    }
+    lo
+}
+
+/// D47/D48 reference by bisection: base -> lower if it fails -> boost -> top-up.
+pub fn fix_jackpot(rule: &JackpotRule, v_prime: i64, o_prime: i64, j: i64) -> JackpotFix {
+    assert!((0..=TOTAL_MAX).contains(&v_prime) && (0..=TOTAL_MAX).contains(&o_prime));
+    let x_b = muldiv(v_prime, j);
+    let x1 = if rule.pass(x_b, 0) { x_b } else { largest(0, x_b - 1, |x| rule.pass(x, 0)) };
+    let y = largest(0, o_prime, |y| rule.pass(x1, y));
+    let top = rule.e_lim.min(rule.cv).max(x1);
+    let x2 = largest(x1, top, |x| rule.pass(x, y));
+    JackpotFix::from_witness(rule, x_b, x1, y, x2)
+}
+
+/// Brute-force reference for small instances (DP17): linear scans that do not assume
+/// monotonicity ("largest value" = the maximum over the whole range).
+pub fn fix_jackpot_brute(rule: &JackpotRule, v_prime: i64, o_prime: i64, j: i64) -> JackpotFix {
+    let x_b = muldiv(v_prime, j);
+    let x1 = if rule.pass(x_b, 0) { x_b } else { (0..x_b).rev().find(|&x| rule.pass(x, 0)).expect("pass(0, 0)") };
+    let y = (0..=o_prime).filter(|&y| rule.pass(x1, y)).max().expect("pass(x1, 0)");
+    let top = rule.e_lim.min(rule.cv);
+    let x2 = (x1..=top.max(x1)).filter(|&x| rule.pass(x, y)).max().expect("pass(x1, y)");
+    JackpotFix::from_witness(rule, x_b, x1, y, x2)
+}
+
+/// The A5 witness checks as the script applies them to the caller's x1, y, x2.
+pub fn witness_ok(rule: &JackpotRule, v_prime: i64, o_prime: i64, j: i64, x1: i64, y: i64, x2: i64) -> bool {
+    let x_b = muldiv(v_prime, j);
+    let c1 = if rule.pass(x_b, 0) { x1 == x_b } else { 0 <= x1 && x1 < x_b && rule.pass(x1, 0) && !rule.pass(x1 + 1, 0) };
+    c1 && 0 <= y
+        && y <= o_prime
+        && rule.pass(x1, y)
+        && (y == o_prime || !rule.pass(x1, y + 1))
+        && x2 >= x1
+        && rule.pass(x2, y)
+        && !rule.pass(x2 + 1, y)
+}
+
+/// The TEST-ONLY seed mapping (D42).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedNumbers {
+    pub h: [u8; 32],
+    pub rank: u32,
+    pub bonus: u8,
+    /// The canonical main numbers of colex rank `rank`.
+    pub main: [u8; 5],
+}
+
+/// bin2num(bytes || 0x00) for 7 bytes: the non-negative 56-bit little-endian value
+/// (OpBin2Num decodes a little-endian sign-magnitude number of up to 8 bytes, non-minimal
+/// encodings allowed: rusty-kaspa v2.1.0 `crypto/txscript/src/opcodes/mod.rs:1310-1316`,
+/// `crypto/txscript/src/data_stack.rs:164-178`).
+pub fn u56_le(b: &[u8]) -> i64 {
+    assert_eq!(b.len(), 7);
+    b.iter().rev().fold(0i64, |acc, &x| (acc << 8) | x as i64)
+}
+
+/// h = blake2b("KLOT/test-seed" || cov || round (8 B LE) || test_only_seed); rank =
+/// u56(h[0..7]) mod N; bonus = u56(h[7..14]) mod m + 1 (D42).
+pub fn seed_numbers(cov: &[u8; 32], round: i64, test_only_seed: &[u8; 32], m: i64) -> SeedNumbers {
+    assert!(m >= 2);
+    let mut msg = Vec::with_capacity(86);
+    msg.extend_from_slice(SEED_TAG);
+    msg.extend_from_slice(cov);
+    msg.extend_from_slice(&round.to_le_bytes());
+    msg.extend_from_slice(test_only_seed);
+    let h = crate::params::blake2b(&msg);
+    let rank = (u56_le(&h[0..7]) % N) as u32;
+    let bonus = (u56_le(&h[7..14]) % m + 1) as u8;
+    SeedNumbers { h, rank, bonus, main: crate::combo::unrank(rank) }
+}
+
+/// D_claim = max(own, seed_ref + draw_window) + claim_window (D39, check 19); `None` where
+/// the script rejects (own or the sums reach DAA_MAX).
+pub fn claim_deadline(own: i64, seed_ref: i64, draw_window: i64, claim_window: i64) -> Option<i64> {
+    if !(0..DAA_MAX).contains(&own) {
+        return None;
+    }
+    let s = seed_ref.checked_add(draw_window)?;
+    if s >= DAA_MAX {
+        return None;
+    }
+    let d = own.max(s) + claim_window;
+    (d < DAA_MAX).then_some(d)
 }
 
 #[cfg(test)]
