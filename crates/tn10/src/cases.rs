@@ -159,3 +159,57 @@ pub async fn close(ctx: &mut Ctx, k: usize) -> Result<(), String> {
     probe_and_sweep(ctx, &format!("close(), K = {k}, R = {:.4}, controller sig {ctl_sig} B, shard sig {SHARD_SIG_LEN} B", r as f64 / KAS as f64), s, so, &spent)
         .await
 }
+
+/// M1 (spec M-e): the real shard script. A genesis transaction creates one shard of the real
+/// template (fresh tree, deadline far ahead); the probe is a real `buy()` of B_MAX combinations
+/// with a referral output, built by the `lottery` builder and checked locally first. The shard
+/// successor and the ticket have no spend path in M1 and stay on testnet; the referral and
+/// change outputs are swept back.
+pub async fn buy_m1(ctx: &mut Ctx) -> Result<(), String> {
+    use lottery::buy::{BuyCase, Templates, b_max};
+    use lottery::combo::{Combo, unrank};
+    use lottery::state::Payout;
+
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    let daa = ctx.client.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+    let bm = b_max();
+    let mut c = BuyCase::new(bm);
+    c.shard.deadline = (daa + 10_000_000) as i64;
+    c.shard_daa = daa;
+    c.bundle = (0..bm as u32).map(|i| Combo::new(unrank(7 + i * 13_001), 1 + i as u8)).collect();
+    c.with_ref = true;
+    let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
+    c.referrer = me;
+    c.payout = me;
+    c.funding_sk = ctx.sk;
+    let t = Templates::get(bm);
+
+    // Setup: genesis of the instance covenant with one fresh shard at R.
+    let shard_out = plain(c.shard_value(), &t.shard_spk(&c.shard));
+    let f = fund(ctx).await?;
+    let s = ctx.build(&[p2pk_in(&f)], &[shard_out], &[GenesisCovenantGroup::new(0, vec![0])])?;
+    if !ctx.submit("setup: buy-m1 genesis shard", &s, true).await? {
+        return Err("buy-m1 setup rejected".into());
+    }
+    let so = outs_of(&s);
+    let funding = so[1].clone();
+    c.cov = so[0].entry.covenant_id.ok_or("no genesis covenant id")?;
+    c.funding = vec![funding.entry.amount];
+
+    let mut b = c.build();
+    b.outpoints = vec![so[0].op, funding.op];
+    let fin = b.finish();
+    fin.run().map_err(|(i, e)| format!("local engine rejects buy-m1 at input {i}: {e:?}"))?;
+    let mut tx = fin.tx.clone();
+    tx.finalize();
+    let m = harness::masses(&tx, &fin.entries);
+    let sent = Sent { fee: fin.fee(), tx, m };
+    let ok = ctx.submit(&format!("buy() M1 real shard script, b = {bm}, referral, d = 0.11 KAS, R = 1.44 KAS"), &sent, true).await?;
+    if ok {
+        let outs = outs_of(&sent);
+        ctx.sweep(vec![outs[2].clone(), outs[3].clone()]).await?;
+    } else {
+        ctx.sweep(vec![funding]).await?;
+    }
+    Ok(())
+}

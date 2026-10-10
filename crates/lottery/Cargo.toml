@@ -1,0 +1,20 @@
+[package]
+name = "lottery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Off-chain protocol code: combinations, the counter tree, state encoders and the
+# transaction builder. Covenants are compiled at test time through `harness`.
+
+[dependencies]
+harness = { path = "../harness" }
+kaspa-consensus-core.workspace = true
+kaspa-txscript.workspace = true
+silverscript-abi.workspace = true
+blake2b_simd.workspace = true
+blake3.workspace = true
+secp256k1.workspace = true
+
+[dev-dependencies]

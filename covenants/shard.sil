@@ -1,0 +1,261 @@
+pragma silverscript ^0.1.0;
+
+// Shard (role 0x02) of one round, spec M1 4.1 and 5. One entry: buy().
+//
+// Transaction shape (spec 5.1, decisions D2/D3):
+//   inputs : 0 = this shard; 1..n = buyer funding, zero covenant ID, 1 <= n <= F_MAX
+//   outputs: 0 = shard successor, 1 = ticket (both authorized by input 0, covenant cov),
+//            2 = referral (only if with_ref), then at most one change output; plain outputs
+//            carry the zero covenant ID. Nothing else.
+//
+// Counter tree (spec 3): depth 18, key = colex rank of the 5 main numbers,
+//   leaf = H(0x00 || rank as byte[3] || m counts as byte[2]), node = H(0x01 || l || r),
+//   empty leaf Z_0 = H(0x02); an all-zero leaf is always Z_0. H = blake2b.
+//
+// Check numbers in comments refer to spec 5.3.
+contract Shard(
+    byte[32] ticketTemplateHash,
+    int init_round,
+    int init_index,
+    int init_m,
+    int init_price,
+    int init_d,
+    int init_sr,
+    int init_deadline,
+    byte[32] init_root,
+    int init_sales,
+    int init_ref_paid
+) {
+    int constant B_MAX = 5;
+    int constant F_MAX = 8;
+    int constant DEPTH = 18;
+    int constant PATH = 576;
+    int constant M_HARD = 255;
+    int constant COUNT_MAX = 32767;
+    int constant M_REF = 10000000;
+    int constant PRICE_MAX = 100000000000;
+    int constant DEPOSIT_MAX = 10000000000;
+    int constant SALES_MAX = 4611686018427387904;
+    int constant S_R_MAX = 1500;
+    int constant DAA_MAX = 500000000000;
+
+    struct TicketState {
+        byte role;
+        int round;
+        int deadline;
+        int b;
+        byte[30] bundle;
+        byte[1] claimed;
+        byte payout_class;
+        byte[33] payout_key;
+    }
+
+    byte role = 0x02;
+    int round = init_round;
+    int shard_index = init_index;
+    int m = init_m;
+    int price = init_price;
+    int d = init_d;
+    int s_r = init_sr;
+    int deadline = init_deadline;
+    byte[32] root = init_root;
+    int sales = init_sales;
+    int ref_paid = init_ref_paid;
+
+    entry buy(
+        int b,
+        byte[] bundle,
+        byte[] leaves,
+        byte[] siblings,
+        bool with_ref,
+        byte payout_class,
+        byte[33] payout_key,
+        byte[] ticket_prefix,
+        byte[] ticket_suffix
+    ) {
+        byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+
+        // ---- 1-5: shape and binding (R2, R6)
+        require(this.activeInputIndex == 0);
+        byte[32] cov = OpInputCovenantId(0);
+        int nIn = tx.inputs.length;
+        require(nIn >= 2);
+        require(nIn <= 1 + F_MAX);
+        for(k, 1, nIn, F_MAX) {
+            require(OpInputCovenantId(k) == zeroId);
+        }
+        require(OpCovInputCount(cov) == 1);
+        require(OpAuthOutputCount(0) == 2);
+        require(OpAuthOutputIdx(0, 0) == 0);
+        require(OpAuthOutputIdx(0, 1) == 1);
+        require(OpCovOutputCount(cov) == 2);
+        int wr = with_ref as int;
+        int nOut = tx.outputs.length;
+        int extra = nOut - 2 - wr;
+        require(extra >= 0);
+        require(extra <= 1);
+        for(k, 2, nOut, 2) {
+            require(OpOutputCovenantId(k) == zeroId);
+        }
+
+        // ---- 6: late-buy bound (R3, D4): a shard created at or after T accepts only close()
+        require(OpTxInputDaaScore(0) < deadline);
+
+        // ---- 7-8: ranges (R8)
+        require(unsigned(role) == 2);
+        require(round >= 1);
+        require(shard_index >= 0);
+        require(m >= 2);
+        require(m <= M_HARD);
+        require(price >= 1);
+        require(price <= PRICE_MAX);
+        require(d >= 1);
+        require(d <= DEPOSIT_MAX);
+        require(s_r >= 0);
+        require(s_r <= S_R_MAX);
+        require(deadline >= 0);
+        require(deadline < DAA_MAX);
+        require(sales >= 0);
+        require(ref_paid >= 0);
+        require(ref_paid <= sales);
+        require(b >= 1);
+        require(b <= B_MAX);
+        int lw = 2 * m;
+        require(bundle.length == 6 * b);
+        require(leaves.length == lw * b);
+        require(siblings.length == PATH * b);
+
+        // ---- 9-13: counter, one slot per combination, running root
+        byte[32] z0 = blake2b(byte[](0x02));
+        // 512 zero bytes (OpNum2Bin is limited to 8 bytes); covers 2 x M_HARD and 6 x B_MAX.
+        byte[] zeros = OpNum2Bin(0, 8);
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        zeros = zeros + zeros;
+        byte[] zeroCounts = zeros.slice(0, lw);
+        byte[32] cur = root;
+        for(i, 0, b, B_MAX) {
+            // 9: canonical combination and its rank (bytes read unsigned: byte || 0x00)
+            int co = 6 * i;
+            int n1 = OpBin2Num(bundle.slice(co, co + 1) + byte[](0x00));
+            int n2 = OpBin2Num(bundle.slice(co + 1, co + 2) + byte[](0x00));
+            int n3 = OpBin2Num(bundle.slice(co + 2, co + 3) + byte[](0x00));
+            int n4 = OpBin2Num(bundle.slice(co + 3, co + 4) + byte[](0x00));
+            int n5 = OpBin2Num(bundle.slice(co + 4, co + 5) + byte[](0x00));
+            int bonus = OpBin2Num(bundle.slice(co + 5, co + 6) + byte[](0x00));
+            require(n1 >= 1);
+            require(n1 < n2);
+            require(n2 < n3);
+            require(n3 < n4);
+            require(n4 < n5);
+            require(n5 <= 30);
+            require(bonus >= 1);
+            require(bonus <= m);
+            int x2 = n2 - 1;
+            int x3 = n3 - 1;
+            int x4 = n4 - 1;
+            int x5 = n5 - 1;
+            int rank = (n1 - 1) + x2 * (x2 - 1) / 2 + x3 * (x3 - 1) * (x3 - 2) / 6
+                + x4 * (x4 - 1) * (x4 - 2) * (x4 - 3) / 24
+                + x5 * (x5 - 1) * (x5 - 2) * (x5 - 3) * (x5 - 4) / 120;
+            byte[3] rk = rank as byte[3];
+
+            // 10: the count being incremented
+            int lo = lw * i;
+            byte[] counts = leaves.slice(lo, lo + lw);
+            int so = 2 * (bonus - 1);
+            int c = OpBin2Num(counts.slice(so, so + 2));
+            require(c >= 0);
+            require(c <= COUNT_MAX - 1);
+
+            // 11-12: old leaf (canonical empty rule) and new leaf
+            byte[32] oldNode = z0;
+            if (counts != zeroCounts) {
+                oldNode = blake2b(byte[](0x00) + rk + counts);
+            }
+            byte[] newCounts = counts.slice(0, so) + ((c + 1) as byte[2]) + counts.slice(so + 2, lw);
+            byte[32] newNode = blake2b(byte[](0x00) + rk + newCounts);
+
+            // 13: one path, used twice
+            // Slice this slot's path once: every push is charged per byte, so slicing the
+            // whole sibling string at each level would cost O(b^2).
+            int bits = rank;
+            byte[] path = siblings.slice(PATH * i, PATH * i + PATH);
+            for(l, 0, DEPTH, DEPTH) {
+                byte[] sib = path.slice(32 * l, 32 * l + 32);
+                if (bits % 2 == 0) {
+                    oldNode = blake2b(byte[](0x01) + oldNode + sib);
+                    newNode = blake2b(byte[](0x01) + newNode + sib);
+                } else {
+                    oldNode = blake2b(byte[](0x01) + sib + oldNode);
+                    newNode = blake2b(byte[](0x01) + sib + newNode);
+                }
+                bits = bits / 2;
+            }
+            require(oldNode == cur);
+            cur = newNode;
+        }
+
+        // ---- 14-17: money (5.1, 5.5, R7). P <= 10^12, P x s_r <= 1.5 x 10^15.
+        int p = b * price;
+        require(sales <= SALES_MAX - p);
+        int r = 0;
+        if (with_ref) {
+            r = p * s_r / 10000;
+            require(r >= M_REF);
+            require(tx.outputs[2].value == r);
+            // 15: standard script class, version 0 (D11)
+            byte[] spk = tx.outputs[2].scriptPubKey;
+            int sl = spk.length;
+            bool std = false;
+            if (sl == 36) {
+                std = spk.slice(0, 3) == byte[](0x000020) && spk.slice(35, 36) == byte[](0xac);
+            }
+            if (sl == 37) {
+                std = (spk.slice(0, 3) == byte[](0x000021) && spk.slice(36, 37) == byte[](0xab))
+                    || (spk.slice(0, 4) == byte[](0x0000aa20) && spk.slice(36, 37) == byte[](0x87));
+            }
+            require(std);
+        }
+        require(tx.outputs[0].value == tx.inputs[0].value + p - r);
+        require(tx.outputs[1].value == d * b);
+
+        // ---- 18: successor shard (R1)
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            shard_index: shard_index,
+            m: m,
+            price: price,
+            d: d,
+            s_r: s_r,
+            deadline: deadline,
+            root: cur,
+            sales: sales + p,
+            ref_paid: ref_paid + r
+        });
+
+        // ---- 19: payout script class (D11)
+        int pc = unsigned(payout_class);
+        require(pc <= 2);
+        if (pc != 1) {
+            require(payout_key.slice(32, 33) == byte[](0x00));
+        }
+
+        // ---- 20: ticket, full initial state under the committed template (R5, R7)
+        byte[30] padded = byte[30](bundle + zeros.slice(0, 6 * (B_MAX - b)));
+        validateOutputStateWithTemplate(1, TicketState {
+            role: 0x05,
+            round: round,
+            deadline: deadline,
+            b: b,
+            bundle: padded,
+            claimed: byte[1](0x00),
+            payout_class: payout_class,
+            payout_key: payout_key
+        }, ticket_prefix, ticket_suffix, ticketTemplateHash);
+    }
+}

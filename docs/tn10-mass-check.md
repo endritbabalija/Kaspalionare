@@ -89,3 +89,17 @@ Aspectron's 0.019 KAS figure is just over the limit. The research doc's 0.1 / 0.
   - A first `buy()` run added a 1 KAS output that the real shape does not have, and was rejected at storage 509,992.
   - A first claim run put the pool and a minimum-deposit ticket in one setup transaction, which was rejected at 501,803.
 - One 0.0844 tKAS covenant output from the failed claim setup was left unswept (`fefe481e8c365a0c4ba61a2a53a7325517cc44c207fb738de2373e72cc0fa8d3`, output 0).
+
+## M1: real `buy()` (spec M-e, 2026-10-10)
+
+`cargo run -p tn10 -- probe buy-m1`. Unlike the probes above, this runs the real shard script (`covenants/shard.sil`, B_MAX = 5), built by the `lottery` builder and checked in the local v2.1.0 engine before submission.
+- A KIP-20 genesis transaction creates one fresh shard (empty tree, deadline = virtual DAA + 10,000,000, R = 1.44 KAS).
+- The probe is a `buy()` of 5 distinct combinations with a 0.5 KAS referral output (s_R = 10%), d = 0.11 KAS, submitted through the public mempool with the builder's fixed 0.5 KAS fee.
+- Node: `neutrino-10.kaspa.stream`, version 2.1.0, DAA ≈ 592,574,552.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis shard (real template) | 2,083 | 1,412 | 27,777 | 27,777 | 1 | 0.0279 | accepted; 0.5 s | `a7f765f24ab5e264aa5b002f07980ce2946ae2ebf22144c54807dee80e037ba6` |
+| `buy()`, real shard script, b = 5, referral, d = 0.11 KAS, R = 1.44 KAS | 19,347 | 59,148 | 99,453 | 99,453 | 2 | 0.5000 | accepted; 1.4 s | `2ff25ef4744517e7c1eba4523859a3f876f89d7d79931a4d3d76757959b27b7f` |
+
+The shard successor and the ticket have no spend path in M1 (the ticket template is a placeholder until M4; `close()` comes in M2), so about 7.0 testnet KAS stay locked in them. The referral and change outputs were swept back.

@@ -25,7 +25,7 @@ Clone SilverScript, rusty-kaspa and the KIPs into `refs/`. Read SilverScript's T
 Done when: `docs/feasibility.md` answers all six; the chosen release and hash are recorded in `docs/DECISIONS.md`; a Rust workspace exists; `cargo test` runs at least one covenant test in the local script engine; the exact build and test commands are written into `CLAUDE.md`.
 
 ## M1 — Shard, bundles and `buy()`
-Status: todo
+Status: done (2026-10-10, spec `docs/specs/1.md`; B_MAX = 5, see `docs/DECISIONS.md` and `docs/costs.md`)
 
 **Mass-limit check (research G1–G3): done before M1, 2026-10-10** (feasibility Q7, `docs/tn10-mass-check.md`).
 - v2.1.0 nodes enforce the block limits per transaction. M0's d, R and largest K hold under relay on testnet-10.

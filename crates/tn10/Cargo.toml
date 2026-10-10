@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 harness = { path = "../harness" }
+lottery = { path = "../lottery" }
 kaspa-consensus-core.workspace = true
 kaspa-txscript.workspace = true
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }

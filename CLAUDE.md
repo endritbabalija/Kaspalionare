@@ -29,7 +29,7 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
 - Never commit private keys, seeds, mnemonics or node credentials. Personal settings go in `CLAUDE.local.md` (git-ignored).
 
 ## Stack and layout
-- `covenants/` SilverScript sources. `crates/` Rust workspace: transaction builder, Merkle tree, test harness. `refs/` cloned reference repos (git-ignored, read-only).
+- `covenants/` SilverScript sources (`shard.sil`, `ticket.sil`; `m0/`, `m1/` are measurement probes). `crates/` Rust workspace: `harness` (compile, engine, mass), `lottery` (combinations, Merkle tree, state encoders, transaction builder, M1+ tests), `tn10` (testnet probes). `refs/` cloned reference repos (git-ignored, read-only).
 - Covenants are tested first in the local rusty-kaspa script engine, then on testnet-10.
 - rusty-kaspa: pinned v2.1.0 (`01b532e8…`), SilverScript v1.0.0 (design section 2, `docs/DECISIONS.md`). Use those releases.
 - Development machine is Windows. Prefer commands that work in Git Bash and PowerShell.
@@ -37,8 +37,9 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
   - Build: `cargo build --tests`
   - All tests: `cargo test`
   - One test file with printed measurements: `cargo test --test m0_mass -- --nocapture --test-threads=1` (also `covenant_smoke`, `m0_merkle`, `m0_shapes`, `m0_limits`; `m0_mass` takes about 4 min in debug builds; add `--release` for about 1 min)
+  - M1 (crate `lottery`): `cargo test -p lottery` (unit tests plus `m1_buy`, `m1_attacks`, `m1_mutants`, `m1_measure`); measurements: `cargo test -p lottery --release --test m1_measure -- --nocapture --test-threads=1`
   - Covenant sources are compiled at test time from `covenants/` by `harness::compile_file`; there is no separate compile step.
-  - Testnet-10 probes (not part of `cargo test`): `cargo run -p tn10 -- info` and `cargo run -p tn10 -- probe <all|baseline|storage|transient|dust|buy|claim|close16|close32|close62>`. The key is `TN10_PRIVATE_KEY` in the git-ignored `.env` (create it with `cargo run -p tn10 -- keygen` and fund it from the faucet). The endpoint is `TN10_WRPC_URL`, or the public resolver if unset. Results go in `docs/tn10-mass-check.md`.
+  - Testnet-10 probes (not part of `cargo test`): `cargo run -p tn10 -- info` and `cargo run -p tn10 -- probe <all|baseline|storage|transient|dust|buy|buy-m1|claim|close16|close32|close62>` (`buy-m1` submits the real shard script). The key is `TN10_PRIVATE_KEY` in the git-ignored `.env` (create it with `cargo run -p tn10 -- keygen` and fund it from the faucet). The endpoint is `TN10_WRPC_URL`, or the public resolver if unset. Results go in `docs/tn10-mass-check.md`.
 
 ## How we work
 - One milestone per session; use the `/milestone` skill. Start in plan mode and get the plan approved before writing code.

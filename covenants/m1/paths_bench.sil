@@ -1,0 +1,36 @@
+pragma silverscript ^0.1.0;
+
+// M1 measurement only (spec M-d), not protocol code. Verifies 16 depth-18 paths of one key,
+// leaf at m = 10, as a claim would. The test rewrites `blake2b(` to `blake3(` for the
+// comparison. Matches are counted rather than required, so both variants run every hash.
+contract PathsBench() {
+    int constant K = 16;
+    int constant DEPTH = 18;
+
+    entry verify(int rank, byte[] leaves, byte[] siblings, byte[] roots) {
+        require(rank >= 0);
+        require(leaves.length == 20 * K);
+        require(siblings.length == 576 * K);
+        require(roots.length == 32 * K);
+        int matches = 0;
+        byte[3] rk = rank as byte[3];
+        for(k, 0, K, K) {
+            byte[] path = siblings.slice(576 * k, 576 * k + 576);
+            byte[32] node = blake2b(byte[](0x00) + rk + leaves.slice(20 * k, 20 * k + 20));
+            int bits = rank;
+            for(l, 0, DEPTH, DEPTH) {
+                byte[] sib = path.slice(32 * l, 32 * l + 32);
+                if (bits % 2 == 0) {
+                    node = blake2b(byte[](0x01) + node + sib);
+                } else {
+                    node = blake2b(byte[](0x01) + sib + node);
+                }
+                bits = bits / 2;
+            }
+            if (node == byte[32](roots.slice(32 * k, 32 * k + 32))) {
+                matches = matches + 1;
+            }
+        }
+        require(matches >= 0);
+    }
+}

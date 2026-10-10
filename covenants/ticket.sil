@@ -1,0 +1,33 @@
+pragma silverscript ^0.1.0;
+
+// Ticket (role 0x05), spec M1 4.2. M1 placeholder: the final state layout with no
+// spend path. M4 replaces the code (claim(), return_deposit()), which changes the
+// template hash the shard commits to.
+//
+// Value: d x b. Created only by Shard.buy(), which validates every field (R7).
+contract Ticket(
+    int init_round,
+    int init_deadline,
+    int init_b,
+    byte[30] init_bundle,
+    byte[1] init_claimed,
+    byte init_payout_class,
+    byte[33] init_payout_key
+) {
+    // B_MAX = 5: bundle is 6 x B_MAX bytes, claimed is ceil(B_MAX / 8) bytes.
+    // Tests rewrite the two array sizes together with Shard's B_MAX.
+
+    byte role = 0x05;
+    int round = init_round;
+    int deadline = init_deadline;
+    int b = init_b;
+    byte[30] bundle = init_bundle;
+    byte[1] claimed = init_claimed;
+    byte payout_class = init_payout_class;
+    byte[33] payout_key = init_payout_key;
+
+    // No spend path in M1.
+    entry locked() {
+        require(this.activeInputIndex < 0);
+    }
+}
