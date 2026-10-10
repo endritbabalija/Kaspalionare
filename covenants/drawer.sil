@@ -48,6 +48,11 @@ contract Drawer(
     int constant RESERVE_MAX = 10000000000;
     // Upper bound of f_min (spec M3 A3.1 ranges): 10^10.
     int constant F_MIN_MAX = 10000000000;
+    // Lower bound of f_min, 0.1 KAS (user decision A, M3 Stage 5): f_min = 0 would make a
+    // round with T_F = 0 pay a zero-value fee output, which is consensus-invalid (rusty-kaspa
+    // v2.1.0 tx_validation_in_isolation.rs:150-151), and a tiny f_min breaks the storage
+    // mass (docs/costs.md M3-d). game::F_MIN_FLOOR.
+    int constant F_MIN_FLOOR = 10000000;
     // A6 (user decision 2026-10-10): G2 <= TOTAL_MAX / 254 before n2 x G2, only when a
     // second-prize pool is created. 2^62 / 254 = 18,156,244,167,036,960.
     int constant G2_MAX = 18156244167036960;
@@ -225,7 +230,7 @@ contract Drawer(
         require(unsigned(role) == 10);
         require(round >= 1);
         require(round < TOTAL_MAX);
-        require(f_min >= 0);
+        require(f_min >= F_MIN_FLOOR); // mut:D1_fmin
         require(f_min <= F_MIN_MAX);
         require(claim_window >= 0);
         require(claim_window < DAA_MAX);
@@ -496,8 +501,8 @@ contract Drawer(
         }
 
         // ==== check 12: which pools exist (D45)
-        bool jp = hJ >= 1 && mk.jackpot > 0;
-        bool sp = n2 >= 1 && mk.g2 > 0;
+        bool jp = hJ >= 1 && mk.jackpot > 0; // mut:D12_jp
+        bool sp = n2 >= 1 && mk.g2 > 0; // mut:D12_sp
         // W_t (D46, design 4.1) at the marker's m: <= 3,000 x 49 (A6). slice_t = B_t / W_t,
         // lp_t = [slice_t >= 1].
         int[] wt = int[]{125, 125 * (mk.m - 1), 3000, 3000 * (mk.m - 1), 23000};

@@ -335,13 +335,65 @@ async fn wait_daa(ctx: &Ctx, target: u64, what: &str) -> Result<(), String> {
     }
 }
 
-/// Our confirmed UTXO at (txid, index), with its creation DAA score from the UTXO index.
-async fn ours(ctx: &Ctx, txid: kaspa_consensus_core::tx::TransactionId, index: usize) -> Result<Utxo, String> {
-    ctx.funds()
-        .await?
-        .into_iter()
-        .find(|u| u.op.transaction_id == txid && u.op.index as usize == index)
-        .ok_or_else(|| format!("output {txid}:{index} not found in our UTXO set"))
+/// The virtual's selected parent (sink). Taken before a submission, it is a start hash for
+/// `merged`: the chain block that merges the transaction comes after it.
+async fn sink(ctx: &Ctx) -> Result<kaspa_rpc_core::RpcHash, String> {
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    Ok(ctx.client.get_block_dag_info().await.map_err(|e| e.to_string())?.sink)
+}
+
+/// The node's UTXO entry of `op` (script `spk`), once the transaction that created it has
+/// been merged by a chain block, and only if the entry carries that chain block's DAA
+/// score (O-S4-4, Stage 5 review item 6).
+///
+/// Why: an output accepted only by the virtual carries the virtual's DAA score
+/// (`calculate_utxo_state(.., virtual_daa_window.daa_score)`, rusty-kaspa v2.1.0
+/// `consensus/src/pipeline/virtual_processor/processor.rs:571-582`); the chain block that
+/// later merges the transaction re-adds the output with its own header DAA score
+/// (`pov_daa_score = header.daa_score`, same file `:446-455`). An entry from a mempool
+/// parent has DAA `UNACCEPTED_DAA_SCORE` = u64::MAX (`consensus/core/src/constants.rs:51`),
+/// which `OpTxInputDaaScore` pushes as `block_daa_score as i64` = -1
+/// (`crypto/txscript/src/opcodes/mod.rs:1130`). draw() check 19 requires `own_daa` to equal
+/// the maximum input DAA score, so a draw built on a virtual-only DAA score fails on the node.
+///
+/// The accepting chain block comes from `GetVirtualChainFromBlock(start, accepted ids)`,
+/// its DAA score from `GetBlock`; the loop waits until the UTXO index entry equals it.
+async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_core::tx::TransactionOutpoint, spk: &kaspa_consensus_core::tx::ScriptPublicKey) -> Result<Utxo, String> {
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    let addr = kaspa_txscript::extract_script_pub_key_address(spk, kaspa_addresses::Prefix::Testnet).map_err(|e| e.to_string())?;
+    let t0 = std::time::Instant::now();
+    let mut last = String::new();
+    while t0.elapsed() < std::time::Duration::from_secs(300) {
+        let vc = ctx.client.get_virtual_chain_from_block(start, true, None).await.map_err(|e| e.to_string())?;
+        let acc = vc.accepted_transaction_ids.iter().find(|a| a.accepted_transaction_ids.contains(&op.transaction_id));
+        let note = match acc {
+            None => "not yet merged by a chain block".to_string(),
+            Some(a) => {
+                let daa = ctx.client.get_block(a.accepting_block_hash, false).await.map_err(|e| e.to_string())?.header.daa_score;
+                let found = crate::net::utxos(&ctx.client, &addr)
+                    .await?
+                    .into_iter()
+                    .find(|e| kaspa_consensus_core::tx::TransactionOutpoint::from(e.outpoint.clone()) == op);
+                match found {
+                    Some(e) => {
+                        let ne: kaspa_consensus_core::tx::UtxoEntry = e.utxo_entry.into();
+                        if ne.block_daa_score == daa {
+                            println!("{op}: merged by chain block {} at DAA {daa}; node entry DAA {} (after {:.1} s)", a.accepting_block_hash, ne.block_daa_score, t0.elapsed().as_secs_f64());
+                            return Ok(Utxo { op, entry: ne, padded: false });
+                        }
+                        format!("node entry DAA {} != accepting chain block DAA {daa}", ne.block_daa_score)
+                    }
+                    None => format!("merged at DAA {daa} but not in the UTXO index"),
+                }
+            }
+        };
+        if note != last {
+            println!("{op}: waiting ({note})");
+            last = note;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(format!("{op}: no chain-merged UTXO entry within 300 s ({last})"))
 }
 
 /// M3 (spec M3-g): genesis -> buy -> close -> `draw()` at K = 16 with the real scripts, each
@@ -354,8 +406,9 @@ async fn ours(ctx: &Ctx, txid: kaspa_consensus_core::tx::TransactionId, index: u
 /// - close(): K = 16, funded by the buy change; it sets seed_ref = own + seed_offset (600 DAA,
 ///   about a minute at 10 BPS), so the probe waits for the virtual DAA score to pass it.
 /// - draw_test_seed(): drawer, marker, vault, controller and one funding input (the close
-///   caller output); lock_time = seed_ref. Every input's creation DAA score comes from our
-///   UTXO index (outputs of one transaction share it).
+///   caller output); lock_time = seed_ref. Every input's entry (and creation DAA score) is
+///   the node's own, read only after a chain block merged the creating transaction
+///   (`merged`, O-S4-4), re-read just before submission, and the draw is rebuilt if it moved.
 /// Locked on testnet afterwards: round 2's objects, the drawer', vault', controller', the
 /// new pools (no claim path in M3) and the ticket. The caller output is ours.
 pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
@@ -394,11 +447,13 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
     gf.run().map_err(|(i, e)| format!("local engine rejects draw-m3 genesis at input {i}: {e:?}"))?;
     let cov = covenant_id(&gf);
     let gs = sent_of(&gf);
+    let g_start = sink(ctx).await?;
     if !ctx.submit(&format!("setup: draw-m3 genesis, K = {K}, real templates, R = {:.2} KAS", g.reserve() as f64 / KAS as f64), &gs, true).await? {
         return Err("draw-m3 genesis rejected".into());
     }
     let gid = gs.tx.id();
-    let gchange = ours(ctx, gid, gs.tx.outputs.len() - 1).await?;
+    let gn = gs.tx.outputs.len() - 1;
+    let gchange = merged(ctx, g_start, Op::new(gid, gn as u32), &gs.tx.outputs[gn].script_public_key).await?;
     let gdaa = gchange.entry.block_daa_score;
     println!("genesis {gid} at DAA {gdaa}; covenant id {cov}");
 
@@ -426,11 +481,13 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
     let bf = buy_fin(&bc);
     bf.run().map_err(|(i, e)| format!("local engine rejects draw-m3 buy at input {i}: {e:?}"))?;
     let bs = sent_of(&bf);
+    let b_start = sink(ctx).await?;
     if !ctx.submit(&format!("setup: draw-m3 buy() of the jackpot combination {:?} + {} on shard 0", unrank(sn.rank), sn.bonus), &bs, true).await? {
         return Err("draw-m3 buy rejected".into());
     }
     let bid = bs.tx.id();
-    let bchange = ours(ctx, bid, bs.tx.outputs.len() - 1).await?;
+    let bn = bs.tx.outputs.len() - 1;
+    let bchange = merged(ctx, b_start, Op::new(bid, bn as u32), &bs.tx.outputs[bn].script_public_key).await?;
     let bdaa = bchange.entry.block_daa_score;
     let tree0 = bc.proofs().2;
 
@@ -467,11 +524,13 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
     cf.run().map_err(|(i, e)| format!("local engine rejects draw-m3 close at input {i}: {e:?}"))?;
     let x = c.expected();
     let cs = sent_of(&cf);
+    let c_start = sink(ctx).await?;
     if !ctx.submit(&format!("setup: draw-m3 close(), K = {K}, one sale of 1 KAS"), &cs, true).await? {
         return Err("draw-m3 close rejected".into());
     }
     let cid = cs.tx.id();
-    let caller = ours(ctx, cid, cs.tx.outputs.len() - 1).await?;
+    let cn = cs.tx.outputs.len() - 1;
+    let caller = merged(ctx, c_start, Op::new(cid, cn as u32), &cs.tx.outputs[cn].script_public_key).await?;
     let cdaa = caller.entry.block_daa_score;
     let seed_ref = x.marker.seed_ref;
     println!("close {cid} at DAA {cdaa}; seed_ref {seed_ref}");
@@ -504,36 +563,57 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
         b.outpoints = dops.clone();
         b.finish()
     };
-    let df = draw_fin(&d);
-    d.fee = lottery_fee(&df);
-    let df = draw_fin(&d);
-    df.run().map_err(|(i, e)| format!("local engine rejects draw-m3 draw at input {i}: {e:?}"))?;
-    let dx = d.expected();
     // Wait for the lock time (D51): the virtual DAA score must pass seed_ref.
     wait_daa(ctx, seed_ref as u64 + 20, "seed_ref").await?;
-    // Check the builder's input entries against the node's UTXO set (amount, script, creation
-    // DAA score, covenant ID) and re-run the local engine on the node's entries.
-    let mut node_entries = df.entries.clone();
-    for (i, op) in dops.iter().enumerate() {
-        let spk = &df.entries[i].script_public_key;
-        let addr = kaspa_txscript::extract_script_pub_key_address(spk, kaspa_addresses::Prefix::Testnet).map_err(|e| e.to_string())?;
-        let found = crate::net::utxos(&ctx.client, &addr).await?.into_iter().find(|e| Op::from(e.outpoint.clone()) == *op);
-        match found {
-            Some(e) => {
-                let ne: kaspa_consensus_core::tx::UtxoEntry = e.utxo_entry.into();
-                if ne != df.entries[i] {
-                    println!("input {i} ENTRY MISMATCH: node amount {} daa {} cov {:?}; builder amount {} daa {} cov {:?}", ne.amount, ne.block_daa_score, ne.covenant_id, df.entries[i].amount, df.entries[i].block_daa_score, df.entries[i].covenant_id);
-                } else {
-                    println!("input {i}: node entry = builder entry (amount {}, daa {})", ne.amount, ne.block_daa_score);
-                }
-                node_entries[i] = ne;
-            }
-            None => println!("input {i}: {op} not found at {addr}"),
+    // O-S4-4 (Stage 5): build the draw only from the node's own UTXO entries of inputs whose
+    // creating transaction a chain block has merged (`merged`), then re-read them just
+    // before submission; if any entry changed (e.g. a reorganisation moved the merging
+    // chain block), rebuild from the new entries instead of submitting.
+    let starts = [g_start, c_start, g_start, c_start, c_start];
+    let spks: Vec<_> = draw_fin(&d).entries.iter().map(|e| e.script_public_key.clone()).collect();
+    let mut built = None;
+    for attempt in 1..=3 {
+        let mut node = Vec::new();
+        for (i, op) in dops.iter().enumerate() {
+            node.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
         }
+        d.drawer_daa = node[0].block_daa_score;
+        d.marker_daa = node[1].block_daa_score;
+        d.vault_daa = node[2].block_daa_score;
+        d.controller_daa = node[3].block_daa_score;
+        d.funding = vec![FundingIn { value: node[4].amount, daa: node[4].block_daa_score }];
+        d.fix_lock_time();
+        let df = draw_fin(&d);
+        d.fee = lottery_fee(&df);
+        let df = draw_fin(&d);
+        if df.entries != node {
+            for i in 0..node.len() {
+                if df.entries[i] != node[i] {
+                    println!(
+                        "input {i}: builder entry differs from the node's (amount {} / {}, daa {} / {}, cov {:?} / {:?})",
+                        df.entries[i].amount, node[i].amount, df.entries[i].block_daa_score, node[i].block_daa_score, df.entries[i].covenant_id, node[i].covenant_id
+                    );
+                }
+            }
+            return Err("draw-m3: the builder's input entries do not match the node's beyond the DAA score".into());
+        }
+        df.run().map_err(|(i, e)| format!("local engine rejects draw-m3 draw at input {i}: {e:?}"))?;
+        // Re-read right before submission; rebuild if anything moved.
+        let mut again = Vec::new();
+        for (i, op) in dops.iter().enumerate() {
+            again.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+        }
+        if again == node {
+            for (i, e) in node.iter().enumerate() {
+                println!("input {i}: node entry = builder entry (amount {}, daa {})", e.amount, e.block_daa_score);
+            }
+            built = Some(df);
+            break;
+        }
+        println!("attempt {attempt}: a node entry changed between build and submission; rebuilding");
     }
-    for i in 0..df.tx.inputs.len() {
-        println!("input {i} on the node's entries: {:?}", harness::execute(&df.tx, &node_entries, i, true));
-    }
+    let df = built.ok_or("draw-m3: node entries kept changing; not submitted")?;
+    let dx = d.expected();
     let ds = sent_of(&df);
     let ok = ctx
         .submit(

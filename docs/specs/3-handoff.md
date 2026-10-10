@@ -8,7 +8,7 @@ Branch: `m3-draw`.
 - [x] Stage 2 — tests first (DrawCase, m3_draw, m3_attacks, DP22)
 - [x] Stage 3 — implement drawer.sil (all M0-M3 tests green, debug and release)
 - [x] Stage 4 — mutants, measurements, tn10 probe (no stop trigger; open items O-S4-1, O-S4-4 security-relevant)
-- [ ] Stage 5 — adversarial review and fixes
+- [x] Stage 5 — adversarial review and fixes (decisions A, B; review items 2-7; open item O-S5-1)
 - [ ] Stage 6 — record and commit
 
 ## Stage 1: files changed
@@ -409,6 +409,7 @@ R stays 1.69 KAS (draw alone needs R >= 1.07 KAS).
   genesis went to testnet (about 95 KAS stay locked there, see tn10-mass-check.md).
 
 ## Stage 4: open items
+- O-S4-1 RESOLVED in Stage 5 by user decision A (S5-1). Original note:
 - O-S4-1 (SECURITY-RELEVANT, liveness; user decision): the genesis builder and the
   drawer's A3.1 ranges accept 0 <= f_min <= 10^10, which causes two problems.
   - With f_min = 0, a round with T_F = acc + F = 0 (no sales, acc 0) must pay a 0-sompi
@@ -421,7 +422,7 @@ R stays 1.69 KAS (draw alone needs R >= 1.07 KAS).
   - Proposed: genesis (and the A3.1 range) requires f_min >= a floor, e.g.
     f_min >= 0.06 KAS at R = 1.69 KAS (M3-d), or simply f_min = F_MIN = 1 KAS fixed.
   - Not changed in Stage 4 (design/spec decision). Stage 5 reviewer: confirm.
-- O-S4-2 (spec, not security): "np = 5" in DP21/M3-b/M3-d vs the script maximum 7 (S4-1).
+- O-S4-2 (spec, not security; correction listed in Stage 5): "np = 5" in DP21/M3-b/M3-d vs the script maximum 7 (S4-1).
 - O-S4-3 (tooling): M_DRAW > 64 would need a larger zero buffer in drawer.sil (check 9's
   `zeros`, 128 B). Not relevant while M_DRAW = 50.
 
@@ -460,7 +461,7 @@ R stays 1.69 KAS (draw alone needs R >= 1.07 KAS).
   - `info` now lists each UTXO with its creation DAA score.
 - Balance after: 8,648.65 testnet KAS.
 
-## Stage 4: open item O-S4-4 (SECURITY-RELEVANT, liveness; investigate in Stage 5)
+## Stage 4: open item O-S4-4 (SECURITY-RELEVANT, liveness) — EXPLAINED and handled in Stage 5 (S5-5)
 - **What happened.** Run 2's draw was rejected on testnet-10 by a failed `require`, but
   the identical transaction passed the local v2.1.0 engine on the builder's entries. The
   cause is unknown.
@@ -481,6 +482,73 @@ R stays 1.69 KAS (draw alone needs R >= 1.07 KAS).
   - No consensus or security impact on funds is known.
 - **Stage 5:** confirm by spending only deep inputs, or by repeating with an immediate
   draw after close.
+
+## Stage 5: review fixes (covenant reviewer findings + user decisions A, B)
+
+### Files changed
+- `covenants/drawer.sil`: constant `F_MIN_FLOOR = 10000000`; check 1 `require(f_min >= F_MIN_FLOOR); // mut:D1_fmin` (was `>= 0`); tags `// mut:D12_jp`, `// mut:D12_sp` on the check 12 declarations (no logic change). Redeem 42,045 -> 42,049 B.
+- `crates/lottery/src/game.rs`: `F_MIN_FLOOR` (0.1 KAS) and `G2_MAX` (TOTAL_MAX / 254).
+- `crates/lottery/src/genesis.rs`: `validate()` adds f_min >= F_MIN_FLOOR, drawn == 1, j_boost <= jackpot, g2 <= G2_MAX; the share-room sum and the L(1) formula are i128; `set_jackpot` uses checked arithmetic. New unit test `genesis_refuses_stage5_review_instances`.
+- `crates/lottery/tests/common/m3.rs`: attacks `y_pot_x2_below_x1`, `f_min_below_floor`; positive cases `zero_jackpot_held`, `zero_g2_held`.
+- `crates/lottery/tests/m3_attacks.rs`: `da18_f_min_below_floor`, `da4_out_of_order_witness` (21 tests).
+- `crates/lottery/tests/m3_draw.rs`: `dp23_zero_sales_round_at_f_min_floor`, `dp24_zero_prizes_held` (24 tests).
+- `crates/lottery/tests/m3_mutants.rs`: `killed_positive`; `d1_fmin`, `weakened_d12_jp`, `weakened_d12_sp`, `d17_y_pass_and_x2_ge_together`; tag count 85 -> 88 (93 tests).
+- `crates/lottery/tests/m3_measure.rs`: M3-d also measured at f_min = F_MIN_FLOOR (asserts <= 90 % per shape and for the supremum); M3-e prints the supremum fee at the floor.
+- `crates/tn10/src/cases.rs`: `sink`, `merged` (chain-merged node entries); `draw_m3` builds every DAA-dependent transaction from them, re-reads the draw inputs before submission and rebuilds on change; `ours` removed.
+- `docs/costs.md`: M3 numbers re-run (drawer +4 B), M3-d floor table, M3-e row. `docs/tn10-mass-check.md`: O-S4-4 explanation, run 4.
+
+### Naming note (decision A)
+The user called the floor "F_MIN = 0.1 KAS". The code already had `F_MIN` = 1 KAS (spec D41: the default fee threshold every fixture uses). The floor is named `F_MIN_FLOOR` (10,000,000 sompi) in `game.rs` and `drawer.sil`; `F_MIN` (1 KAS) stays the default f_min. If the user meant to lower the default to 0.1 KAS as well, that is a one-line change plus DP12/DP13/M3-d fixture updates (not done).
+
+### Item -> test -> result
+| Item | Fix | Test(s) | Failing first (right reason) | After |
+|---|---|---|---|---|
+| A f_min floor, drawer | check 1 `f_min >= F_MIN_FLOOR` (D1_fmin) | m3_attacks `da18_f_min_below_floor` (f_min = floor - 1, 0, -1 rejected; floor accepted) | "ATTACK ACCEPTED by input 0" | pass; ATTRIB check 1 (x3) |
+| A mutant / negative control | — | m3_mutants `d1_fmin` (guard removed in memory: the attack is accepted by input 0) | — | pass (killed) |
+| A f_min floor, genesis | `range("f_min", d.f_min, F_MIN_FLOOR, F_MIN_MAX)` | unit `genesis_refuses_stage5_review_instances` (floor - 1 and 0 refused, floor accepted) | "f_min = F_MIN_FLOOR - 1: bad instance accepted" | pass |
+| A other paths | none needed: f_min is set only at genesis and copied unchanged into drawer' (check 22); `set_params` writes only next s_F, s_R and fee address (`params.sil:159-162`); marker/vault/pool legs read only the drawer's role and round | — | — | — |
+| A positive, end to end | — | m3_draw `dp23_zero_sales_round_at_f_min_floor`: genesis f_min = floor, acc 0 -> close (0 sales) -> draw (fee carried, no fee output, every output > 0, drawer' keeps f_min) -> round 2 close. Rust side: the same round at f_min = 0 needs a 0-sompi fee output | (positive) | pass |
+| A storage | — | m3_measure `m3d_reserve_recheck` at T_F = F_MIN_FLOOR: worst measured 371,979 (74.4 %), supremum 382,182 (76.4 %) <= 90 % | — | pass |
+| B G2 genesis | `g2 <= G2_MAX` | unit test: G2_MAX accepted, G2_MAX + 1 refused (L(1) consistent, vault TOTAL_MAX) | "G2 = G2_MAX + 1: bad instance accepted" | pass |
+| 2 j_boost <= jackpot | genesis check | unit test (J 1 KAS, J_boost 2 KAS, pot 2 KAS, L(1) consistent) | "j_boost > jackpot: bad instance accepted" | pass |
+| 3 overflow | i128 room and L(1) | unit test (G2 = 2^62, m = 5: 2^64). Negative control with the old i64 code and the G2 check off: debug "attempt to multiply with overflow" (validate panicked), release "bad instance accepted" | yes (both profiles) | pass |
+| 4 drawn == 1 | genesis check | unit test (drawn = 0) | "drawn = 0: bad instance accepted" | pass |
+| 5 D45 zero prizes | tags only | m3_draw `dp24_zero_prizes_held` (J = 0 with h_J >= 1: no jackpot pool; G2 = 0 with n2 >= 1: no second pool); m3_mutants `weakened_d12_jp` (`bool jp = hJ >= 1;`), `weakened_d12_sp` (`bool sp = n2 >= 1;`) | — | pass; both mutants reject the valid draw at input 0 (VerifyError): killed |
+| 6 tn10 O-S4-4 | `merged` + rebuild loop | `cargo run -p tn10 -- probe draw-m3` (run 4) | — | ACCEPTED: draw `8b9d0a0c…8305`; all 5 node entries = builder entries, each DAA = its merging chain block's |
+| 7 D17 pair | none (both kept) | m3_attacks `da4_out_of_order_witness` (y = O' above the largest passing y, x2 = the largest x passing with O', below x1); m3_mutants `d17_y_pass_and_x2_ge_together`: either one removed still rejects (redundant), BOTH removed accepts (killed) | — | pass; ATTRIB check 17 |
+
+### Item 7 note (mutant table)
+D17_y_pass and D17_x2_ge are each redundant only because the other is present (the Stage 4 redundancy arguments for them lean on each other). With both removed, the witness (x1, O', x2 < x1) in the capped regime passes every remaining A5 check. Both are kept and back each other up; the pair mutant is killed by `da4_out_of_order_witness`.
+
+### Decision B: admin paths
+No admin path can change g, G2, the m range or f_min: `set_params` (params.sil) writes only next_s_f, next_s_r and the next fee address. G2 changes only in draw(): G2' = muldiv(x2 + y, g) (check 17), which the covenant does not bound by G2_MAX (open item O-S5-1).
+
+### Stage 5 decisions (not yet in DECISIONS.md; one row each in Stage 6)
+- S5-1 USER-APPROVED (decision A): f_min >= F_MIN_FLOOR = 0.1 KAS in the drawer's A3.1 range check and in genesis `validate()` (named F_MIN_FLOOR; the F_MIN = 1 KAS default is kept, see the naming note).
+- S5-2 USER-APPROVED (decision B): the covenant bound stays G2 <= TOTAL_MAX / 254 (only when a second-prize pool is created); genesis also requires G2(1) <= G2_MAX.
+- S5-3 (review 2-4): genesis requires J_boost <= J and drawn = 1; `validate()` arithmetic in i128.
+- S5-4 (review 5): tags D12_jp / D12_sp and the `killed_positive` mutant kind.
+- S5-5 (review 6, O-S4-4): builder policy: DAA-dependent transactions (close, draw) spend only inputs a chain block has merged, with the node's entry; re-read before submission, rebuild on change.
+- S5-6 (review 7): the D17_y_pass / D17_x2_ge pair is recorded as mutual backup; both kept.
+
+### Spec corrections to write in Stage 6 (docs/specs/3.md corrections section)
+- O-S4-2: DP21, M3-b and M3-d say np = 5; the script maximum is np <= 7 (jackpot, second prize, five lower tiers).
+- A3.1 drawer ranges: F_MIN_FLOOR <= f_min <= 10^10 (was 0 <= f_min), F_MIN_FLOOR = 0.1 KAS (decision A).
+- D50 / genesis: G2(1) <= TOTAL_MAX / 254, J_boost(1) <= J(1), controller drawn = 1, f_min >= F_MIN_FLOOR.
+- Still to write from earlier stages: S3-9 (own_daa in A4 check 19 and A9); the A6 G2 guard applies only when a second-prize pool is created.
+
+### Stage 5 open items
+- O-S5-1 (liveness at very large scale; not changed, decision B keeps the covenant bound): draw() check 17 sets G2' = muldiv(x2 + y, g) without capping it at G2_MAX. A later round with G2 > G2_MAX and n2 >= 1 would be rejected by the A6 guard forever. Reaching it needs x2 + y >= 10 x G2_MAX (g <= 10 %), about 1.8 x 10^9 KAS of jackpot, with the vault backing G2 (m' - 1) <= cap x V' (V' >= 1.8 x 10^8 KAS). W <= PRICE_MAX x N x M_DRAW ~ 7.1 x 10^17 sompi does not exclude it. Unreachable in practice but not excluded by an invariant. Options: cap G2' in check 17 (G2' <= G2_MAX as part of `pass`), or accept and record. Needs a design decision; not implemented.
+- O-S4-1: RESOLVED by decision A (S5-1).
+- O-S4-4: EXPLAINED (virtual-time vs chain-block DAA score of young outputs, see tn10-mass-check.md) and handled in the probe (S5-5). Run 4 was accepted. No entry moved during run 4, so the explanation rests on the source reading, not on an observed change.
+
+### Stage 5 test runs (from `crates/`)
+- `cargo test --no-fail-fast` (debug, full workspace, exit 0, 0 failed): harness covenant_smoke 3, m0_limits 3, m0_mass 5, m0_merkle 2, m0_shapes 6; lottery unit 20, m1_attacks 25, m1_buy 14, m1_measure 4, m1_mutants 11, m2_attacks 40, m2_close 8, m2_game 2, m2_measure 5, m2_mutants 25, m2_params 17, m3_attacks 21, m3_draw 24, m3_game 13, m3_measure 7, m3_mutants 93.
+- `cargo test -p lottery --release --test m3_measure -- --nocapture --test-threads=1`: 7 passed; numbers in docs/costs.md M3 (drawer 42,049 B; DP21 worst 141,978 / 369,192 / 59,175; M3-d supremum 292,182 at f_min = 1 KAS, 382,182 = 76.4 % at F_MIN_FLOOR; M3-f unchanged).
+- `M3_ATTRIB=1 cargo test -p lottery --release --test m3_attacks -- da18 da4_out --nocapture --test-threads=1`: da18 -> check 1 (x3); da4_out_of_order_witness -> check 17.
+- Failing-first runs: genesis unit test failed on each new check in turn (f_min, j_boost, drawn, G2) before each fix; da18 failed with "ATTACK ACCEPTED by input 0" before the drawer change; overflow negative control as in the table.
+- `cargo build -p tn10` clean; `cargo run -p tn10 -- probe draw-m3` once (run 4, testnet-10 only, key from `.env`, never printed): genesis `a315cdcd…36ac`, buy `893559d2…81cc`, close `3ca43680…95fd`, draw `8b9d0a0c913e371db9bebe12ab9fc6e0c07e181504a1a910c2d2dd4d26db8305` ACCEPTED (107,052 / 332,728 / 130,534).
+- Not run in Stage 5: the full release suite (only m3_measure and the m3_attacks attribution in release).
 
 ## Decisions not yet in DECISIONS.md
 - USER-APPROVED (2026-10-10, spec A6 "n2·G2"): the guard G2 <= TOTAL_MAX/254 applies ONLY

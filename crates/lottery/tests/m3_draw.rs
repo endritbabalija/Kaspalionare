@@ -17,7 +17,7 @@ use lottery::buy::{Final, KAS};
 use lottery::close::FundingIn;
 use lottery::combo::{Combo, unrank};
 use lottery::draw::{DrawCase, DrawExpected, RoundResult};
-use lottery::game::{CLAIM_WINDOW, DRAW_WINDOW, F_MIN, TOTAL_MAX, muldiv, witness_ok};
+use lottery::game::{CLAIM_WINDOW, DRAW_WINDOW, F_MIN, F_MIN_FLOOR, TOTAL_MAX, muldiv, witness_ok};
 use lottery::smt::{Tree, empty_hashes};
 use lottery::state::{Payout, TIER_JACKPOT, TIER_LOWER0, TIER_SECOND};
 
@@ -538,6 +538,69 @@ fn a6_g2_guard_skipped_without_second_pool() {
     assert_eq!(x.n2, 0);
     assert!(!x.pools.sp);
     run(&c);
+}
+
+// ---------------------------------------------------------------- Stage 5 (review)
+
+/// DP23 (Stage 5, user decision A): a zero-sales round at f_min = F_MIN_FLOOR (0.1 KAS)
+/// with acc = 0 (T_F = 0) is drawn end to end (genesis -> close -> draw, then the round 2
+/// close): the fee is carried (no fee output) and every output has a positive value
+/// (a zero-value output is consensus-invalid, rusty-kaspa v2.1.0
+/// `tx_validation_in_isolation.rs:150-151`, which the script engine does not check).
+/// Rust side: with f_min = 0 (refused by genesis and by the drawer since Stage 5) the same
+/// round would need a fee output of 0 sompi.
+#[test]
+fn dp23_zero_sales_round_at_f_min_floor() {
+    let edit = |f_min: i64| {
+        move |g: &mut lottery::genesis::GenesisCase| {
+            g.drawer.f_min = f_min;
+            g.controller.acc = 0;
+        }
+    };
+    // f_min = 0 (unchecked genesis): the draw would pay a 0-sompi fee output.
+    let mut ch0 = Chain::genesis_with(4, edit(0), false);
+    let (c, ops) = ch0.close_case(900_000);
+    ch0.close(&c, ops, lottery::close::TEST_DEADLINE as u64 + 10);
+    let seed_ref = ch0.marker.as_ref().unwrap().1.seed_ref;
+    let (d0, _) = ch0.draw_case([4u8; 32], &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
+    let x0 = d0.expected();
+    assert_eq!(x0.fee.t_f, 0);
+    assert_eq!(x0.fee_output().map(|i| x0.values[i]), Some(0), "f_min = 0: zero-value fee output");
+    // f_min = F_MIN_FLOOR (checked genesis).
+    let mut ch = Chain::genesis_with(4, edit(F_MIN_FLOOR), true);
+    let (c, ops) = ch.close_case(900_000);
+    ch.close(&c, ops, lottery::close::TEST_DEADLINE as u64 + 10);
+    let mk = ch.marker.as_ref().unwrap().1.clone();
+    assert_eq!((mk.sales, ch.controller.1.acc), (0, 0), "zero sales, A = 0");
+    let seed_ref = mk.seed_ref;
+    let (d, ops) = ch.draw_case([4u8; 32], &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
+    let x = d.expected();
+    assert_eq!(x.fee.t_f, 0);
+    assert!(!x.fee.paid && x.fee_output().is_none(), "T_F = 0 < f_min: carried");
+    let f = ch.draw(&d, ops, d.lock_time + 10);
+    check_draw(&d, &f);
+    assert!(f.tx.outputs.iter().all(|o| o.value > 0), "every output value > 0");
+    assert_eq!(ch.drawer.1.f_min, F_MIN_FLOOR, "drawer' keeps f_min");
+    // The next round is not blocked: the round 2 close.
+    let t2 = ch.controller.1.deadline as u64;
+    let (mut c2, ops) = ch.close_case(t2 - 500);
+    c2.lock_time = t2;
+    ch.close(&c2, ops, t2 + 10);
+    assert_eq!(ch.marker.as_ref().unwrap().1.round, 2);
+}
+
+/// DP24 (Stage 5, review item 5, D45 zero-prize rules): J = 0 with the jackpot held
+/// (h_J >= 1) creates no jackpot pool; G2 = 0 with a second-prize bonus held (n2 >= 1)
+/// creates no second-prize pool. Both draws are accepted (the m3_mutants weakened
+/// `bool jp = hJ >= 1;` / `bool sp = n2 >= 1;` reject them).
+#[test]
+fn dp24_zero_prizes_held() {
+    let c = common::m3::zero_jackpot_held();
+    let (x, _) = run(&c);
+    assert!(!tiers(&x).contains(&TIER_JACKPOT));
+    let c = common::m3::zero_g2_held();
+    let (x, _) = run(&c);
+    assert!(!tiers(&x).contains(&TIER_SECOND));
 }
 
 // ---------------------------------------------------------------- DP22

@@ -15,6 +15,9 @@
 //! Two kinds of exception, each a test of its own:
 //! - `weakened_*`: D16 tags a declaration (`bool paid = ...`), which cannot be removed; the
 //!   mutant replaces its right-hand side by a constant instead.
+//! - `weakened_d12_*` (Stage 5): D12_jp / D12_sp tag the pool-existence declarations; the
+//!   mutant drops the `J > 0` / `G2 > 0` half, and the valid DP24 draw (a zero prize held)
+//!   is rejected by the drawer (`killed_positive`).
 //! - `redundant_*`: tags whose check is implied by other checks of the same script (argument
 //!   in docs/specs/3-handoff.md, Stage 4). The test shows the mutant still rejects the
 //!   attack at the named input, so a later change that removes the implying check is noticed.
@@ -85,6 +88,24 @@ fn drawer_replaced(id: &str, line: &str) -> Arc<Templates> {
 }
 
 const D: Sil = Sil::Drawer;
+
+/// A mutant that only changes what counts as a valid draw (Stage 5, D12_jp / D12_sp): the
+/// committed templates accept `good` (a positive test), the mutant rejects it at the
+/// drawer, so that positive test fails under the mutant.
+fn killed_positive(t: Arc<Templates>, label: &str, good: lottery::draw::DrawCase) {
+    accept_draw(&good.build());
+    let g = retarget(good, &t).build_with(t);
+    let e = reject_at(&g, DRW);
+    println!("mutant {label}: valid draw rejected at input {DRW}: {e:?}");
+}
+
+// ================================================================ drawer: check 1 (Stage 5)
+
+#[test]
+fn d1_fmin() {
+    // DA18 (Stage 5, decision A): drawer state f_min = F_MIN_FLOOR - 1.
+    killed(D, &["D1_fmin"], f_min_below_floor());
+}
 
 // ================================================================ drawer: check 2
 
@@ -293,7 +314,32 @@ fn weakened_d16_never_paid() {
     killed_assign_under(drawer_replaced("D16", "        bool paid = false;"), "D16 paid = false", fee_carried_above());
 }
 
+// ================================================================ drawer: check 12 (Stage 5)
+
+#[test]
+fn weakened_d12_jp() {
+    // DP24: J = 0 with h_J >= 1 creates no jackpot pool; `jp = hJ >= 1` demands one.
+    killed_positive(drawer_replaced("D12_jp", "        bool jp = hJ >= 1;"), "D12_jp jp = hJ >= 1", zero_jackpot_held());
+}
+
+#[test]
+fn weakened_d12_sp() {
+    // DP24: G2 = 0 with n2 >= 1 creates no second-prize pool; `sp = n2 >= 1` demands one.
+    killed_positive(drawer_replaced("D12_sp", "        bool sp = n2 >= 1;"), "D12_sp sp = n2 >= 1", zero_g2_held());
+}
+
 // ================================================================ drawer: check 17 (A5)
+
+#[test]
+fn d17_y_pass_and_x2_ge_together() {
+    // Review item 7: each of D17_y_pass and D17_x2_ge is redundant only because the other
+    // is present. With BOTH removed the out-of-order witness (y = O' above the largest
+    // passing y, x2 < x1) is accepted: da4_out_of_order_witness is killed. With either
+    // one removed the drawer still rejects it.
+    redundant(D, &["D17_y_pass"], y_pot_x2_below_x1());
+    redundant(D, &["D17_x2_ge"], y_pot_x2_below_x1());
+    killed(D, &["D17_y_pass", "D17_x2_ge"], y_pot_x2_below_x1());
+}
 
 #[test]
 fn d17_x1_base() {
@@ -596,6 +642,7 @@ fn every_m3_tag_is_tested() {
             n += 1;
         }
     }
-    // 63 drawer tags and 22 leg tags (Stage 4 count).
-    assert_eq!(n, 85, "M3 tag count changed: update this test and the handoff table");
+    // 66 drawer tags and 22 leg tags (Stage 4: 63 + 22; Stage 5 added D1_fmin, D12_jp,
+    // D12_sp).
+    assert_eq!(n, 88, "M3 tag count changed: update this test and the handoff table");
 }

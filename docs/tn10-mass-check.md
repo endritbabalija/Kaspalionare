@@ -165,7 +165,25 @@ Compute and transient mass match the local M3-b figures for this shape. The `clo
 2. **Run 2**: genesis `7fb8fa44…49d1`, buy `c22e23c5…5081` and close `9c26731b…2602` were accepted. The draw `6a17386a…cf7` was **REJECTED** by the node ("script ran, but verification failed", a failed `require`), although the local engine had accepted the same transaction.
    - That run had no entry check. Its close was read as mined at DAA 593,168,541, below its seed_ref of 593,168,551, and the read happened 0.4 s after the output first became visible.
    - The cause was not identified. A possible cause is that a young input's creation DAA score changed between the read and the node's validation, which would break the exact `own_daa` equality of check 19. Its caller output was spent before it could be re-read.
-   - This is an open item in the M3 handoff (O-S4-4).
+   - This was open item O-S4-4; explained below (Stage 5).
 3. **Run 3**: the probe above, with the entry check, was accepted.
+
+**O-S4-4 explanation (M3 Stage 5 review):** run 2's rejection fits how the node assigns creation DAA scores; the exact `own_daa` equality of draw() check 19 exposes it.
+- An output accepted only by the virtual (its transaction is in the virtual's mergeset, not yet merged by a chain block) is in the virtual UTXO set with the **virtual's** DAA score: `calculate_utxo_state(.., virtual_daa_window.daa_score)` (rusty-kaspa v2.1.0 `consensus/src/pipeline/virtual_processor/processor.rs:571-582`).
+- When a chain block merges the transaction, the output is re-added with that **chain block's header DAA score** (`pov_daa_score = header.daa_score`, same file `:446-455`). The UTXO index can show the virtual-time score first and the chain-block score later.
+- An input whose parent is still in the mempool has DAA `UNACCEPTED_DAA_SCORE` = u64::MAX (`consensus/core/src/constants.rs:51`), which `OpTxInputDaaScore` pushes as `block_daa_score as i64` = −1 (`crypto/txscript/src/opcodes/mod.rs:1130`).
+- Run 2 read the close output 0.4 s after it appeared, below its own seed_ref: consistent with a virtual-time score that the merging chain block later replaced. The draw's `own_daa` (and D_claim) then no longer matched the node's maximum input DAA score, so check 19 failed. Funds were never at risk (the transaction is simply invalid; the caller retries).
+- **Probe fix (Stage 5):** `draw-m3` now reads each input only after a chain block has merged its creating transaction (`GetVirtualChainFromBlock` with accepted transaction IDs, then `GetBlock` for that chain block's DAA score) and only once the node's UTXO entry carries that DAA score (`cases.rs::merged`). It builds the draw from the node's own entries, re-reads them right before submission, and rebuilds if any entry moved. The same rule applies to the genesis, buy and close outputs that later transactions spend. Builder policy for M4+: never build a DAA-dependent transaction (close, draw) on an input that a chain block has not merged.
+
+**Run 4 (M3 Stage 5, 2026-10-10)**, same probe with the chain-merge rule; node `muon-10.kaspa.blue`, version 2.1.0, DAA ≈ 593,193,888; covenant ID `3aeec3ebd3063973efa4bb197ccc0eef49483dec7bb11a4dc52817cd09912214`. Each input was read after its chain block merged it; the node's entry DAA equalled the merging chain block's DAA score every time (the genesis output was seen "not yet merged by a chain block" for a few seconds before that). No entry moved between build and submission (attempt 1).
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 10,766 | 8,024 | 437,512 | 437,512 | 1 | 0.4376 | accepted (merged at DAA 593,194,441) | `a315cdcd470cff1ffecb98a2e3472688f3029b09d2a4d5352e939e393f5736ac` |
+| setup: `buy()` of the jackpot combination [6, 7, 8, 12, 14] + 7 on shard 0 | 15,637 | 50,148 | 378,497 | 378,497 | 2 | 0.3786 | accepted (merged at DAA 593,194,940) | `893559d2eca8449f91180f89e06f2db2128e51871bbeabf5208f045b4ea281cc` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 293,841 | 864,604 | 426,503 | 432,302 | 19 | 0.4324 | accepted (merged at DAA 593,195,727; seed_ref 593,195,540) | `3ca43680791e15a8de7bba14ca62e7b3de56f63cdba83972a9333605be9f95fd` |
+| **`draw_test_seed()`, real scripts (Stage 5 drawer, f_min floor), K = 16, a = 0, np = 4, h_J = 1, n2 = 0, fee paid** | **107,052** | **332,728** | **130,534** | 166,364 | 5 | 0.1665 | **accepted; visible after 4.9 s** | `8b9d0a0c913e371db9bebe12ab9fc6e0c07e181504a1a910c2d2dd4d26db8305` |
+
+Round result from the draw transaction bytes (`RoundResult::from_tx`): round 1, win (6, 7, 8, 12, 14, 7), D_claim 599,675,540; pools (tier, slice, value in sompi) (0, 10 KAS, 1,169,000,000), (2, 32,000, 173,000,000), (3, 2,666, 172,000,000), (4, 1,000, 172,000,000). The draw's compute and transient are 4 and 16 above run 3 (the drawer grew by 4 B).
 
 Locked on testnet (no spend path in M3): the round 2 objects, drawer', vault', controller', the 4 pools and the ticket of run 3. Runs 1 and 2 also left their genesis (and run 2's round 1 to 2) objects. The caller and marker refund outputs are ours. Balance after: 8,648.65 testnet KAS.

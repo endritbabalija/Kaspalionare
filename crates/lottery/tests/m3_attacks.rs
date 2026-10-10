@@ -837,3 +837,27 @@ fn a6_g2_guard_with_second_pool() {
     pair(&good, &bad, DRW);
     done(&good);
 }
+
+// ---------------------------------------------------------------- Stage 5 (review)
+
+/// DA18 (Stage 5, user decision A): the drawer rejects its own state when f_min is below
+/// F_MIN_FLOOR = 0.1 KAS (A3.1 range, check 1). f_min = F_MIN_FLOOR - 1, 0 and -1, each
+/// copied into drawer' (the builder follows the state), fee paid either way.
+#[test]
+fn da18_f_min_below_floor() {
+    s4::f_min_below_floor().strike();
+    for f in [0, -1] {
+        s4::Atk::case(DRW, base(), move |c| c.drawer.f_min = f).strike();
+    }
+    // The floor itself is accepted.
+    let mut at = base();
+    at.drawer.f_min = lottery::game::F_MIN_FLOOR;
+    done(&at);
+}
+
+/// Review item 7 (A5): D17_y_pass and D17_x2_ge back each other up; the witness that needs
+/// both removed (y = O' above the largest passing y, x2 < x1) is rejected.
+#[test]
+fn da4_out_of_order_witness() {
+    s4::y_pot_x2_below_x1().strike();
+}

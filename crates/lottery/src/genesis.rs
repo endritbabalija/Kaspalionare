@@ -28,7 +28,7 @@ use kaspa_consensus_core::tx::GenesisCovenantGroup;
 
 use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, spk_of};
 use crate::close::{CloseCase, z18};
-use crate::game::{BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, F_MIN, F_MIN_MAX, M_DRAW, M_HARD, S_F_CAP, S_R_CAP, TOTAL_MAX, muldiv};
+use crate::game::{BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, S_F_CAP, S_R_CAP, TOTAL_MAX, muldiv};
 use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, ShardState, VaultState};
 
 /// Spec M2 A3 range bounds that have no named constant elsewhere (as in `controller.sil`).
@@ -131,7 +131,7 @@ impl GenesisCase {
         c.jackpot = jackpot;
         c.j_boost = 0;
         c.g2 = muldiv(jackpot, c.g);
-        c.liability = jackpot + c.g2 * (c.m - 1);
+        c.liability = c.g2.checked_mul(c.m - 1).and_then(|x| x.checked_add(jackpot)).expect("set_jackpot: L(1) overflows i64");
         self.vault.liability = c.liability;
     }
 
@@ -181,8 +181,10 @@ impl GenesisCase {
         for (i, &st) in c.st.iter().enumerate() {
             range(&format!("st{}", i + 1), st, 0, BP)?;
         }
-        let room = c.st.iter().sum::<i64>() + c.s_c + c.s_d + S_F_CAP + S_R_CAP;
-        if room > BP {
+        // Arithmetic in validate() is i128 (M3 review 3): each term is range-checked above,
+        // but the sums and products below must not depend on that order to be exact.
+        let room: i128 = c.st.iter().map(|&s| s as i128).sum::<i128>() + c.s_c as i128 + c.s_d as i128 + (S_F_CAP + S_R_CAP) as i128;
+        if room > BP as i128 {
             return Err(format!("share room: sum(st) + s_C + s_D + S_F_CAP + S_R_CAP = {room} > {BP}"));
         }
         range("e", c.e, 0, 5_000)?;
@@ -199,6 +201,15 @@ impl GenesisCase {
         }
         if c.fee_class > 2 || (c.fee_class != 1 && c.fee_key[32] != 0) {
             return Err("fee address is not a D11 standard script".into());
+        }
+        // M3 review: round 1 is born with its jackpot fixed (D31); close() requires drawn = 1.
+        if c.drawn != 1 {
+            return Err(format!("controller drawn = {}, must be 1 at genesis", c.drawn));
+        }
+        // M3 review: the drawer's check 4 requires J_boost <= J of the frozen marker, so a
+        // round 1 with J_boost > J could never be drawn.
+        if c.j_boost > c.jackpot {
+            return Err(format!("j_boost {} exceeds the jackpot {}", c.j_boost, c.jackpot));
         }
         if c.j_boost as u64 > self.pot {
             return Err(format!("j_boost {} exceeds the boost pot {}", c.j_boost, self.pot));
@@ -217,7 +228,13 @@ impl GenesisCase {
         if c.m_max > M_DRAW {
             return Err(format!("m_max = {} > M_DRAW = {M_DRAW}: such a round could never be drawn", c.m_max));
         }
-        if c.liability != c.jackpot - c.j_boost + c.g2 * (c.m - 1) {
+        // Decision B (M3 Stage 5): the drawer's A6 guard rejects a second-prize pool with
+        // G2 > TOTAL_MAX / 254, so a round 1 with such a G2 and n2 >= 1 could never be drawn.
+        if c.g2 > G2_MAX {
+            return Err(format!("g2 = {} > G2_MAX = TOTAL_MAX / 254 = {G2_MAX}", c.g2));
+        }
+        // Exact (i128): G2 (m - 1) can exceed 2^63 for G2 <= TOTAL_MAX (M3 review 3).
+        if c.liability as i128 != c.jackpot as i128 - c.j_boost as i128 + c.g2 as i128 * (c.m as i128 - 1) {
             return Err("controller liability is not J_house + G2 (m - 1)".into());
         }
         let v = &self.vault;
@@ -241,7 +258,7 @@ impl GenesisCase {
         if d.round != c.round {
             return Err(format!("drawer round {} != controller round", d.round));
         }
-        range("f_min", d.f_min, 0, F_MIN_MAX)?;
+        range("f_min", d.f_min, F_MIN_FLOOR, F_MIN_MAX)?;
         range("claim_window", d.claim_window, 0, DAA_MAX - 1)?;
         range("draw_window", d.draw_window, 0, DAA_MAX - 1)?;
         // D43: the drawer takes a TEST-ONLY seed.
@@ -434,5 +451,76 @@ mod tests {
         main.network = NetworkType::Mainnet;
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main.build()));
         assert!(r.is_err(), "builder accepted a mainnet genesis");
+    }
+
+    /// M3 Stage 5 (review): the genesis checks added after the covenant review. Each bad
+    /// instance must be refused by `validate()` with an `Err` (never a panic or a silent
+    /// overflow), and each boundary instance accepted.
+    #[test]
+    fn genesis_refuses_stage5_review_instances() {
+        use crate::game::{F_MIN_FLOOR, G2_MAX};
+        let good = case();
+        assert_eq!(good.validate(), Ok(()));
+        let refuse = |name: &str, g: &GenesisCase, needle: &str| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.validate()));
+            match r {
+                Ok(Err(e)) => assert!(e.contains(needle), "{name}: refused for another reason: {e}"),
+                Ok(Ok(())) => panic!("{name}: bad instance accepted"),
+                Err(_) => panic!("{name}: validate() panicked instead of returning Err"),
+            }
+        };
+        // Decision A: f_min >= F_MIN_FLOOR (0.1 KAS); F_MIN_FLOOR itself is accepted.
+        let mut g = good.clone();
+        g.drawer.f_min = F_MIN_FLOOR - 1;
+        refuse("f_min = F_MIN_FLOOR - 1", &g, "f_min");
+        let mut g = good.clone();
+        g.drawer.f_min = 0;
+        refuse("f_min = 0", &g, "f_min");
+        let mut g = good.clone();
+        g.drawer.f_min = F_MIN_FLOOR;
+        assert_eq!(g.validate(), Ok(()), "f_min = F_MIN_FLOOR");
+        // Review 2: J_boost <= J (the drawer's check 4 rejects J_boost > J, so round 1 could
+        // never be drawn). J = 1 KAS, J_boost = 2 KAS with a boost pot that covers J_boost
+        // and L(1) consistent: only the new check can refuse it.
+        let mut g = good.clone();
+        g.pot = 2 * KAS;
+        g.controller.jackpot = KAS as i64;
+        g.controller.j_boost = 2 * KAS as i64;
+        g.controller.liability = g.controller.jackpot - g.controller.j_boost + g.controller.g2 * (g.controller.m - 1);
+        g.vault.liability = g.controller.liability;
+        refuse("j_boost > jackpot", &g, "j_boost");
+        // Review 4: the round 1 controller must be drawn (close() requires drawn = 1).
+        let mut g = good.clone();
+        g.controller.drawn = 0;
+        refuse("drawn = 0", &g, "drawn");
+        // Decision B: G2(1) <= G2_MAX = TOTAL_MAX / 254 (the drawer's A6 guard rejects any
+        // second-prize pool above it). L(1) consistent and backed by the vault, so only the
+        // G2 check can refuse G2_MAX + 1; G2_MAX itself is accepted.
+        for (g2, ok) in [(G2_MAX, true), (G2_MAX + 1, false)] {
+            let mut g = good.clone();
+            g.controller.g2 = g2;
+            g.controller.liability = g.controller.jackpot - g.controller.j_boost + g2 * (g.controller.m - 1);
+            g.vault.liability = g.controller.liability;
+            g.set_vault(TOTAL_MAX);
+            if ok {
+                assert_eq!(g.validate(), Ok(()), "G2 = G2_MAX");
+            } else {
+                refuse("G2 = G2_MAX + 1", &g, "g2");
+            }
+        }
+        // Review 3: G2 (m - 1) must not overflow. G2 = TOTAL_MAX = 2^62 and m = 5 give
+        // 2^64, which wraps to 0 in a release build, so J = J_boost = L = 0 would pass the
+        // L(1) formula; in a debug build the multiplication panics.
+        let mut g = good.clone();
+        g.controller.m = 5;
+        for s in &mut g.shards {
+            s.m = 5;
+        }
+        g.controller.jackpot = 0;
+        g.controller.j_boost = 0;
+        g.controller.g2 = TOTAL_MAX;
+        g.controller.liability = 0;
+        g.vault.liability = 0;
+        refuse("G2 (m - 1) overflow", &g, "");
     }
 }

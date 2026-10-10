@@ -289,6 +289,17 @@ pub const A_MAX: usize = 5;
 pub const F_MIN: i64 = 100_000_000;
 /// Upper bound of the drawer's f_min (spec M3 A3 ranges).
 pub const F_MIN_MAX: i64 = 10_000_000_000;
+/// Lower bound of the drawer's f_min, 0.1 KAS (USER-APPROVED Stage 5 decision A, M3 review;
+/// the user called it "F_MIN"; `F_MIN` above stays the default f_min of 1 KAS, D41).
+/// - f_min = 0 makes a round with T_F = 0 need a zero-value fee output, which is invalid
+///   (rusty-kaspa v2.1.0 `consensus/src/processes/transaction_validator/tx_validation_in_isolation.rs:150-151`),
+///   so that round and every later one could never be drawn.
+/// - A tiny f_min makes the fee output's storage term C / T_F unbounded (costs.md M3-d).
+/// Enforced by the drawer (A3.1 ranges, check 1) and by genesis `validate()`.
+pub const F_MIN_FLOOR: i64 = 10_000_000;
+/// Largest G2 the drawer accepts when it creates a second-prize pool (A6, n2 x G2 with
+/// n2 <= 254): TOTAL_MAX / 254. Genesis `validate()` requires G2(1) <= G2_MAX.
+pub const G2_MAX: i64 = TOTAL_MAX / 254;
 /// Claim window, 7 days at 10 BPS (D39).
 pub const CLAIM_WINDOW: i64 = 6_048_000;
 /// Seed-validity window, 12 h at 10 BPS (D39, design 11).

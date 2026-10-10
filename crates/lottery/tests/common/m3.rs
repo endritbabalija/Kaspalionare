@@ -601,6 +601,57 @@ pub fn x2_below_x1() -> Atk {
     witness(c, (x.fix.x1, x.fix.y, x.fix.x1 - 1))
 }
 
+/// Stage 5 (review item 7, D17_y_pass and D17_x2_ge together): an out-of-order witness.
+/// In the capped regime (the true y < O'), claim y = O' (passes D17_y_pot; D17_y_max is
+/// skipped since y = O') and x2 = the largest x passing with y = O', which is below x1
+/// (pass(x1, O') fails). D17_x2_pass and D17_x2_max hold, so only D17_y_pass (pass(x1, y))
+/// and D17_x2_ge (x2 >= x1) can reject it; each alone does.
+pub fn y_pot_x2_below_x1() -> Atk {
+    let c = regime("y capped, pass(0, O')", |x| x.fix.y < x.o_prime && x.rule.pass(0, x.o_prime));
+    let x = c.expected();
+    let y = x.o_prime;
+    let x2 = largest(0, x.rule.e_lim.min(x.rule.cv), |v| x.rule.pass(v, y));
+    assert!(x2 < x.fix.x1, "x2 {x2} must be below x1 {}", x.fix.x1);
+    assert!(x.rule.pass(x2, y) && !x.rule.pass(x2 + 1, y) && !x.rule.pass(x.fix.x1, y));
+    witness(c, (x.fix.x1, y, x2))
+}
+
+// ---------------------------------------------------------------- Stage 5: f_min floor, D45 zero prizes
+
+/// The drawer state with f_min = F_MIN_FLOOR - 1 (decision A; D1_fmin). The fee stays paid
+/// (T_F >= 1 KAS), the drawer' copies f_min, so only the A3.1 floor can reject it.
+pub fn f_min_below_floor() -> Atk {
+    let good = base();
+    assert!(good.expected().fee.paid);
+    Atk::case(DRW, good, |c| c.drawer.f_min = lottery::game::F_MIN_FLOOR - 1)
+}
+
+/// D45: J = 0 (and J_boost = 0) while the jackpot combination is held (h_J >= 1): no
+/// jackpot pool (jp = h_J >= 1 and J > 0). Round 1, sales 100 KAS.
+pub fn zero_jackpot_held() -> DrawCase {
+    let mut c = DrawCase::new(4);
+    c.set_sales(100 * KAS as i64, 5 * KAS as i64);
+    c.marker.jackpot = 0;
+    c.marker.j_boost = 0;
+    c.hold_jackpot(0, 1);
+    let x = c.expected();
+    assert!(x.h_j >= 1 && !x.pools.jp, "h_J >= 1 and no jackpot pool");
+    c
+}
+
+/// D45: G2 = 0 while a second-prize bonus is held (n2 >= 1): no second-prize pool
+/// (sp = n2 >= 1 and G2 > 0). Round 1, sales 100 KAS.
+pub fn zero_g2_held() -> DrawCase {
+    let mut c = DrawCase::new(4);
+    c.set_sales(100 * KAS as i64, 5 * KAS as i64);
+    c.marker.g2 = 0;
+    let b = c.other_bonus(0);
+    c.hold(1, b, 1);
+    let x = c.expected();
+    assert!(x.n2 >= 1 && !x.pools.sp, "n2 >= 1 and no second-prize pool");
+    c
+}
+
 /// x2 + 1 (D17_x2_pass; DA4).
 pub fn x2_plus_one() -> Atk {
     let c = base();

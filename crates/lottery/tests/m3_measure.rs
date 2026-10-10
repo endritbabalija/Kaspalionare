@@ -23,7 +23,7 @@ use harness::{Masses, masses, priority_fee};
 use lottery::buy::{Final, KAS, Sources, b_max};
 use lottery::close::{CloseCase, FundingIn, MIN_CALLER_OUTPUT};
 use lottery::draw::{DrawCase, compile_drawer};
-use lottery::game::{A_MAX, F_MIN, M_DRAW, muldiv};
+use lottery::game::{A_MAX, F_MIN, F_MIN_FLOOR, M_DRAW, muldiv};
 use lottery::smt::Tree;
 use lottery::state::K_MAX;
 
@@ -245,7 +245,13 @@ fn m3c_drawer_size_and_m_max() {
 /// at R), and a caller output of `caller` sompi. Storage depends only on values and
 /// scripts, so no script runs (`Built::storage_mass`).
 fn storage_case(a: usize, caller: u64) -> DrawCase {
+    storage_case_at(a, caller, F_MIN)
+}
+
+/// `storage_case` with the drawer's f_min set to `f_min` (T_F = f_min exactly).
+fn storage_case_at(a: usize, caller: u64, f_min: i64) -> DrawCase {
     let mut c = DrawCase::at_round(4, 2);
+    c.drawer.f_min = f_min;
     c.marker.st = ST_ALL;
     c.marker.jackpot = 1;
     c.marker.j_boost = 0;
@@ -322,6 +328,25 @@ fn m3d_reserve_recheck() {
     let rest = 10 * (4 * C / r) + (1 + A_MAX as u64) * (C / r) + C / MIN_CALLER_OUTPUT;
     let f_need = C.div_ceil(STORAGE_LIMIT * MARGIN_PCT / 100 - rest);
     println!("Smallest f_min for 90 % at R = {:.2} KAS: {f_need} sompi ({:.4} KAS); f_min = 0 with T_F = 0 requires a zero-value fee output (invalid)", r as f64 / KAS as f64, f_need as f64 / KAS as f64);
+    // Stage 5 (user decision A): the drawer and genesis require f_min >= F_MIN_FLOOR, so the
+    // worst state has T_F = F_MIN_FLOOR. Measured on the same worst shapes, and the supremum.
+    let floor = F_MIN_FLOOR as u64;
+    assert!(floor >= f_need, "F_MIN_FLOOR {floor} below the 90 % floor {f_need}");
+    println!("\nM3-d at f_min = F_MIN_FLOOR = {floor} sompi (T_F = F_MIN_FLOOR):");
+    println!("| a | caller output (KAS) | storage | % of limit | supremum (relief dropped) |\n|---|---|---|---|---|");
+    for a in [0, A_MAX] {
+        for caller in [KAS, 10 * KAS, 1_000 * KAS, 1_000_000 * KAS, 100_000_000 * KAS] {
+            let c = storage_case_at(a, caller, F_MIN_FLOOR);
+            let st = c.build().storage_mass();
+            let sup = storage_sup(a, r, floor, MIN_CALLER_OUTPUT);
+            println!("| {a} | {} | {st} | {:.1} | {sup} |", caller / KAS, st as f64 * 100.0 / STORAGE_LIMIT as f64);
+            assert!(st <= sup, "storage {st} above the supremum {sup}");
+            assert!(st * 100 <= STORAGE_LIMIT * MARGIN_PCT, "M3-d: storage {st} at F_MIN_FLOOR exceeds 90 %");
+        }
+    }
+    let sup = storage_sup(A_MAX, r, floor, MIN_CALLER_OUTPUT);
+    println!("Supremum at a = A_MAX, f_min = F_MIN_FLOOR: {sup} ({:.1} %)", sup as f64 * 100.0 / STORAGE_LIMIT as f64);
+    assert!(sup * 100 <= STORAGE_LIMIT * MARGIN_PCT, "M3-d: draw() storage supremum {sup} at F_MIN_FLOOR exceeds 90 %");
 }
 
 // ---------------------------------------------------------------- M3-e
@@ -348,6 +373,9 @@ fn m3e_priority_fee_vs_c_draw() {
     }
     let sup = storage_sup(A_MAX, lottery::params::TEST_RESERVE, F_MIN as u64, MIN_CALLER_OUTPUT);
     println!("Storage supremum (M3-d) {sup}: priority fee at most {:.4} KAS when storage dominates", sup as f64 * 100.0 / KAS as f64);
+    // Stage 5: f_min may be as low as F_MIN_FLOOR, which raises the storage supremum.
+    let sup = storage_sup(A_MAX, lottery::params::TEST_RESERVE, F_MIN_FLOOR as u64, MIN_CALLER_OUTPUT);
+    println!("Storage supremum at f_min = F_MIN_FLOOR (M3-d) {sup}: priority fee at most {:.4} KAS when storage dominates (C_draw covers it from S = {:.2} KAS)", sup as f64 * 100.0 / KAS as f64, sup as f64 * 100.0 / KAS as f64 * 10_000.0 / 50.0);
 }
 
 // ---------------------------------------------------------------- M3-f
