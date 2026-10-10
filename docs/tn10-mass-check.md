@@ -137,7 +137,7 @@ About 34.1 testnet KAS stay locked: 2 + 19 × 1.69, i.e. the round 2 controller 
 - **`buy()`** on shard 0 sells the round 1 jackpot combination of the TEST-ONLY seed `[0x5e; 32]`, so the draw creates a jackpot pool.
 - **`close()`** (K = 16) is funded by the buy change. It sets seed_ref = own + 600.
 - **`draw_test_seed()`**:
-  - Inputs: drawer, marker, vault, controller, and one funding input (the close caller output). lock_time = seed_ref. Each input's creation DAA score is read from our UTXO index.
+  - Inputs: drawer, marker, vault, controller, and one funding input (the close caller output). lock_time = seed_ref. In run 3 (table below) each input's creation DAA score was read from our UTXO index; run 4 reads chain-merged node entries instead (see the O-S4-4 explanation and run 4 further down).
   - Before submission the probe fetched the node's UTXO entry of every input. Each matched the builder's (amount, script, creation DAA score, covenant ID), and every input passed the local engine on the node's entries.
 - Node: `muon-10.kaspa.blue`, version 2.1.0, DAA ≈ 593,170,947. Covenant ID `278095041b9755b3bf5b8073d97887ce983985e0bca2fe1d2192505aa74d3db0`.
 
@@ -186,4 +186,4 @@ Compute and transient mass match the local M3-b figures for this shape. The `clo
 
 Round result from the draw transaction bytes (`RoundResult::from_tx`): round 1, win (6, 7, 8, 12, 14, 7), D_claim 599,675,540; pools (tier, slice, value in sompi) (0, 10 KAS, 1,169,000,000), (2, 32,000, 173,000,000), (3, 2,666, 172,000,000), (4, 1,000, 172,000,000). The draw's compute and transient are 4 and 16 above run 3 (the drawer grew by 4 B).
 
-Locked on testnet (no spend path in M3): the round 2 objects, drawer', vault', controller', the 4 pools and the ticket of run 3. Runs 1 and 2 also left their genesis (and run 2's round 1 to 2) objects. The caller and marker refund outputs are ours. Balance after: 8,648.65 testnet KAS.
+Locked on testnet (no spend path in M3), for each of runs 3 and 4: the round 2 objects, drawer', vault', controller', the 4 pools and the ticket. Runs 1 and 2 also left their genesis (and run 2's round 1 to 2) objects. The caller and marker refund outputs are ours. Balance after run 3: 8,648.65 testnet KAS (the balance after run 4 was not recorded).

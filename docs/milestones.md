@@ -80,7 +80,7 @@ Done when:
 - `close()` at the largest K runs with worst-case scripts within the per-transaction mass limits confirmed before M1 (feasibility Q7); a shard dragged into a close under a different leader route is rejected.
 
 ## M3 — `draw()` with a test seed
-Status: todo
+Status: done (2026-10-10, spec `docs/specs/3.md`; the drawer singleton leads `draw()`, not the marker (D37); m_max = M_DRAW = 50, R = 1.69 KAS unchanged, f_min ≥ 0.1 KAS; open: next G2 not capped in `draw()` (O-S5-1), seed_ref chosen by the caller (R1); see `docs/DECISIONS.md` and `docs/costs.md`)
 
 Winning numbers from the test-only seed. Lower-tier budgets and slices. Jackpot and second-prize counts from K leaves (8.4). Vault settlement (5.4). Fixing J(r+1) with base, hold-back and top-up (4.6). Boost pot. Fee payout. Prize pools and absorption (7.3). The spec confirms the J-fixing, top-up, fee-threshold and cap proposals, and the tier split.
 

@@ -29,7 +29,7 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
 - Never commit private keys, seeds, mnemonics or node credentials. Personal settings go in `CLAUDE.local.md` (git-ignored).
 
 ## Stack and layout
-- `covenants/` SilverScript sources (`shard.sil`, `ticket.sil`; `m0/`, `m1/` are measurement probes). `crates/` Rust workspace: `harness` (compile, engine, mass), `lottery` (combinations, Merkle tree, state encoders, transaction builder, M1+ tests), `tn10` (testnet probes). `refs/` cloned reference repos (git-ignored, read-only).
+- `covenants/` SilverScript sources (`shard.sil`, `ticket.sil`, `controller.sil`, `marker.sil`, `params.sil`, `drawer.sil`, `vault.sil`, `pool.sil`; `m0/`, `m1/` are measurement probes). `crates/` Rust workspace: `harness` (compile, engine, mass), `lottery` (combinations, Merkle tree, state encoders, transaction builder, M1+ tests), `tn10` (testnet probes). `refs/` cloned reference repos (git-ignored, read-only).
 - Covenants are tested first in the local rusty-kaspa script engine, then on testnet-10.
 - rusty-kaspa: pinned v2.1.0 (`01b532e8…`), SilverScript v1.0.0 (design section 2, `docs/DECISIONS.md`). Use those releases.
 - Development machine is Windows. Prefer commands that work in Git Bash and PowerShell.
@@ -38,7 +38,7 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
   - All tests: `cargo test`
   - One test file with printed measurements: `cargo test --test m0_mass -- --nocapture --test-threads=1` (also `covenant_smoke`, `m0_merkle`, `m0_shapes`, `m0_limits`; `m0_mass` takes about 4 min in debug builds; add `--release` for about 1 min)
   - M1 (crate `lottery`): `cargo test -p lottery` (unit tests plus `m1_buy`, `m1_attacks`, `m1_mutants`, `m1_measure`); measurements: `cargo test -p lottery --release --test m1_measure -- --nocapture --test-threads=1`
-  - M3 (crate `lottery`): `cargo test -p lottery --test m3_game --test m3_draw --test m3_attacks --test m3_mutants`; measurements: `cargo test -p lottery --release --test m3_measure -- --nocapture --test-threads=1`; first failing A4 check per attack: `M3_ATTRIB=1 cargo test -p lottery --release --test m3_attacks -- --nocapture --test-threads=1` (lines starting `ATTRIB`)
+  - M3 (crate `lottery`): `cargo test -p lottery --test m3_game --test m3_draw --test m3_attacks --test m3_mutants`; measurements: `cargo test -p lottery --release --test m3_measure -- --nocapture --test-threads=1`; first failing A4 check per attack: `M3_ATTRIB=1 cargo test -p lottery --release --test m3_attacks -- --nocapture --test-threads=1` (lines starting `ATTRIB`); seed gate (DP22, must fail with the `compile_error!`): `cargo check -p lottery --no-default-features --features mainnet,test-seed`
   - Covenant sources are compiled at test time from `covenants/` by `harness::compile_file`; there is no separate compile step.
   - Testnet-10 probes (not part of `cargo test`): `cargo run -p tn10 -- info` and `cargo run -p tn10 -- probe <all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|close16|close32|close62>` (`buy-m1` submits the real shard script; `draw-m3` runs genesis, buy, close and a K = 16 `draw()` with the real scripts and waits about 2 minutes of DAA time for T and seed_ref). The key is `TN10_PRIVATE_KEY` in the git-ignored `.env` (create it with `cargo run -p tn10 -- keygen` and fund it from the faucet). The endpoint is `TN10_WRPC_URL`, or the public resolver if unset. Results go in `docs/tn10-mass-check.md`.
 

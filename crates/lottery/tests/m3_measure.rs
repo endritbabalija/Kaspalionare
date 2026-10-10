@@ -111,6 +111,19 @@ fn dp21_k16_mdraw_amax_within_limits() {
             f.fee()
         );
         assert_eq!(f.fee(), c.fee, "value conserved (inputs = outputs + fee)");
+        // Economic conservation (A4, excluding R), as m3_draw's check_draw.
+        let x = c.expected();
+        for (i, (o, v)) in f.tx.outputs.iter().zip(&x.values).enumerate() {
+            assert_eq!(o.value, *v, "output {i} value");
+        }
+        let mk = &c.marker;
+        let lhs = (mk.sales - mk.ref_paid - x.amounts.c_close + mk.j_boost) as i128
+            + c.vault.total_assets as i128
+            + (c.pot as i128 + c.controller.acc as i128)
+            + x.q.iter().map(|&q| q as i128).sum::<i128>();
+        let pools: i128 = x.pools.pools.iter().map(|p| p.value as i128).sum();
+        let rhs = pools + x.v_prime as i128 + (x.o_prime + x.fee.a_next) as i128 + if x.fee.paid { x.fee.t_f as i128 } else { 0 } + x.amounts.c_draw as i128;
+        assert_eq!(lhs, rhs, "DP21: A4 conservation");
         assert!(within(&m, 100).iter().all(|&ok| ok), "DP21 exceeds a per-transaction limit: {m:?}");
     }
 }

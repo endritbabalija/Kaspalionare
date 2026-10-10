@@ -35,6 +35,13 @@ use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, ShardState,
 const PRICE_MAX: i64 = 100_000_000_000;
 const DEPOSIT_MAX: i64 = 10_000_000_000;
 const RESERVE_MAX: i64 = 10_000_000_000;
+/// M3 re-review S2: the smallest reserve R whose storage-mass bounds were measured (M2-c
+/// for close() at K = 16; M3-d for draw() at f_min = F_MIN_FLOOR needs about 1.353 KAS).
+/// R is fixed at genesis.
+pub const R_MIN: u64 = crate::params::TEST_RESERVE;
+/// M3 re-review S1: draw_window + claim_window cap, so D_claim (check 19) stays below
+/// DAA_MAX while own < DAA_MAX - WINDOWS_MAX. Both windows are fixed at genesis.
+pub const WINDOWS_MAX: i64 = DAA_MAX / 4;
 
 #[derive(Clone)]
 pub struct GenesisCase {
@@ -195,7 +202,7 @@ impl GenesisCase {
         for (name, v) in [("jackpot", c.jackpot), ("j_boost", c.j_boost), ("g2", c.g2), ("liability", c.liability), ("v_rec", c.v_rec), ("acc", c.acc)] {
             range(name, v, 0, TOTAL_MAX)?;
         }
-        range("reserve", c.reserve, 1, RESERVE_MAX)?;
+        range("reserve", c.reserve, R_MIN as i64, RESERVE_MAX)?;
         for (name, v) in [("deadline", c.deadline), ("round_len", c.round_len), ("d_min", c.d_min), ("seed_offset", c.seed_offset)] {
             range(name, v, 0, DAA_MAX - 1)?;
         }
@@ -261,6 +268,9 @@ impl GenesisCase {
         range("f_min", d.f_min, F_MIN_FLOOR, F_MIN_MAX)?;
         range("claim_window", d.claim_window, 0, DAA_MAX - 1)?;
         range("draw_window", d.draw_window, 0, DAA_MAX - 1)?;
+        if d.draw_window + d.claim_window > WINDOWS_MAX {
+            return Err(format!("draw_window + claim_window > WINDOWS_MAX = {WINDOWS_MAX}: D_claim could reach DAA_MAX"));
+        }
         // D43: the drawer takes a TEST-ONLY seed.
         if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
             return Err(format!("network {:?}: the TEST-ONLY seed drawer is allowed only on testnet or devnet (D43)", self.network));
@@ -522,5 +532,36 @@ mod tests {
         g.controller.liability = 0;
         g.vault.liability = 0;
         refuse("G2 (m - 1) overflow", &g, "");
+    }
+
+    /// M3 re-review S1, S2: genesis windows and reserve that would make every draw()
+    /// impossible (D_claim >= DAA_MAX at check 19, or a draw/close storage mass over the
+    /// limit). Neither value can change after genesis.
+    #[test]
+    fn genesis_refuses_rereview_instances() {
+        let good = case();
+        assert_eq!(good.validate(), Ok(()));
+        for (name, f, needle) in [
+            ("claim_window = DAA_MAX - 1", (|g: &mut GenesisCase| g.drawer.claim_window = DAA_MAX - 1) as fn(&mut GenesisCase), "window"),
+            ("draw_window = DAA_MAX - 1", |g| g.drawer.draw_window = DAA_MAX - 1, "window"),
+            ("windows sum = WINDOWS_MAX + 1", |g| {
+                g.drawer.draw_window = WINDOWS_MAX / 2;
+                g.drawer.claim_window = WINDOWS_MAX - WINDOWS_MAX / 2 + 1;
+            }, "window"),
+            ("reserve = R_MIN - 1", |g| g.controller.reserve = R_MIN as i64 - 1, "reserve"),
+            ("reserve = 1 KAS", |g| g.controller.reserve = KAS as i64, "reserve"),
+        ] {
+            let mut g = good.clone();
+            f(&mut g);
+            match g.validate() {
+                Err(e) => assert!(e.contains(needle), "{name}: refused for another reason: {e}"),
+                Ok(()) => panic!("{name}: bad instance accepted"),
+            }
+        }
+        let mut g = good.clone();
+        g.drawer.draw_window = WINDOWS_MAX / 2;
+        g.drawer.claim_window = WINDOWS_MAX - WINDOWS_MAX / 2;
+        assert_eq!(g.validate(), Ok(()), "windows sum = WINDOWS_MAX");
+        assert_eq!(good.controller.reserve, R_MIN as i64, "fixtures use R = R_MIN");
     }
 }

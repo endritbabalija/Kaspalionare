@@ -222,7 +222,7 @@ The input relief only lowers the mass. So the supremum is 10·4C/R + (1 + a)·C/
 | 5 | 1,000 | 278,493 | 55.7 | 292,182 |
 | 5 | ≥ 10⁶ | 281,979 | 56.4 | 292,182 |
 
-**Supremum at a = A_MAX: 292,182 (58.4 %), which is within 90 %, so R stays at 1.69 KAS.** `draw()` alone would need R ≥ 1.07 KAS, so `close()` (M2-c) sets R.
+**Supremum at a = A_MAX: 292,182 (58.4 %), which is within 90 %, so R stays at 1.69 KAS.** `draw()` alone would need R ≥ 1.07 KAS at f_min = 1 KAS (about 1.353 KAS at f_min = F_MIN_FLOOR), so `close()` (M2-c) sets R.
 
 The fee term C/T_F depends on f_min:
 - At R = 1.69 KAS the supremum stays within 90 % only for f_min ≥ 5,958,837 sompi (0.0596 KAS).
