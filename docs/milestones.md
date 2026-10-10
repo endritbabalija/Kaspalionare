@@ -118,6 +118,8 @@ Done when:
 - value is conserved for every claim and deposit return;
 - measured: `claim()` script and proof size as a function of K and m;
 - `refresh()` produces a byte-identical successor and moves no deadline or seed reference.
+- carried from earlier milestones: `claim()` and `return_deposit()` require the ticket's covenant ID to equal the pool's (look-alike tickets, DECISIONS row of M1 review); the minimum non-final prize rule; A_MAX re-checked with the real pool claim code (D44);
+- if the ticket, controller or marker script changed, `close()` at K = 16 is re-measured; stop and ask if any mass exceeds 90 % (it was 86.5 % transient after M3).
 
 ## M5 — House vault shares
 Status: todo
@@ -135,7 +137,8 @@ Done when:
 - tests reject a zero-share deposit, cancelling a request, settling against the wrong draw's record, a second settlement, a withdrawal that takes the vault below L(r+1), and share × price overflow boundaries;
 - J(r+1) is fixed before that draw's conversions;
 - tests reject withdrawing below the liability L = J_house + G2 × (m − 1) of the round whose jackpot is fixed, before that round is drawn, a conversion at a stale or future price, and a double conversion;
-- value is conserved.
+- value is conserved;
+- if the controller or marker script changed, `close()` at K = 16 is re-measured; stop and ask if any mass exceeds 90 %.
 
 ## M6 — K shards and limits
 Status: todo
@@ -165,3 +168,6 @@ Release gate (not a milestone):
 - no mainnet value until the SilverScript/rusty-kaspa revision check is resolved and the mass-limit result (feasibility Q7) has been re-run against the release in use;
 - the reviewer checklist passes on every shape;
 - an independent audit is scheduled.
+- the `close()` caller can no longer choose seed_ref (review R1, M2), fixed as part of the real seed design;
+- `draw()` caps the next round's G2 at G2_MAX (O-S5-1, M3);
+- the toolchain check is done: SilverScript's rusty-kaspa rev `a41a333` is an ancestor of the pinned release and `crypto/txscript` is diffed (DECISIONS pins row, 2026-10-09).
