@@ -5,16 +5,17 @@
 
 use std::sync::Arc;
 
-use harness::{Hash, TransactionOutpoint, TxScriptError};
+use harness::{Hash, TransactionOutpoint, TxScriptError, UtxoEntry};
 use lottery::buy::InKind;
 use lottery::buy::{BuyCase, Built, Final, KAS, Sources, Templates, b_max, funding_spk};
+use lottery::claim::{ClaimCase, RefreshCase, RefreshObj, ReturnCase, ReturnPath};
 use lottery::close::{CloseCase, FundingIn, ShardIn};
 use lottery::draw::{DrawCase, PoolIn};
 use lottery::genesis::{GenesisCase, covenant_id};
 use lottery::ledger::Ledger;
 use lottery::params::SetParamsCase;
 use lottery::smt::Tree;
-use lottery::state::{ControllerState, DrawerState, MarkerState, ParamsState, PoolState, ShardState, VaultState};
+use lottery::state::{ControllerState, DrawerState, MarkerState, ParamsState, PoolState, ShardState, TicketState, VaultState};
 
 use super::accept;
 
@@ -55,6 +56,20 @@ pub fn attack_at(base: &Built, input: usize, mutate: impl FnOnce(&mut Built)) {
 pub fn attack_pair(good: &Built, bad: &Built, input: usize) {
     reject_at(bad, input);
     accept(good);
+}
+
+// ------------------------------------------------------------------------ M4 helpers
+
+/// M4 acceptance of a claim, return or refresh (`step` names it): every input under its
+/// committed budget, input 0 first. On a rejection the panic names the step and lists every
+/// input's result, so a test that fails shows which M4 transaction (not a genesis, buy,
+/// close or draw before it) the scripts rejected, and why.
+pub fn accept_m4(step: &str, b: &Built) -> Final {
+    let f = b.finish();
+    if let Err((i, e)) = f.run() {
+        panic!("M4 step `{step}`: valid transaction rejected at input {i}: {e:?}; all inputs: {:?}", f.run_all());
+    }
+    f
 }
 
 // ------------------------------------------------------------------------ M3 helpers
@@ -258,6 +273,9 @@ pub enum Sil {
     Vault,
     Pool,
     Drawer,
+    // M4 (stage 2b): the ticket compiles after the pool (ticket(pool), D54), so a ticket
+    // mutant or look-alike changes the ticket and shard hashes only.
+    Ticket,
 }
 
 fn line_tags(line: &str) -> Vec<&str> {
@@ -284,6 +302,7 @@ fn source_mut(src: &mut Sources, which: Sil) -> &mut String {
         Sil::Vault => &mut src.vault,
         Sil::Pool => &mut src.pool,
         Sil::Drawer => &mut src.drawer,
+        Sil::Ticket => &mut src.ticket,
     }
 }
 
@@ -296,6 +315,7 @@ fn hash_of(t: &Templates, which: Sil) -> [u8; 32] {
         Sil::Vault => t.vault.hash,
         Sil::Pool => t.pool.hash,
         Sil::Drawer => t.drawer.hash,
+        Sil::Ticket => t.ticket.hash,
     }
 }
 
@@ -358,6 +378,12 @@ pub struct Chain {
     pub marker_trees: Vec<Tree>,
     /// Live prize pools: (outpoint, state, remaining = value - R, creation DAA).
     pub pools: Vec<(TransactionOutpoint, PoolState, u64, u64)>,
+    /// Creation DAA of the marker in `marker` (its close; a `refresh()` moves it, M4).
+    pub marker_daa: u64,
+    /// Live tickets (M4): (outpoint, state, value = d b + accrued, creation DAA).
+    pub tickets: Vec<(TransactionOutpoint, TicketState, u64, u64)>,
+    /// The shard trees of every drawn round, by round (claims prove counts against them).
+    pub drawn_trees: std::collections::BTreeMap<i64, Vec<Tree>>,
 }
 
 impl Chain {
@@ -395,6 +421,9 @@ impl Chain {
             trees: (0..k).map(|_| Tree::new(g.controller.m as usize)).collect(),
             marker_trees: vec![],
             pools: vec![],
+            marker_daa: 0,
+            tickets: vec![],
+            drawn_trees: Default::default(),
         }
     }
 
@@ -425,6 +454,7 @@ impl Chain {
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("buy applies");
         self.shards[i] = (outs[0], c.successor(), daa);
         self.trees[i] = c.proofs().2;
+        self.tickets.push((outs[1], c.ticket(), f.tx.outputs[1].value, daa));
         f
     }
 
@@ -466,6 +496,7 @@ impl Chain {
         self.params = (outs[1], x.params.clone(), daa);
         self.shards = (0..k).map(|i| (outs[2 + i], x.shards[i].clone(), daa)).collect();
         self.marker = Some((outs[k + 2], x.marker.clone()));
+        self.marker_daa = daa;
         let fresh = (0..k).map(|_| Tree::new(x.m_next as usize)).collect();
         self.marker_trees = std::mem::replace(&mut self.trees, fresh);
         f
@@ -503,8 +534,9 @@ impl Chain {
         c.drawer = self.drawer.1.clone();
         c.drawer_daa = self.drawer.2;
         c.marker = mk;
-        // The marker was created by the close that created the current controller.
-        c.marker_daa = self.controller.2;
+        // The marker was created by the close that created the current controller (or by
+        // a later `refresh()`, M4).
+        c.marker_daa = self.marker_daa;
         c.vault = self.vault.1.clone();
         c.vault_daa = self.vault.2;
         c.controller = self.controller.1.clone();
@@ -547,7 +579,7 @@ impl Chain {
             self.pools.push((outs[o], s.clone(), x.values[o] - r, daa));
         }
         self.marker = None;
-        self.marker_trees = vec![];
+        self.drawn_trees.insert(c.marker.round, std::mem::take(&mut self.marker_trees));
         f
     }
 
@@ -557,5 +589,195 @@ impl Chain {
         let seed_ref = self.marker.as_ref().expect("a closed round to draw").1.seed_ref;
         let (c, ops) = self.draw_case(seed, &[], (seed_ref + lottery::game::DRAW_WINDOW + 1_000) as u64);
         self.draw(&c, ops, c.lock_time + 10)
+    }
+
+    // -------------------------------------------------------------------- M4 steps
+
+    /// As `buy_case` with one funding input of `funding` sompi (buys at a higher price).
+    pub fn buy_case_funded(&mut self, i: usize, funding: u64) -> (BuyCase, Vec<TransactionOutpoint>) {
+        let (mut c, mut ops) = self.buy_case(i);
+        c.funding = vec![funding];
+        ops[1] = self.ledger.fund(funding, funding_spk(), 0);
+        (c, ops)
+    }
+
+    /// A ticket fabricated directly as a UTXO under the instance covenant ID (D63): the
+    /// ledger holds it, `tickets` tracks it. Returns its index in `tickets`.
+    pub fn fabricate_ticket(&mut self, state: TicketState, value: u64, daa: u64) -> usize {
+        let e = UtxoEntry::new(value, self.t.ticket_spk(&state), daa, false, Some(self.cov));
+        let op = self.ledger.insert(e);
+        self.tickets.push((op, state, value, daa));
+        self.tickets.len() - 1
+    }
+
+    /// A pool fabricated directly as a UTXO under the instance covenant ID (D63), value
+    /// `remaining` + state.reserve. Returns its index in `pools`.
+    pub fn fabricate_pool(&mut self, state: PoolState, remaining: u64, daa: u64) -> usize {
+        let e = UtxoEntry::new(remaining + state.reserve as u64, self.t.pool_spk(&state), daa, false, Some(self.cov));
+        let op = self.ledger.insert(e);
+        self.pools.push((op, state, remaining, daa));
+        self.pools.len() - 1
+    }
+
+    /// The index in `pools` of the live pool of `round` and `tier`.
+    pub fn pool_of(&self, round: i64, tier: u8) -> usize {
+        self.pools
+            .iter()
+            .position(|p| p.1.round == round && p.1.tier == tier)
+            .unwrap_or_else(|| panic!("no live pool of round {round} tier {tier}"))
+    }
+
+    fn fund_one(&mut self, funding_daa: u64) -> (FundingIn, TransactionOutpoint) {
+        let fop = self.ledger.fund(10 * KAS, funding_spk(), funding_daa);
+        (FundingIn { value: 10 * KAS, daa: funding_daa }, fop)
+    }
+
+    /// A claim of index `idx` of ticket `ti` against pool `pi`, with one funding input of
+    /// 10 KAS created at `funding_daa`; and the outpoints in input order.
+    pub fn claim_case(&mut self, ti: usize, pi: usize, idx: i64, funding_daa: u64) -> (ClaimCase, Vec<TransactionOutpoint>) {
+        let (top, ticket, tv, tdaa) = self.tickets[ti].clone();
+        let (pop, pool, rem, pdaa) = self.pools[pi].clone();
+        let trees = self.drawn_trees.get(&pool.round).unwrap_or_else(|| panic!("no trees of round {}", pool.round)).clone();
+        let mut c = ClaimCase::new(trees.len());
+        c.b_max = self.t.b_max;
+        c.ticket = ticket;
+        c.ticket_value = tv;
+        c.ticket_daa = tdaa;
+        c.pool_value = rem + pool.reserve as u64;
+        c.pool = pool;
+        c.pool_daa = pdaa;
+        c.trees = trees;
+        c.idx = idx;
+        c.cov = self.cov;
+        let (fi, fop) = self.fund_one(funding_daa);
+        c.funding = vec![fi];
+        (c, vec![top, pop, fop])
+    }
+
+    pub fn claim_built(&self, c: &ClaimCase, ops: Vec<TransactionOutpoint>) -> Built {
+        let mut b = c.build_with(self.t.clone());
+        b.outpoints = ops;
+        b
+    }
+
+    /// Run and apply a claim at `daa`: the pool moves to pool' (remaining - prize); the
+    /// ticket moves to ticket' or, on FINAL, is removed.
+    pub fn claim(&mut self, c: &ClaimCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
+        let x = c.expected();
+        assert!(x.rejects.is_empty(), "Chain::claim of a case the reference rejects: {:?}", x.rejects);
+        let f = accept_m4("claim", &self.claim_built(c, ops.clone()));
+        let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("claim applies");
+        let pi = self.pools.iter().position(|p| p.0 == ops[1]).expect("claimed pool tracked");
+        self.pools[pi] = (outs[0], x.pool.clone(), self.pools[pi].2 - x.prize as u64, daa);
+        let ti = self.tickets.iter().position(|t| t.0 == ops[0]).expect("claiming ticket tracked");
+        match &x.ticket {
+            Some(s) => self.tickets[ti] = (outs[1], s.clone(), x.values[1], daa),
+            None => {
+                self.tickets.remove(ti);
+            }
+        }
+        f
+    }
+
+    /// `return_deposit_after` of ticket `ti` at lock_time T + D_RET.
+    pub fn return_after_case(&mut self, ti: usize, funding_daa: u64) -> (ReturnCase, Vec<TransactionOutpoint>) {
+        let (top, ticket, tv, tdaa) = self.tickets[ti].clone();
+        let mut c = ReturnCase::after_of(ticket, tv, tdaa);
+        c.b_max = self.t.b_max;
+        c.cov = self.cov;
+        let (fi, fop) = self.fund_one(funding_daa);
+        c.funding = vec![fi];
+        (c, vec![top, fop])
+    }
+
+    /// `return_deposit_with_pool` of ticket `ti` with pool `pi` at lock_time = its deadline.
+    pub fn return_with_pool_case(&mut self, ti: usize, pi: usize, funding_daa: u64) -> (ReturnCase, Vec<TransactionOutpoint>) {
+        let (top, ticket, tv, tdaa) = self.tickets[ti].clone();
+        let (pop, pool, rem, pdaa) = self.pools[pi].clone();
+        let pv = rem + pool.reserve as u64;
+        let mut c = ReturnCase::with_pool_of(ticket, tv, tdaa, pool, pv, pdaa);
+        c.b_max = self.t.b_max;
+        c.cov = self.cov;
+        let (fi, fop) = self.fund_one(funding_daa);
+        c.funding = vec![fi];
+        (c, vec![top, pop, fop])
+    }
+
+    /// Run and apply a return at `daa`: the ticket is removed; a co-spent pool moves to its
+    /// byte-identical successor.
+    pub fn return_deposit(&mut self, c: &ReturnCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
+        let mut b = c.build_with(self.t.clone());
+        b.outpoints = ops.clone();
+        let f = accept_m4("return_deposit", &b);
+        let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("return applies");
+        if let ReturnPath::WithPool { .. } = c.path {
+            let pi = self.pools.iter().position(|p| p.0 == ops[1]).expect("co-spent pool tracked");
+            self.pools[pi].0 = outs[0];
+            self.pools[pi].3 = daa;
+        }
+        let ti = self.tickets.iter().position(|t| t.0 == ops[0]).expect("returned ticket tracked");
+        self.tickets.remove(ti);
+        f
+    }
+
+    /// `refresh()` of the current marker, at lock_time = its creation + D_IDLE.
+    pub fn refresh_marker_case(&mut self, funding_daa: u64) -> (RefreshCase, Vec<TransactionOutpoint>) {
+        let (mop, mk) = self.marker.clone().expect("a closed round's marker");
+        let value = self.ledger.get(&mop).expect("marker UTXO").amount;
+        let daa = self.marker_daa;
+        self.refresh_case(RefreshObj::Marker(mk), mop, value, daa, funding_daa)
+    }
+
+    /// `refresh()` of pool `pi`.
+    pub fn refresh_pool_case(&mut self, pi: usize, funding_daa: u64) -> (RefreshCase, Vec<TransactionOutpoint>) {
+        let (op, s, rem, daa) = self.pools[pi].clone();
+        let value = rem + s.reserve as u64;
+        self.refresh_case(RefreshObj::Pool(s), op, value, daa, funding_daa)
+    }
+
+    /// `refresh()` of ticket `ti`.
+    pub fn refresh_ticket_case(&mut self, ti: usize, funding_daa: u64) -> (RefreshCase, Vec<TransactionOutpoint>) {
+        let (op, s, value, daa) = self.tickets[ti].clone();
+        self.refresh_case(RefreshObj::Ticket(s), op, value, daa, funding_daa)
+    }
+
+    fn refresh_case(&mut self, obj: RefreshObj, op: TransactionOutpoint, value: u64, daa: u64, funding_daa: u64) -> (RefreshCase, Vec<TransactionOutpoint>) {
+        let mut c = RefreshCase::new(obj, value, daa);
+        c.b_max = self.t.b_max;
+        c.cov = self.cov;
+        let (fi, fop) = self.fund_one(funding_daa);
+        c.funding = vec![fi];
+        (c, vec![op, fop])
+    }
+
+    /// Run and apply a refresh at `daa`: the object moves to its byte-identical successor,
+    /// created at `daa`.
+    pub fn refresh(&mut self, c: &RefreshCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
+        let mut b = c.build_with(self.t.clone());
+        b.outpoints = ops.clone();
+        let step = match c.obj {
+            RefreshObj::Marker(_) => "refresh (marker)",
+            RefreshObj::Pool(_) => "refresh (pool)",
+            RefreshObj::Ticket(_) => "refresh (ticket)",
+        };
+        let f = accept_m4(step, &b);
+        let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("refresh applies");
+        match &c.obj {
+            RefreshObj::Marker(mk) => {
+                self.marker = Some((outs[0], mk.clone()));
+                self.marker_daa = daa;
+            }
+            RefreshObj::Pool(_) => {
+                let pi = self.pools.iter().position(|p| p.0 == ops[0]).expect("refreshed pool tracked");
+                self.pools[pi].0 = outs[0];
+                self.pools[pi].3 = daa;
+            }
+            RefreshObj::Ticket(_) => {
+                let ti = self.tickets.iter().position(|t| t.0 == ops[0]).expect("refreshed ticket tracked");
+                self.tickets[ti].0 = outs[0];
+                self.tickets[ti].3 = daa;
+            }
+        }
+        f
     }
 }

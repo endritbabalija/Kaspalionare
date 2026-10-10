@@ -3,6 +3,7 @@
 
 pub mod m2;
 pub mod m3;
+pub mod m4;
 
 use harness::TxScriptError;
 use lottery::buy::{BuyCase, Built, Final, b_max};

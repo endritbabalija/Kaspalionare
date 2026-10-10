@@ -21,12 +21,14 @@ contract Vault(
     // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
     int constant SCRIPT_MAX = 1000000;
 
-    // Drawer state layout (spec M3 A3.1), for readInputStateWithTemplate.
+    // Drawer state layout (spec M3 A3.1; ticket_tpl added by spec M4 A3.2, D54), for
+    // readInputStateWithTemplate.
     struct DrawerState {
         byte role;
         int round;
         byte[32] pool_tpl;
         byte[32] vault_tpl;
+        byte[32] ticket_tpl;
         int f_min;
         int claim_window;
         int draw_window;

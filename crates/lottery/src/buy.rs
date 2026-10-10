@@ -87,7 +87,8 @@ pub fn ticket_source(b_max: usize) -> String {
 }
 
 /// The bundle and claimed arrays are written for the committed B_MAX = n as `byte[6n]` and
-/// `byte[ceil(n/8)] ` (with a trailing space) in ticket.sil and in shard.sil's TicketState, and
+/// `byte[ceil(n/8)] ` (with a trailing space) in ticket.sil and in the TicketState structs of
+/// shard.sil and pool.sil, and
 /// nowhere else.
 fn resize_ticket_arrays(src: &str, to: usize) -> String {
     let from = b_max();
@@ -122,7 +123,7 @@ pub(crate) fn read_covenant(name: &str) -> String {
 }
 
 impl Sources {
-    /// The committed sources, with the ticket and shard resized to `b_max`.
+    /// The committed sources, with the ticket, shard and pool resized to `b_max`.
     pub fn committed(b_max: usize) -> Self {
         Self {
             ticket: ticket_source(b_max),
@@ -131,17 +132,20 @@ impl Sources {
             params: read_covenant("params.sil"),
             marker: read_covenant("marker.sil"),
             vault: read_covenant("vault.sil"),
-            pool: read_covenant("pool.sil"),
+            // The pool reads the ticket state (ticket_leg), so its TicketState struct follows B_MAX.
+            pool: resize_ticket_arrays(&read_covenant("pool.sil"), b_max),
             #[cfg(feature = "test-seed")]
             drawer: read_covenant("drawer.sil"),
         }
     }
 }
 
-/// Compiled templates. Compile order (spec M2 D27, M3 D38): ticket -> controller ->
-/// drawer(controller) -> marker, vault, pool(drawer) -> shard(ticket, controller) and
-/// params(controller). The controller depends on no template: its route table (shard,
-/// marker, params hashes) is state. The drawer holds pool_tpl and vault_tpl in state.
+/// Compiled templates. Compile order (spec M2 D27, M3 D38, M4 D54): controller ->
+/// drawer(controller) -> marker, vault, pool(drawer) -> ticket(pool) -> shard(ticket,
+/// controller) and params(controller). The controller depends on no template: its route
+/// table (shard, marker, params hashes) is state. The drawer holds pool_tpl, vault_tpl and
+/// ticket_tpl in state (the pool cannot commit to the ticket hash: the ticket commits to
+/// POOL_TPL, so draw() writes ticket_tpl into every pool state).
 ///
 /// Without the `test-seed` feature there is no drawer (D43): marker, vault and pool are then
 /// compiled with a zero drawer hash, so their draw legs can never pass.
@@ -185,7 +189,6 @@ impl Templates {
             ref_paid: 0,
         };
         let dummy_ticket = TicketState::new(&dummy_shard, &[Combo::new([1, 2, 3, 4, 5], 1)], &Payout::Schnorr([1; 32]), b_max);
-        let ticket = Template::from(compile_source(&src.ticket, &dummy_ticket.ctor()));
         let controller = Template::from(compile_source(&src.controller, &dummy_controller().ctor()));
         #[cfg(feature = "test-seed")]
         let drawer = crate::draw::compile_drawer(&src.drawer, controller.hash);
@@ -196,6 +199,7 @@ impl Templates {
         let marker = Template::from(compile_source(&src.marker, &dummy_marker().ctor(drawer_hash)));
         let vault = Template::from(compile_source(&src.vault, &dummy_vault().ctor(drawer_hash)));
         let pool = Template::from(compile_source(&src.pool, &dummy_pool().ctor(drawer_hash)));
+        let ticket = Template::from(compile_source(&src.ticket, &dummy_ticket.ctor(pool.hash)));
         let shard = Template::from(compile_source(&src.shard, &dummy_shard.ctor(ticket.hash, controller.hash)));
         let params = Template::from(compile_source(&src.params, &dummy_params().ctor(controller.hash)));
         Self {
@@ -375,6 +379,8 @@ fn dummy_pool() -> PoolState {
         k: 1,
         roots: vec![0; 32 * K_MAX],
         deadline: 0,
+        ticket_tpl: [0; 32],
+        reserve: 0,
         funder_class: 0,
         funder_key: [0; 33],
     }
@@ -620,10 +626,69 @@ fn buy_sigscript(t: &Templates, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8
 }
 
 /// Sigscript calling `entry` of `template` with `args`, followed by the redeem script.
+///
+/// `entry` is either an entry name (encoded through the ABI; the entry must exist) or a
+/// full dispatch signature such as `claim(int,byte[],byte[],int,int)` (spec M4 Stage 2,
+/// S2-1). With a signature, an entry of that name in the template is encoded through the
+/// ABI and its dispatch tag must equal the signature's (so a covenant whose entry
+/// signature drifts from the builder's fails loudly); an entry the template does not have
+/// yet is encoded by hand (`planned_sig_script`), so the script rejects it at dispatch.
 pub fn entry_sigscript(template: &Template, entry: &str, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8> {
-    let sig = encode_contract_entry_sig_script(&template.art, template.name(), entry, args)
-        .unwrap_or_else(|e| panic!("encode {}.{entry} args: {e}", template.name()));
+    let Some(open) = entry.find('(') else {
+        let sig = encode_contract_entry_sig_script(&template.art, template.name(), entry, args)
+            .unwrap_or_else(|e| panic!("encode {}.{entry} args: {e}", template.name()));
+        return push_redeem(sig, redeem);
+    };
+    let name = &entry[..open];
+    let contract = template.art.contracts.values().next().unwrap();
+    let sig = match contract.entries.get(name) {
+        Some(e) => {
+            assert_eq!(
+                e.dispatch_tag.as_bytes(),
+                &dispatch_tag(entry),
+                "{}.{name}: the compiled entry's signature differs from the builder's `{entry}`",
+                template.name()
+            );
+            encode_contract_entry_sig_script(&template.art, template.name(), name, args)
+                .unwrap_or_else(|e| panic!("encode {}.{name} args: {e}", template.name()))
+        }
+        None => planned_sig_script(entry, args),
+    };
     push_redeem(sig, redeem)
+}
+
+/// SilverScript v1.0.0 dispatch tag of an entry signature `name(type,...)`: the first 4
+/// bytes of blake3(signature) (`silverscript-lang/src/compiler/compile/helpers.rs:154-158`;
+/// type names as `write_dispatch_type_name`, e.g. `int`, `byte[]`, `byte[33]`, `bool`).
+pub fn dispatch_tag(signature: &str) -> [u8; 4] {
+    blake3::hash(signature.as_bytes()).as_bytes()[..4].try_into().unwrap()
+}
+
+/// The sigscript of an entry by signature, encoded as the ABI does
+/// (`silverscript-abi/src/lib.rs` `encode_entry_sig_script`/`push_sig_arg`): each argument
+/// pushed in order (int and bool with `add_i64`, byte with a 1-byte push, bytes with
+/// `add_data`), then the dispatch tag. Without the redeem push.
+pub fn planned_sig_script(signature: &str, args: &[ArtifactValue]) -> Vec<u8> {
+    let mut b = ScriptBuilder::new();
+    for a in args {
+        match a {
+            ArtifactValue::Int(x) => {
+                b.add_i64(*x).expect("push int");
+            }
+            ArtifactValue::Bool(x) => {
+                b.add_i64(*x as i64).expect("push bool");
+            }
+            ArtifactValue::Byte(x) => {
+                b.add_data(&[*x]).expect("push byte");
+            }
+            ArtifactValue::Bytes(x) => {
+                b.add_data(x).expect("push bytes");
+            }
+            other => panic!("planned_sig_script: unsupported argument {other:?}"),
+        }
+    }
+    b.add_data(&dispatch_tag(signature)).expect("push tag");
+    b.drain()
 }
 
 pub struct Final {

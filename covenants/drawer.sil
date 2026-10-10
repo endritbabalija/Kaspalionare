@@ -9,7 +9,9 @@ pragma silverscript ^0.1.0;
 //
 // Route of trust (D38): CONTROLLER_TPL is a constructor constant; pool_tpl and vault_tpl
 // are state (instance constants set at genesis, copied unchanged); the marker template
-// comes from the controller's route table.
+// comes from the controller's route table. ticket_tpl (spec M4 A3.2, D54) is also an
+// instance constant copied unchanged; draw() writes it into every new pool, which cannot
+// hold the ticket hash as a constructor constant (the ticket commits to POOL_TPL).
 //
 // draw_test_seed() implements spec M3 A4 checks 1-25 and the A5 witness checks, in spec
 // order. Each check starts at a "// ==== check N" line, in order (the attribution
@@ -21,6 +23,7 @@ contract Drawer(
     int init_round,
     byte[32] init_pool_tpl,
     byte[32] init_vault_tpl,
+    byte[32] init_ticket_tpl,
     int init_f_min,
     int init_claim_window,
     int init_draw_window
@@ -61,6 +64,7 @@ contract Drawer(
     int round = init_round;
     byte[32] pool_tpl = init_pool_tpl;
     byte[32] vault_tpl = init_vault_tpl;
+    byte[32] ticket_tpl = init_ticket_tpl;
     int f_min = init_f_min;
     int claim_window = init_claim_window;
     int draw_window = init_draw_window;
@@ -145,7 +149,7 @@ contract Drawer(
         int liability;
     }
 
-    // Pool state layout (spec M3 A3.3).
+    // Pool state layout (spec M3 A3.3, with ticket_tpl and reserve from spec M4 A3.3).
     struct PoolState {
         byte role;
         int round;
@@ -156,6 +160,8 @@ contract Drawer(
         int k;
         byte[512] roots;
         int deadline;
+        byte[32] ticket_tpl;
+        int reserve;
         byte funder_class;
         byte[33] funder_key;
     }
@@ -706,12 +712,13 @@ contract Drawer(
         }
         }
 
-        // ==== check 22: drawer' (round + 1, all else unchanged)
+        // ==== check 22: drawer' (round + 1, all else unchanged, ticket_tpl included)
         validateOutputState(0, State {
             role: role,
             round: round + 1,
             pool_tpl: pool_tpl,
             vault_tpl: vault_tpl,
+            ticket_tpl: ticket_tpl,
             f_min: f_min,
             claim_window: claim_window,
             draw_window: draw_window
@@ -771,7 +778,8 @@ contract Drawer(
             seed_offset: ctrl.seed_offset
         }, 3, ctrl_pl, ctrl_sl, controllerTemplateHash);
 
-        // ==== check 25: the new pools in tier order under pool_tpl; reserve funder (D11)
+        // ==== check 25: the new pools in tier order under pool_tpl; reserve funder (D11);
+        // ticket_tpl from own state and reserve = R in every pool (spec M4 A7, D54, D55)
         int fc = unsigned(funder_class);
         require(fc <= 2); // mut:D25_class
         if (fc != 1) {
@@ -790,6 +798,8 @@ contract Drawer(
                 k: ctrl.k,
                 roots: mk.roots,
                 deadline: dClaim,
+                ticket_tpl: ticket_tpl,
+                reserve: ctrl.reserve,
                 funder_class: funder_class,
                 funder_key: funder_key
             }, pool_prefix, pool_suffix, pool_tpl);
@@ -806,6 +816,8 @@ contract Drawer(
                 k: ctrl.k,
                 roots: mk.roots,
                 deadline: dClaim,
+                ticket_tpl: ticket_tpl,
+                reserve: ctrl.reserve,
                 funder_class: funder_class,
                 funder_key: funder_key
             }, pool_prefix, pool_suffix, pool_tpl);
@@ -824,6 +836,8 @@ contract Drawer(
                     k: ctrl.k,
                     roots: mk.roots,
                     deadline: dClaim,
+                    ticket_tpl: ticket_tpl,
+                    reserve: ctrl.reserve,
                     funder_class: funder_class,
                     funder_key: funder_key
                 }, pool_prefix, pool_suffix, pool_tpl);

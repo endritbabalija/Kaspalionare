@@ -152,9 +152,15 @@ fn dp1_genesis_buys_close_draw() {
         assert_eq!(p.win, [w.main[0], w.main[1], w.main[2], w.main[3], w.main[4], w.bonus]);
         assert_eq!(p.deadline, fund_daa as i64 + CLAIM_WINDOW);
         assert_eq!(p.roots, mk.roots);
+        // Spec M4 A7 check 25 (D54, D55).
+        assert_eq!(p.ticket_tpl, t.ticket.hash);
+        assert_eq!(p.reserve, r as i64);
     }
     // R4: the round result alone rebuilds every pool.
     let rr = RoundResult::new(&c, &x, f.tx.id());
+    // Spec M4 A8: ticket_tpl from the drawer input, R from output 0.
+    assert_eq!(rr.ticket_tpl, t.ticket.hash);
+    assert_eq!(rr.reserve, r);
     // A9: the record derived from the draw() transaction bytes alone equals the builder's.
     assert_eq!(RoundResult::from_tx(&f.tx, &t), Ok(rr.clone()));
     for p in 0..x.np() {

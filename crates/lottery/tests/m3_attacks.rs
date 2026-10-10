@@ -739,6 +739,41 @@ fn da14_successors() {
     done(&c);
 }
 
+// ---------------------------------------------------------------- KA17 (M4 Stage 1)
+
+/// KA17 (spec M4 A9; checks 25 and 22, D54, D55): every new pool must carry the drawer's
+/// ticket_tpl and reserve = R, and drawer' must keep ticket_tpl. Each edit is one output
+/// script, rejected by the drawer; the base draw (np = 5: jackpot, second prize and three
+/// lower pools) is accepted.
+#[test]
+fn ka17_pool_ticket_tpl_reserve_and_drawer_ticket_tpl() {
+    let c = base();
+    let x = c.expected();
+    assert_eq!(x.np(), 5, "base draw creates five pools");
+    let t = tpl();
+    let r = c.reserve() as i64;
+    for p in &x.new_pools {
+        assert_eq!(p.ticket_tpl, t.ticket.hash, "pool ticket_tpl = compiled ticket hash");
+        assert_eq!(p.reserve, r, "pool reserve = R");
+    }
+    assert_eq!(x.drawer.ticket_tpl, t.ticket.hash);
+    for p in 0..x.np() {
+        // check 25: wrong ticket_tpl (a bit flip, zero, and another real template's hash).
+        pool_out(&c, p, |s| s.ticket_tpl[0] ^= 1);
+        pool_out(&c, p, |s| s.ticket_tpl = [0; 32]);
+        pool_out(&c, p, |s| s.ticket_tpl = t.pool.hash);
+        // check 25: wrong reserve (+ 1, - 1, 0).
+        pool_out(&c, p, |s| s.reserve += 1);
+        pool_out(&c, p, |s| s.reserve -= 1);
+        pool_out(&c, p, |s| s.reserve = 0);
+    }
+    // check 22: drawer' with ticket_tpl changed.
+    drawer_out(&c, |s| s.ticket_tpl[0] ^= 1);
+    drawer_out(&c, |s| s.ticket_tpl = [0; 32]);
+    drawer_out(&c, |s| s.ticket_tpl = t.pool.hash);
+    done(&c);
+}
+
 // ---------------------------------------------------------------- DA15
 
 /// DA15: the leader's committed budget one unit short.
@@ -799,6 +834,7 @@ fn da17_own_argument() {
 fn retarget(mut c: DrawCase, t: &lottery::buy::Templates) -> DrawCase {
     c.drawer.pool_tpl = t.pool.hash;
     c.drawer.vault_tpl = t.vault.hash;
+    c.drawer.ticket_tpl = t.ticket.hash;
     c.controller.marker_tpl = t.marker.hash;
     c
 }

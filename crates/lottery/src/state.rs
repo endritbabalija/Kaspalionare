@@ -166,9 +166,12 @@ impl TicketState {
         ])
     }
 
-    pub fn ctor(&self) -> Vec<ArtifactValue> {
+    /// Constructor arguments: the pool template hash (constant POOL_TPL, spec M4 A2, D54),
+    /// then the state.
+    pub fn ctor(&self, pool_hash: [u8; 32]) -> Vec<ArtifactValue> {
         use ArtifactValue::*;
         vec![
+            Bytes(pool_hash.to_vec()),
             Int(self.round),
             Int(self.deadline),
             Int(self.b),
@@ -416,6 +419,9 @@ pub struct DrawerState {
     pub round: i64,
     pub pool_tpl: [u8; 32],
     pub vault_tpl: [u8; 32],
+    /// The ticket template hash (spec M4 A3.2, D54): an instance constant set at genesis,
+    /// copied unchanged by draw() and written into every new pool.
+    pub ticket_tpl: [u8; 32],
     pub f_min: i64,
     pub claim_window: i64,
     pub draw_window: i64,
@@ -429,6 +435,7 @@ impl DrawerState {
             ("round", Int(self.round)),
             ("pool_tpl", Bytes(self.pool_tpl.to_vec())),
             ("vault_tpl", Bytes(self.vault_tpl.to_vec())),
+            ("ticket_tpl", Bytes(self.ticket_tpl.to_vec())),
             ("f_min", Int(self.f_min)),
             ("claim_window", Int(self.claim_window)),
             ("draw_window", Int(self.draw_window)),
@@ -492,7 +499,8 @@ pub const TIER_SECOND: u8 = 1;
 /// Tier code of lower slot 0 (4+b); slot t has code TIER_LOWER0 + t.
 pub const TIER_LOWER0: u8 = 2;
 
-/// Prize pool, role 0x04 (spec M3 A3.3). Value remaining + R.
+/// Prize pool, role 0x04 (spec M3 A3.3, with ticket_tpl and reserve from spec M4 A3.3).
+/// Value remaining + R.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PoolState {
     pub round: i64,
@@ -506,6 +514,10 @@ pub struct PoolState {
     /// 32 x K_MAX bytes, as the marker.
     pub roots: Vec<u8>,
     pub deadline: i64,
+    /// The ticket template hash, copied from the drawer state by draw() (D54).
+    pub ticket_tpl: [u8; 32],
+    /// R (= ctrl.reserve), written by draw() (D55).
+    pub reserve: i64,
     pub funder_class: u8,
     pub funder_key: [u8; 33],
 }
@@ -528,6 +540,8 @@ impl PoolState {
             ("k", Int(self.k)),
             ("roots", Bytes(self.roots.clone())),
             ("deadline", Int(self.deadline)),
+            ("ticket_tpl", Bytes(self.ticket_tpl.to_vec())),
+            ("reserve", Int(self.reserve)),
             ("funder_class", Byte(self.funder_class)),
             ("funder_key", Bytes(self.funder_key.to_vec())),
         ]

@@ -614,6 +614,118 @@ pub fn claim_deadline(own: i64, seed_ref: i64, draw_window: i64, claim_window: i
     (d < DAA_MAX).then_some(d)
 }
 
+// ------------------------------------------------------------------------ M4: claim()
+
+/// Smallest non-final payout (spec M4 D57, ticket template constant; confirm by M4-c).
+pub const P_MIN: i64 = 5_000_000;
+/// `return_deposit_after` delay after T, 14 days at 10 BPS (D58).
+pub const D_RET: i64 = 12_096_000;
+/// `refresh()` idle time since the object's creation, 24 h at 10 BPS (D59).
+pub const D_IDLE: i64 = 864_000;
+/// Largest pool m the ticket can claim (D62, = M_DRAW).
+pub const M_CLAIM: i64 = 50;
+/// Largest bundle the ticket accepts (spec M4 A2, = the shard's B_MAX).
+pub const TICKET_B_MAX: i64 = 4;
+/// Largest per-shard count of one leaf entry (spec M4 A2, M1 COUNT_MAX).
+pub const CLAIM_COUNT_MAX: i64 = 32_767;
+/// Largest reserve (spec M4 A2, the controller's RESERVE_MAX).
+pub const CLAIM_RESERVE_MAX: i64 = 10_000_000_000;
+
+/// The three claim modes (D56).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClaimMode {
+    /// Every other index already claimed: the ticket is consumed, payout = prize + value.
+    Final,
+    /// Not final, prize >= P_MIN: payout = prize, ticket' keeps its value.
+    Pay,
+    /// Not final, prize < P_MIN (including 0): no payout, ticket' value = value + prize.
+    Accrue,
+}
+
+impl ClaimMode {
+    /// Covenant outputs authorized by the ticket (A4 check 9): pool' (and ticket').
+    pub fn n_cov(self) -> usize {
+        if self == ClaimMode::Final { 1 } else { 2 }
+    }
+    /// Index of the payout output (A4 shape), if the mode has one.
+    pub fn payout_output(self) -> Option<usize> {
+        match self {
+            ClaimMode::Final => Some(1),
+            ClaimMode::Pay => Some(2),
+            ClaimMode::Accrue => None,
+        }
+    }
+    /// Outputs before the optional change output, per the A4 shape table: FINAL 2 (pool',
+    /// payout), PAY 3 (pool', ticket', payout), ACCRUE 2 (pool', ticket'), i.e.
+    /// nCov + [FINAL or PAY]. NOTE (S2-2, open question to the user): A4 check 11 writes
+    /// nOut = nCov + [pay] + ch, which gives 1 + ch for FINAL and contradicts the table; the
+    /// builder follows the table.
+    pub fn n_fixed_outputs(self) -> usize {
+        self.n_cov() + (self != ClaimMode::Accrue) as usize
+    }
+}
+
+/// A4 check 6: the tier of combination `comb` (n1..n5, bonus) against `win` (w1..w5, wb).
+/// matched = sum over i, j of [n_i = w_j]; bm = [bonus = wb]; tier 0 (5, bm), 1 (5, not
+/// bm), 2 (4, bm), 3 (4, not bm), 4 (3, bm), 5 (3, not bm), 6 (2, bm); `None` for any
+/// other case (the script rejects). The caller checks canonical form first (check 5).
+pub fn tier_of(comb: &[u8; 6], win: &[u8; 6]) -> Option<u8> {
+    let mut matched = 0;
+    for i in 0..5 {
+        for j in 0..5 {
+            if comb[i] == win[j] {
+                matched += 1;
+            }
+        }
+    }
+    let bm = comb[5] == win[5];
+    match (matched, bm) {
+        (5, true) => Some(0),
+        (5, false) => Some(1),
+        (4, true) => Some(2),
+        (4, false) => Some(3),
+        (3, true) => Some(4),
+        (3, false) => Some(5),
+        (2, true) => Some(6),
+        _ => None,
+    }
+}
+
+/// A4 check 8: prize = floor(slice / h), with h >= 1 (`None` = the script rejects). The
+/// check prize <= remaining is the caller's (it needs the pool value).
+pub fn claim_amount(slice: i64, h: i64) -> Option<i64> {
+    if h < 1 {
+        return None;
+    }
+    Some(slice / h)
+}
+
+/// A4 checks 1 (index range), 4 and 9: the mode of claiming index `idx` of a b-combination
+/// ticket whose claimed byte is `claimed`, at `prize`. bit = 2^idx (the table 1, 2, 4, 8);
+/// the index must be unclaimed ((c / bit) % 2 = 0); final = (c + bit = 2^b - 1), the
+/// script's form of (c | bit) = 2^b - 1 once the bit is known to be clear; otherwise PAY
+/// if prize >= P_MIN, else ACCRUE (D56). `None` where the script rejects (idx outside
+/// [0, b), b outside [1, B_MAX], or the bit already set).
+pub fn claim_mode(claimed: u8, b: i64, idx: i64, prize: i64) -> Option<ClaimMode> {
+    if !(1..=TICKET_B_MAX).contains(&b) || !(0..b).contains(&idx) {
+        return None;
+    }
+    const BIT: [i64; 4] = [1, 2, 4, 8];
+    let bit = BIT[idx as usize];
+    let c = claimed as i64;
+    if (c / bit) % 2 != 0 {
+        return None;
+    }
+    let full = BIT[b as usize - 1] * 2 - 1;
+    if c + bit == full {
+        Some(ClaimMode::Final)
+    } else if prize >= P_MIN {
+        Some(ClaimMode::Pay)
+    } else {
+        Some(ClaimMode::Accrue)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! CP9: closed form (D25 revised) vs brute force, muldiv exactness, shares, b_r >= 0.

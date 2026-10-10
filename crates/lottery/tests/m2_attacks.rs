@@ -401,7 +401,9 @@ fn ca10_ticket_in_shard_slot() {
     let t = tpl();
     let ticket = TicketState::new(&c.shards[1].state, &[Combo::new([1, 2, 3, 4, 5], 1)], &Payout::Schnorr([1; 32]), t.b_max);
     let redeem = t.ticket.redeem(&ticket.values());
-    let sig = push_redeem(silverscript_abi::encode_contract_entry_sig_script(&t.ticket.art, t.ticket.name(), "locked", &[]).unwrap(), &redeem);
+    // The M1 placeholder `locked()` is gone (M4 Stage 3a): a tag no entry has keeps the
+    // ticket input inert, so the attack is judged at the controller as before.
+    let sig = push_redeem(lottery::buy::planned_sig_script("locked()", &[]), &redeem);
     let cov = c.cov;
     out_attack(&c, |b| {
         let amount = b.inputs[3].entry.amount;

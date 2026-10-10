@@ -3,6 +3,8 @@ pragma silverscript ^0.1.0;
 // Frozen marker (role 0x03) of one round, spec M2 A3.3 (layout unchanged, spec M3 A3.4).
 // M3 replaces the M2 placeholder (D28) with one entry, draw_leg(): the marker is a delegate
 // of Drawer.draw_test_seed() at input 1 (spec M3 A4 delegate legs, D37, D38).
+// M4 adds refresh() (spec M4 A6, D59): a byte-identical successor after D_IDLE idle, so a
+// refreshed marker is still drawn by the drawer (same template, same state).
 //
 // Value: S - P_R - C_close + J_boost + R. Created only by Controller.close(), which
 // validates every field (spec M2 A4 check 24).
@@ -58,13 +60,20 @@ contract Marker(
     // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
     // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
     int constant SCRIPT_MAX = 1000000;
+    // Spec M4 A2/A6 (D59): funding inputs, refresh idle time (24 h at 10 BPS), DAA bound
+    // (= LOCK_TIME_THRESHOLD, rusty-kaspa v2.1.0 crypto/txscript/src/lib.rs:84).
+    int constant F_MAX = 8;
+    int constant D_IDLE = 864000;
+    int constant DAA_MAX = 500000000000;
 
-    // Drawer state layout (spec M3 A3.1), for readInputStateWithTemplate.
+    // Drawer state layout (spec M3 A3.1; ticket_tpl added by spec M4 A3.2, D54), for
+    // readInputStateWithTemplate.
     struct DrawerState {
         byte role;
         int round;
         byte[32] pool_tpl;
         byte[32] vault_tpl;
+        byte[32] ticket_tpl;
         int f_min;
         int claim_window;
         int draw_window;
@@ -87,5 +96,78 @@ contract Marker(
         DrawerState drw = readInputStateWithTemplate(0, drawer_pl, drawer_sl, drawerTemplateHash);
         require(unsigned(drw.role) == 10); // mut:ML4_role
         require(drw.round == round); // mut:ML4_round
+    }
+
+    // Spec M4 A6 (D59). Inputs: 0 this marker, 1..n funding (zero ID, 1 <= n <= F_MAX).
+    // Outputs: 0 marker' (byte-identical, same value), then at most one change output.
+    entry refresh() {
+        // ==== check A6.1: leader at input 0
+        require(this.activeInputIndex == 0); // mut:RF1
+        byte[32] cov = OpInputCovenantId(0);
+
+        // ==== check A6.2: inputs (R2): this object alone under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 1); // mut:RF2_count
+        require(tx.inputs.length >= 2); // mut:RF2_fund
+        require(tx.inputs.length <= 1 + F_MAX); // mut:RF2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 1, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:RF2_zero
+            }
+        }
+
+        // ==== check A6.3: idle for D_IDLE since creation; creation >= 0 rejects an unaccepted parent
+        // OpTxInputDaaScore pushes the UTXO's block_daa_score as i64 (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1124-1130); an unaccepted parent has
+        // UNACCEPTED_DAA_SCORE = u64::MAX (consensus/core/src/constants.rs:51), pushed as -1
+        // (DECISIONS fact row O-S4-4). creation < DAA_MAX, so creation + D_IDLE cannot overflow.
+        int creation = OpTxInputDaaScore(0);
+        require(creation >= 0); // mut:RF3_creation
+        require(creation < DAA_MAX); // mut:RF3_creation
+        require(tx.daa >= creation + D_IDLE); // mut:RF3_idle
+
+        // ==== check A6.4: one covenant output (the successor) at 0, authorized by input 0
+        require(OpAuthOutputCount(0) == 1); // mut:RF4_auth
+        require(OpAuthOutputIdx(0, 0) == 0); // mut:RF4_idx
+        require(OpCovOutputCount(cov) == 1); // mut:RF4_cov
+
+        // ==== check A6.5: one or two outputs; output 1, if present, has the zero ID
+        require(tx.outputs.length >= 1); // mut:RF5_count
+        require(tx.outputs.length <= 2); // mut:RF5_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 1, tx.outputs.length, 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:RF5_zero
+            }
+        }
+
+        // ==== check A6.6: same value
+        require(tx.outputs[0].value == tx.inputs[0].value); // mut:RF6
+
+        // ==== check A6.7: byte-identical successor (same template, every field unchanged)
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            k: k,
+            roots: roots,
+            sales: sales,
+            ref_paid: ref_paid,
+            m: m,
+            jackpot: jackpot,
+            j_boost: j_boost,
+            g2: g2,
+            s_f: s_f,
+            s_r: s_r,
+            s_c: s_c,
+            s_d: s_d,
+            st1: st1,
+            st2: st2,
+            st3: st3,
+            st4: st4,
+            st5: st5,
+            seed_ref: seed_ref,
+            funder_class: funder_class,
+            funder_key: funder_key
+        });
     }
 }

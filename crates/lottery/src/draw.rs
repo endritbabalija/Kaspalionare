@@ -41,7 +41,7 @@ pub fn compile_drawer(src: &str, controller_hash: [u8; 32]) -> Template {
 
 /// Placeholder drawer state for compiling.
 fn dummy_drawer() -> DrawerState {
-    DrawerState { round: 1, pool_tpl: [0; 32], vault_tpl: [0; 32], f_min: F_MIN, claim_window: CLAIM_WINDOW, draw_window: DRAW_WINDOW }
+    DrawerState { round: 1, pool_tpl: [0; 32], vault_tpl: [0; 32], ticket_tpl: [0; 32], f_min: F_MIN, claim_window: CLAIM_WINDOW, draw_window: DRAW_WINDOW }
 }
 
 /// seed_ref of the round 1 marker in the standalone fixture (round r: + (r - 1) x 10^6).
@@ -269,6 +269,7 @@ impl DrawCase {
             round: r,
             pool_tpl: t.pool.hash,
             vault_tpl: t.vault.hash,
+            ticket_tpl: t.ticket.hash,
             f_min: F_MIN,
             claim_window: CLAIM_WINDOW,
             draw_window: DRAW_WINDOW,
@@ -380,6 +381,8 @@ impl DrawCase {
                 k: self.k() as i64,
                 roots: vec![0x21; 32 * K_MAX],
                 deadline: self.marker.seed_ref - 100_000,
+                ticket_tpl: self.drawer.ticket_tpl,
+                reserve: self.controller.reserve,
                 funder_class: 0,
                 funder_key: [0; 33],
             };
@@ -501,6 +504,9 @@ impl DrawCase {
                     k: mk.k,
                     roots: mk.roots.clone(),
                     deadline: d_claim,
+                    // Spec M4 A7 check 25 (D54, D55).
+                    ticket_tpl: self.drawer.ticket_tpl,
+                    reserve: ctrl.reserve,
                     funder_class: 0,
                     funder_key: [0; 33],
                 };
@@ -712,6 +718,10 @@ pub struct RoundResult {
     pub pools: Vec<ResultPool>,
     pub d_claim: i64,
     pub funder: Payout,
+    /// The ticket template hash from the drawer input state (spec M4 A8, D54).
+    pub ticket_tpl: [u8; 32],
+    /// R: the drawer' value, output 0 (spec M4 A8, D55).
+    pub reserve: u64,
 }
 
 impl RoundResult {
@@ -740,6 +750,8 @@ impl RoundResult {
             pools,
             d_claim: x.d_claim,
             funder: case.funder,
+            ticket_tpl: case.drawer.ticket_tpl,
+            reserve: x.values[0],
         }
     }
 
@@ -747,7 +759,8 @@ impl RoundResult {
     /// builder's data or the spent UTXO entries:
     ///   - cov from output 0's covenant binding;
     ///   - round, m, k, roots, the shares and seed_ref from the marker's redeem (input 1);
-    ///   - draw_window and claim_window from the drawer's redeem (input 0);
+    ///   - draw_window, claim_window and ticket_tpl from the drawer's redeem (input 0);
+    ///   - R (the pools' reserve) from output 0's value (drawer' = R, check 20);
     ///   - test_only_seed, win5, the count leaves and the funder from input 0's arguments;
     ///   - bonus from the seed mapping (D42); h_J and n2 from the leaves; the pool set (D45)
     ///     and slices from the marker; values and outpoints from the outputs;
@@ -842,7 +855,11 @@ impl RoundResult {
         let own = script_num(&drawer_pushes[ARG_OWN])?;
         let d_claim = claim_deadline(own, marker.seed_ref, int(&drawer, "draw_window")?, int(&drawer, "claim_window")?).ok_or("D_claim out of range")?;
         let roots = (0..k as usize).map(|i| roots_bytes[32 * i..32 * (i + 1)].try_into().unwrap()).collect();
-        Ok(Self { round, win: [win5[0], win5[1], win5[2], win5[3], win5[4], sn.bonus], m, k, roots, pools, d_claim, funder })
+        let ticket_tpl: [u8; 32] = match drawer.get("ticket_tpl") {
+            Some(ArtifactValue::Bytes(b)) if b.len() == 32 => b.as_slice().try_into().unwrap(),
+            other => return Err(format!("drawer ticket_tpl: {other:?}")),
+        };
+        Ok(Self { round, win: [win5[0], win5[1], win5[2], win5[3], win5[4], sn.bonus], m, k, roots, pools, d_claim, funder, ticket_tpl, reserve: r })
     }
 
     /// Pool p's state rebuilt from the record alone (R4).
@@ -856,6 +873,8 @@ impl RoundResult {
             k: self.k,
             roots: MarkerState::roots_bytes(&self.roots),
             deadline: self.d_claim,
+            ticket_tpl: self.ticket_tpl,
+            reserve: self.reserve as i64,
             funder_class: 0,
             funder_key: [0; 33],
         };

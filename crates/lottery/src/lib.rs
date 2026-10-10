@@ -7,6 +7,7 @@
 compile_error!("TEST-ONLY seed cannot be built for mainnet");
 
 pub mod buy;
+pub mod claim;
 pub mod close;
 pub mod combo;
 #[cfg(feature = "test-seed")]

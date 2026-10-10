@@ -98,7 +98,9 @@ fn a6_wrong_role_and_foreign_inputs() {
     let ticket_redeem = t.ticket.redeem(&ticket.values());
     attack(&base, |b| {
         let sig = lottery::buy::push_redeem(
-            silverscript_abi::encode_contract_entry_sig_script(&t.ticket.art, t.ticket.name(), "locked", &[]).unwrap(),
+            // The M1 placeholder `locked()` is gone (M4 Stage 3a): a tag no entry has keeps
+            // the ticket input inert, so the attack is judged at the shard as before.
+            lottery::buy::planned_sig_script("locked()", &[]),
             &ticket_redeem,
         );
         b.inputs.insert(
@@ -129,7 +131,16 @@ fn a7_wrong_round_or_deadline_in_ticket() {
 
 #[test]
 fn a8_wrong_ticket_template() {
-    let look = ticket_source(b_max()).replace("require(this.activeInputIndex < 0);", "require(this.activeInputIndex >= 0);");
+    // Look-alike: the real ticket plus a permissive entry (M4 Stage 3a: the M1 placeholder
+    // `locked()` this test used to invert is gone; same idea, same state layout).
+    let src = ticket_source(b_max());
+    let end = src.rfind('}').expect("closing brace");
+    let look = format!("{}
+    entry backdoor() {{
+        require(this.activeInputIndex >= 0);
+    }}
+}}
+", &src[..end]);
     let fake = Templates::compile_with(b_max(), &look, &shard_source(b_max()));
     assert_ne!(fake.ticket.hash, Templates::get(b_max()).ticket.hash);
     let c = case();

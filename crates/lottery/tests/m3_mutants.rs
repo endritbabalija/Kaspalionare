@@ -632,6 +632,14 @@ fn every_m3_tag_is_tested() {
         if f == "controller.sil" {
             tags.retain(|t| t.starts_with("CL"));
         }
+        // pool.sil: the ticket_leg tags (PT*) are M4's (spec M4 A9 mutants, m4_mutants.rs).
+        if f == "pool.sil" {
+            tags.retain(|t| !t.starts_with("PT"));
+        }
+        // pool.sil, marker.sil: the refresh() tags (RF*) are M4's (spec M4 A6, m4_mutants.rs).
+        if f == "pool.sil" || f == "marker.sil" {
+            tags.retain(|t| !t.starts_with("RF"));
+        }
         tags.sort();
         tags.dedup();
         for t in tags {

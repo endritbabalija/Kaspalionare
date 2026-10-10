@@ -1,11 +1,25 @@
 pragma silverscript ^0.1.0;
 
-// Ticket (role 0x05), spec M1 4.2. M1 placeholder: the final state layout with no
-// spend path. M4 replaces the code (claim(), return_deposit()), which changes the
-// template hash the shard commits to.
+// Ticket (role 0x05), spec M1 4.2 (layout) and spec M4 A4-A6 (code, D53-D62).
 //
-// Value: d x b. Created only by Shard.buy(), which validates every field (R7).
+// Value: d x b + accrued prizes (D56). Created only by Shard.buy(), which validates every
+// field (R7). The ticket leads claim() (D53): it holds the K-proof code, the tier match,
+// the prize and every output; the pool is a delegate (Pool.ticket_leg) that checks that
+// input 0 is a genuine ticket of its round.
+//
+// Entries: claim() (A4); return_deposit_after() (A5 path b, after T + D_RET);
+// return_deposit_with_pool() (A5 path a, with a pool of the round after its deadline; the
+// pool's ticket_leg serves it as for claim()); refresh() (A6, D59, byte-identical successor).
+//
+// Route of trust (D54): POOL_TPL (poolTemplateHash) is a constructor constant; the pool
+// reads the ticket template from its own state (ticket_tpl, written by draw()).
+//
+// Each check of an entry starts at a "// ==== check <label>" line, in spec order, outside
+// any if/for body (the M4 attribution instrument in tests/common/m4.rs truncates the source
+// at these lines and closes open braces). `// mut:<ID>` tags mark the requires the mutation
+// tests remove one at a time (one statement per tagged line).
 contract Ticket(
+    byte[32] poolTemplateHash,
     int init_round,
     int init_deadline,
     int init_b,
@@ -17,6 +31,25 @@ contract Ticket(
     // B_MAX = 4: bundle is 6 x B_MAX bytes, claimed is ceil(B_MAX / 8) bytes.
     // Tests rewrite the two array sizes together with Shard's B_MAX.
 
+    // Spec M4 A2.
+    int constant K_MAX = 16;
+    int constant M_CLAIM = 50;
+    int constant B_MAX = 4;
+    int constant F_MAX = 8;
+    int constant DEPTH = 18;
+    int constant PATH = 576;
+    int constant COUNT_MAX = 32767;
+    int constant P_MIN = 5000000;
+    // D58: 14 days at 10 BPS (D23 source). D59: 24 h, below the ~30 h pruning horizon.
+    int constant D_RET = 12096000;
+    int constant D_IDLE = 864000;
+    int constant DAA_MAX = 500000000000;
+    int constant TOTAL_MAX = 4611686018427387904;
+    int constant RESERVE_MAX = 10000000000;
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+
     byte role = 0x05;
     int round = init_round;
     int deadline = init_deadline;
@@ -26,8 +59,496 @@ contract Ticket(
     byte payout_class = init_payout_class;
     byte[33] payout_key = init_payout_key;
 
-    // No spend path in M1.
-    entry locked() {
-        require(this.activeInputIndex < 0);
+    // Pool state layout (spec M4 A3.3), for readInputStateWithTemplate.
+    struct PoolState {
+        byte role;
+        int round;
+        byte tier;
+        int slice;
+        byte[6] win;
+        int m;
+        int k;
+        byte[512] roots;
+        int deadline;
+        byte[32] ticket_tpl;
+        int reserve;
+        byte funder_class;
+        byte[33] funder_key;
+    }
+
+    // Version-0 scriptPubKey bytes (2-byte version, then the script) of a D11 payout class
+    // and 33-byte key, as state::Payout::spk (rusty-kaspa v2.1.0
+    // crypto/txscript/src/standard.rs:19-37): 0 P2PK Schnorr, 1 P2PK ECDSA, 2 P2SH. The
+    // caller has checked c <= 2. Same code as Drawer.payoutSpk.
+    function payoutSpk(int c, byte[33] key): byte[] {
+        byte[] s = byte[](0x0000aa20) + key.slice(0, 32) + byte[](0x87);
+        if (c == 0) {
+            s = byte[](0x000020) + key.slice(0, 32) + byte[](0xac);
+        }
+        if (c == 1) {
+            s = byte[](0x000021) + key + byte[](0xab);
+        }
+        return s;
+    }
+
+    // Spec M4 A4. Inputs: 0 this ticket, 1 a pool of its round (ticket_leg), 2..1+n funding
+    // (zero ID, 1 <= n <= F_MAX). Outputs: 0 pool'; FINAL: 1 payout (prize + value); PAY:
+    // 1 ticket', 2 payout (prize); ACCRUE: 1 ticket' (value + prize); then at most one
+    // change output.
+    entry claim(int idx, byte[] leaves, byte[] siblings, int pool_pl, int pool_sl) {
+        // ==== check 1: leader at input 0; own state and input 0 value ranges (A3); argument ranges
+        require(this.activeInputIndex == 0); // mut:K1_active
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 5); // mut:K1_role
+        require(round >= 1); // mut:K1_round
+        require(round < TOTAL_MAX); // mut:K1_round
+        require(deadline >= 0); // mut:K1_deadline
+        require(deadline < DAA_MAX); // mut:K1_deadline
+        require(b >= 1); // mut:K1_b
+        require(b <= B_MAX); // mut:K1_b
+        int pc = unsigned(payout_class);
+        require(pc <= 2); // mut:K1_class
+        int v0 = tx.inputs[0].value;
+        require(v0 >= 0); // mut:K1_value
+        require(v0 <= TOTAL_MAX); // mut:K1_value
+        require(pool_pl >= 0); // mut:K1_tpl
+        require(pool_pl <= SCRIPT_MAX); // mut:K1_tpl
+        require(pool_sl >= 0); // mut:K1_tpl
+        require(pool_sl <= SCRIPT_MAX); // mut:K1_tpl
+        require(idx >= 0); // mut:K1_idx
+        require(idx < b); // mut:K1_idx
+
+        // ==== check 2: inputs (R2): ticket and pool under cov (D61), then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 2); // mut:K2_count
+        require(OpInputCovenantId(1) == cov); // mut:K2_pool
+        require(tx.inputs.length >= 3); // mut:K2_fund
+        require(tx.inputs.length <= 2 + F_MAX); // mut:K2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 2, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:K2_zero
+            }
+        }
+
+        // ==== check 3: the pool under POOL_TPL; A3 pool ranges; same round
+        PoolState pl = readInputStateWithTemplate(1, pool_pl, pool_sl, poolTemplateHash);
+        int v1 = tx.inputs[1].value;
+        require(unsigned(pl.role) == 4); // mut:K3_role
+        require(unsigned(pl.tier) <= 6); // mut:K3_tier
+        require(pl.slice >= 0); // mut:K3_slice
+        require(pl.slice <= TOTAL_MAX); // mut:K3_slice
+        require(pl.m >= 2); // mut:K3_m
+        require(pl.m <= M_CLAIM); // mut:K3_m
+        require(pl.k >= 1); // mut:K3_k
+        require(pl.k <= K_MAX); // mut:K3_k
+        require(pl.deadline >= 0); // mut:K3_deadline
+        require(pl.deadline < DAA_MAX); // mut:K3_deadline
+        require(pl.reserve >= 0); // mut:K3_reserve
+        require(pl.reserve <= RESERVE_MAX); // mut:K3_reserve
+        require(pl.reserve <= v1); // mut:K3_value
+        require(v1 <= TOTAL_MAX); // mut:K3_value
+        require(pl.round == round); // mut:K3_round
+
+        // ==== check 4: index unclaimed: bit = 2^idx; (c / bit) % 2 = 0
+        int bit = 1;
+        for(bq, 0, idx, B_MAX) {
+            bit = bit * 2;
+        }
+        int c = OpBin2Num(claimed.slice(0, 1) + byte[](0x00));
+        require((c / bit) % 2 == 0); // mut:K4_claimed
+
+        // ==== check 5: canonical combination (unsigned bytes), 1 <= bonus <= pl.m; colex rank
+        int co = 6 * idx;
+        int n1 = OpBin2Num(bundle.slice(co, co + 1) + byte[](0x00));
+        int n2 = OpBin2Num(bundle.slice(co + 1, co + 2) + byte[](0x00));
+        int n3 = OpBin2Num(bundle.slice(co + 2, co + 3) + byte[](0x00));
+        int n4 = OpBin2Num(bundle.slice(co + 3, co + 4) + byte[](0x00));
+        int n5 = OpBin2Num(bundle.slice(co + 4, co + 5) + byte[](0x00));
+        int bonus = OpBin2Num(bundle.slice(co + 5, co + 6) + byte[](0x00));
+        require(n1 >= 1); // mut:K5_canon
+        require(n1 < n2); // mut:K5_canon
+        require(n2 < n3); // mut:K5_canon
+        require(n3 < n4); // mut:K5_canon
+        require(n4 < n5); // mut:K5_canon
+        require(n5 <= 30); // mut:K5_canon
+        require(bonus >= 1); // mut:K5_bonus
+        require(bonus <= pl.m); // mut:K5_bonus
+        int rank = 0;
+        {
+            int x2 = n2 - 1;
+            int x3 = n3 - 1;
+            int x4 = n4 - 1;
+            int x5 = n5 - 1;
+            rank = (n1 - 1) + x2 * (x2 - 1) / 2 + x3 * (x3 - 1) * (x3 - 2) / 6
+                + x4 * (x4 - 1) * (x4 - 2) * (x4 - 3) / 24
+                + x5 * (x5 - 1) * (x5 - 2) * (x5 - 3) * (x5 - 4) / 120;
+        }
+
+        // ==== check 6: tier from (matched, bonus match) against pl.win; must equal pl.tier
+        {
+            int matched = 0;
+            for(wj, 0, 5, 5) {
+                int w = OpBin2Num(pl.win.slice(wj, wj + 1) + byte[](0x00));
+                matched = matched + ((n1 == w) as int) + ((n2 == w) as int) + ((n3 == w) as int) + ((n4 == w) as int) + ((n5 == w) as int);
+            }
+            int bm = (bonus == OpBin2Num(pl.win.slice(5, 6) + byte[](0x00))) as int;
+            // 7 = no prize tier (any other case rejects).
+            int tr = 7;
+            if (matched == 5) {
+                tr = 1 - bm;
+            }
+            if (matched == 4) {
+                tr = 3 - bm;
+            }
+            if (matched == 3) {
+                tr = 5 - bm;
+            }
+            if (matched == 2) {
+                if (bm == 1) {
+                    tr = 6;
+                }
+            }
+            require(tr == unsigned(pl.tier)); // mut:K6_tier
+        }
+
+        // ==== check 7: K count leaves at the rank, each proven against pl.roots (D62); h
+        require(leaves.length == 2 * pl.m * pl.k); // mut:K7_len
+        require(siblings.length == PATH * pl.k); // mut:K7_len
+        int h = 0;
+        {
+            int lw = 2 * pl.m;
+            byte[32] z0 = blake2b(byte[](0x02));
+            // 128 zero bytes (OpNum2Bin is limited to 8 bytes): covers 2 x M_CLAIM.
+            byte[] zeros = OpNum2Bin(0, 8);
+            zeros = zeros + zeros;
+            zeros = zeros + zeros;
+            zeros = zeros + zeros;
+            zeros = zeros + zeros;
+            byte[] zeroCounts = zeros.slice(0, lw);
+            byte[3] rk = rank as byte[3];
+            int so = 2 * (bonus - 1);
+            for(i, 0, pl.k, K_MAX) {
+                int lo = lw * i;
+                byte[] counts = leaves.slice(lo, lo + lw);
+                byte[32] node = z0;
+                if (counts != zeroCounts) {
+                    node = blake2b(byte[](0x00) + rk + counts);
+                }
+                int bits = rank;
+                byte[] path = siblings.slice(PATH * i, PATH * i + PATH);
+                for(l, 0, DEPTH, DEPTH) {
+                    byte[] sib = path.slice(32 * l, 32 * l + 32);
+                    if (bits % 2 == 0) {
+                        node = blake2b(byte[](0x01) + node + sib);
+                    } else {
+                        node = blake2b(byte[](0x01) + sib + node);
+                    }
+                    bits = bits / 2;
+                }
+                require(node == byte[32](pl.roots.slice(32 * i, 32 * i + 32))); // mut:K7_root
+                // Unsigned 16-bit value (bytes || 0x00).
+                int ci = OpBin2Num(counts.slice(so, so + 2) + byte[](0x00));
+                require(ci <= COUNT_MAX); // mut:K7_count
+                h = h + ci;
+            }
+        }
+
+        // ==== check 8: prize = floor(slice / h), h >= 1; prize <= remaining = value - reserve
+        require(h >= 1); // mut:K8_h
+        int prize = pl.slice / h;
+        require(prize <= v1 - pl.reserve); // mut:K8_remaining
+
+        // ==== check 9: mode (D56): final = (c + bit = 2^b - 1); pay = not final and prize >= P_MIN
+        int full = 1;
+        for(fq, 0, b, B_MAX) {
+            full = full * 2;
+        }
+        bool isFinal = c + bit == full - 1;
+        bool pay = !isFinal && prize >= P_MIN;
+        int nCov = 2;
+        if (isFinal) {
+            nCov = 1;
+        }
+
+        // ==== check 10: covenant outputs 0..nCov-1, all authorized by input 0 (R2)
+        require(OpAuthOutputCount(0) == nCov); // mut:K10_auth
+        for(ai, 0, nCov, 2) {
+            require(OpAuthOutputIdx(0, ai) == ai); // mut:K10_idx
+        }
+        require(OpCovOutputCount(cov) == nCov); // mut:K10_cov
+
+        // ==== check 11: nOut = nCov + [final or pay] + ch, ch in {0, 1}; plain outputs have the zero ID (R7)
+        {
+            int ch = tx.outputs.length - nCov - ((isFinal || pay) as int);
+            require(ch >= 0); // mut:K11_count
+            require(ch <= 1); // mut:K11_count
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, nCov, tx.outputs.length, 3) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:K11_zero
+            }
+        }
+
+        // ==== check 12: values (R7): pool' = pool - prize; per mode the ticket'/payout values
+        require(tx.outputs[0].value == v1 - prize); // mut:K12_pool
+        if (pay) {
+            require(tx.outputs[1].value == v0); // mut:K12_pay_ticket
+            require(tx.outputs[2].value == prize); // mut:K12_pay_payout
+        } else {
+            // FINAL: payout = value + prize; ACCRUE: ticket' = value + prize.
+            require(prize <= TOTAL_MAX - v0); // mut:K12_guard
+            require(tx.outputs[1].value == v0 + prize); // mut:K12_sum
+        }
+
+        // ==== check 13: payout script (D11): out1 (FINAL) or out2 (PAY)
+        if (isFinal || pay) {
+            int po = 2;
+            if (isFinal) {
+                po = 1;
+            }
+            require(tx.outputs[po].scriptPubKey == payoutSpk(pc, payout_key)); // mut:K13_spk
+        }
+
+        // ==== check 14: pool' = the pool state unchanged, under the pool's template
+        validateOutputStateWithInputTemplate(0, PoolState {
+            role: pl.role,
+            round: pl.round,
+            tier: pl.tier,
+            slice: pl.slice,
+            win: pl.win,
+            m: pl.m,
+            k: pl.k,
+            roots: pl.roots,
+            deadline: pl.deadline,
+            ticket_tpl: pl.ticket_tpl,
+            reserve: pl.reserve,
+            funder_class: pl.funder_class,
+            funder_key: pl.funder_key
+        }, 1, pool_pl, pool_sl, poolTemplateHash);
+
+        // ==== check 15: ticket' (not FINAL): claimed = c + bit, every other field unchanged
+        if (!isFinal) {
+            byte[1] nextClaimed = byte[1](claimed | (bit as byte[1]));
+            validateOutputState(1, State {
+                role: role,
+                round: round,
+                deadline: deadline,
+                b: b,
+                bundle: bundle,
+                claimed: nextClaimed,
+                payout_class: payout_class,
+                payout_key: payout_key
+            });
+        }
+    }
+
+    // Spec M4 A5 path b (D58). Inputs: 0 this ticket, 1..n funding (zero ID, 1 <= n <=
+    // F_MAX). Outputs: 0 payout (the whole ticket value), then at most one change output.
+    // The ticket is consumed; unclaimed indices are forfeited.
+    entry return_deposit_after() {
+        // ==== check A5b.1: leader at input 0; own state and input 0 value ranges (A3)
+        require(this.activeInputIndex == 0); // mut:RB1_active
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 5); // mut:RB1_role
+        require(round >= 1); // mut:RB1_round
+        require(round < TOTAL_MAX); // mut:RB1_round
+        require(deadline >= 0); // mut:RB1_deadline
+        require(deadline < DAA_MAX); // mut:RB1_deadline
+        require(b >= 1); // mut:RB1_b
+        require(b <= B_MAX); // mut:RB1_b
+        int pc = unsigned(payout_class);
+        require(pc <= 2); // mut:RB1_class
+        int v0 = tx.inputs[0].value;
+        require(v0 >= 0); // mut:RB1_value
+        require(v0 <= TOTAL_MAX); // mut:RB1_value
+
+        // ==== check A5b.2: inputs (R2): this ticket alone under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 1); // mut:RB2_count
+        require(tx.inputs.length >= 2); // mut:RB2_fund
+        require(tx.inputs.length <= 1 + F_MAX); // mut:RB2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 1, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:RB2_zero
+            }
+        }
+
+        // ==== check A5b.3: lower-bound lock at T + D_RET (R3; deadline < DAA_MAX, so no overflow)
+        // SilverScript compiles this to OpCheckLockTimeVerify after 0 <= x < LOCK_TIME_THRESHOLD
+        // (refs/silverscript/silverscript-lang/src/compiler/compile/statement.rs:375-388;
+        // rusty-kaspa v2.1.0 crypto/txscript/src/opcodes/mod.rs:892-918, lib.rs:84).
+        require(tx.daa >= deadline + D_RET); // mut:RB3
+
+        // ==== check A5b.4: no covenant output
+        require(OpAuthOutputCount(0) == 0); // mut:RB4_auth
+        require(OpCovOutputCount(cov) == 0); // mut:RB4_cov
+
+        // ==== check A5b.5: one or two outputs, all with the zero ID
+        require(tx.outputs.length >= 1); // mut:RB5_count
+        require(tx.outputs.length <= 2); // mut:RB5_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 0, tx.outputs.length, 2) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:RB5_zero
+            }
+        }
+
+        // ==== check A5b.6: out0 = the whole ticket value to the payout script (D11)
+        require(tx.outputs[0].value == v0); // mut:RB6_value
+        require(tx.outputs[0].scriptPubKey == payoutSpk(pc, payout_key)); // mut:RB6_spk
+    }
+
+    // Spec M4 A5 path a (D58). Inputs: 0 this ticket, 1 a pool of its round (ticket_leg),
+    // 2..1+n funding (zero ID, 1 <= n <= F_MAX). Outputs: 0 pool' (byte-identical, same
+    // value), 1 payout (the whole ticket value), then at most one change output.
+    entry return_deposit_with_pool(int pool_pl, int pool_sl) {
+        // ==== check A5a.1: leader at input 0; own state and input 0 value ranges (A3); argument ranges
+        require(this.activeInputIndex == 0); // mut:RA1_active
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 5); // mut:RA1_role
+        require(round >= 1); // mut:RA1_round
+        require(round < TOTAL_MAX); // mut:RA1_round
+        require(deadline >= 0); // mut:RA1_deadline
+        require(deadline < DAA_MAX); // mut:RA1_deadline
+        require(b >= 1); // mut:RA1_b
+        require(b <= B_MAX); // mut:RA1_b
+        int pc = unsigned(payout_class);
+        require(pc <= 2); // mut:RA1_class
+        int v0 = tx.inputs[0].value;
+        require(v0 >= 0); // mut:RA1_value
+        require(v0 <= TOTAL_MAX); // mut:RA1_value
+        require(pool_pl >= 0); // mut:RA1_tpl
+        require(pool_pl <= SCRIPT_MAX); // mut:RA1_tpl
+        require(pool_sl >= 0); // mut:RA1_tpl
+        require(pool_sl <= SCRIPT_MAX); // mut:RA1_tpl
+
+        // ==== check A5a.2: inputs (R2): ticket and pool under cov (D61), then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 2); // mut:RA2_count
+        require(OpInputCovenantId(1) == cov); // mut:RA2_pool
+        require(tx.inputs.length >= 3); // mut:RA2_fund
+        require(tx.inputs.length <= 2 + F_MAX); // mut:RA2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 2, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:RA2_zero
+            }
+        }
+
+        // ==== check A5a.3: the pool under POOL_TPL; A3 pool ranges; same round
+        PoolState pl = readInputStateWithTemplate(1, pool_pl, pool_sl, poolTemplateHash);
+        int v1 = tx.inputs[1].value;
+        require(unsigned(pl.role) == 4); // mut:RA3_role
+        require(unsigned(pl.tier) <= 6); // mut:RA3_tier
+        require(pl.slice >= 0); // mut:RA3_slice
+        require(pl.slice <= TOTAL_MAX); // mut:RA3_slice
+        require(pl.m >= 2); // mut:RA3_m
+        require(pl.m <= M_CLAIM); // mut:RA3_m
+        require(pl.k >= 1); // mut:RA3_k
+        require(pl.k <= K_MAX); // mut:RA3_k
+        require(pl.deadline >= 0); // mut:RA3_deadline
+        require(pl.deadline < DAA_MAX); // mut:RA3_deadline
+        require(pl.reserve >= 0); // mut:RA3_reserve
+        require(pl.reserve <= RESERVE_MAX); // mut:RA3_reserve
+        require(pl.reserve <= v1); // mut:RA3_value
+        require(v1 <= TOTAL_MAX); // mut:RA3_value
+        require(pl.round == round); // mut:RA3_round
+
+        // ==== check A5a.4: lower-bound lock at the pool's claim deadline (R3)
+        require(tx.daa >= pl.deadline); // mut:RA4
+
+        // ==== check A5a.5: one covenant output (pool') at 0, authorized by input 0
+        require(OpAuthOutputCount(0) == 1); // mut:RA5_auth
+        require(OpAuthOutputIdx(0, 0) == 0); // mut:RA5_idx
+        require(OpCovOutputCount(cov) == 1); // mut:RA5_cov
+
+        // ==== check A5a.6: two or three outputs; outputs >= 1 have the zero ID
+        require(tx.outputs.length >= 2); // mut:RA6_count
+        require(tx.outputs.length <= 3); // mut:RA6_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 1, tx.outputs.length, 2) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:RA6_zero
+            }
+        }
+
+        // ==== check A5a.7: pool' = the pool unchanged (value and state), under the pool's template
+        require(tx.outputs[0].value == v1); // mut:RA7_value
+        validateOutputStateWithInputTemplate(0, PoolState {
+            role: pl.role,
+            round: pl.round,
+            tier: pl.tier,
+            slice: pl.slice,
+            win: pl.win,
+            m: pl.m,
+            k: pl.k,
+            roots: pl.roots,
+            deadline: pl.deadline,
+            ticket_tpl: pl.ticket_tpl,
+            reserve: pl.reserve,
+            funder_class: pl.funder_class,
+            funder_key: pl.funder_key
+        }, 1, pool_pl, pool_sl, poolTemplateHash);
+
+        // ==== check A5a.8: out1 = the whole ticket value to the payout script (D11)
+        require(tx.outputs[1].value == v0); // mut:RA8_value
+        require(tx.outputs[1].scriptPubKey == payoutSpk(pc, payout_key)); // mut:RA8_spk
+    }
+
+    // Spec M4 A6 (D59). Inputs: 0 this ticket, 1..n funding (zero ID, 1 <= n <= F_MAX).
+    // Outputs: 0 ticket' (byte-identical, same value), then at most one change output.
+    entry refresh() {
+        // ==== check A6.1: leader at input 0
+        require(this.activeInputIndex == 0); // mut:RF1
+        byte[32] cov = OpInputCovenantId(0);
+
+        // ==== check A6.2: inputs (R2): this object alone under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 1); // mut:RF2_count
+        require(tx.inputs.length >= 2); // mut:RF2_fund
+        require(tx.inputs.length <= 1 + F_MAX); // mut:RF2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 1, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:RF2_zero
+            }
+        }
+
+        // ==== check A6.3: idle for D_IDLE since creation; creation >= 0 rejects an unaccepted parent
+        // OpTxInputDaaScore pushes the UTXO's block_daa_score as i64 (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1124-1130); an unaccepted parent has
+        // UNACCEPTED_DAA_SCORE = u64::MAX (consensus/core/src/constants.rs:51), pushed as -1
+        // (DECISIONS fact row O-S4-4). creation < DAA_MAX, so creation + D_IDLE cannot overflow.
+        int creation = OpTxInputDaaScore(0);
+        require(creation >= 0); // mut:RF3_creation
+        require(creation < DAA_MAX); // mut:RF3_creation
+        require(tx.daa >= creation + D_IDLE); // mut:RF3_idle
+
+        // ==== check A6.4: one covenant output (the successor) at 0, authorized by input 0
+        require(OpAuthOutputCount(0) == 1); // mut:RF4_auth
+        require(OpAuthOutputIdx(0, 0) == 0); // mut:RF4_idx
+        require(OpCovOutputCount(cov) == 1); // mut:RF4_cov
+
+        // ==== check A6.5: one or two outputs; output 1, if present, has the zero ID
+        require(tx.outputs.length >= 1); // mut:RF5_count
+        require(tx.outputs.length <= 2); // mut:RF5_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 1, tx.outputs.length, 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:RF5_zero
+            }
+        }
+
+        // ==== check A6.6: same value
+        require(tx.outputs[0].value == tx.inputs[0].value); // mut:RF6
+
+        // ==== check A6.7: byte-identical successor (same template, every field unchanged)
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            deadline: deadline,
+            b: b,
+            bundle: bundle,
+            claimed: claimed,
+            payout_class: payout_class,
+            payout_key: payout_key
+        });
     }
 }

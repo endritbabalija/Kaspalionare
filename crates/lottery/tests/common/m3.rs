@@ -83,6 +83,7 @@ impl Atk {
 pub fn retarget(mut c: DrawCase, t: &Templates) -> DrawCase {
     c.drawer.pool_tpl = t.pool.hash;
     c.drawer.vault_tpl = t.vault.hash;
+    c.drawer.ticket_tpl = t.ticket.hash;
     c.controller.marker_tpl = t.marker.hash;
     c.controller.shard_tpl = t.shard.hash;
     c.controller.params_tpl = t.params.hash;

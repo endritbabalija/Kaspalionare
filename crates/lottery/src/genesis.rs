@@ -42,6 +42,11 @@ pub const R_MIN: u64 = crate::params::TEST_RESERVE;
 /// M3 re-review S1: draw_window + claim_window cap, so D_claim (check 19) stays below
 /// DAA_MAX while own < DAA_MAX - WINDOWS_MAX. Both windows are fixed at genesis.
 pub const WINDOWS_MAX: i64 = DAA_MAX / 4;
+/// Spec M4 A2, D57: the smallest deposit d the builder accepts (0.11 KAS). The P_MIN bound
+/// (worst PAY-mode claim within 90 % of storage mass) is computed at b = 2, d = 0.11 KAS;
+/// a smaller d would make that bound unsafe. Fixed at genesis per round's controller d
+/// (M6 revisits).
+pub const D_CLAIM_FLOOR: i64 = 11_000_000;
 
 #[derive(Clone)]
 pub struct GenesisCase {
@@ -88,6 +93,7 @@ impl GenesisCase {
             round: controller.round,
             pool_tpl: t.pool.hash,
             vault_tpl: t.vault.hash,
+            ticket_tpl: t.ticket.hash,
             f_min: F_MIN,
             claim_window: CLAIM_WINDOW,
             draw_window: DRAW_WINDOW,
@@ -164,8 +170,14 @@ impl GenesisCase {
     /// A3), the share-room invariant sum(st) + s_C + s_D + S_F_CAP + S_R_CAP <= 10^4 (review
     /// finding R2: without it an admin change within the caps can make s_H' < 0 and block
     /// every later `close()`), and the consistency of the params and shards with the
-    /// controller.
+    /// controller. The drawer's route (pool_tpl, vault_tpl and ticket_tpl, D38, D54) is
+    /// checked against the committed templates; use `validate_with` for other templates.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with(&Templates::get(self.b_max))
+    }
+
+    /// `validate()` with the drawer's route checked against the templates `t`.
+    pub fn validate_with(&self, t: &Templates) -> Result<(), String> {
         let c = &self.controller;
         let k = self.k();
         let range = |name: &str, v: i64, lo: i64, hi: i64| -> Result<(), String> {
@@ -180,6 +192,10 @@ impl GenesisCase {
         range("m_max", c.m_max, c.m_min, M_HARD)?;
         range("m", c.m, c.m_min, c.m_max)?;
         range("price", c.price, 1, PRICE_MAX)?;
+        // D57 (spec M4 A2): d >= D_CLAIM_FLOOR, so the P_MIN storage-mass bound holds.
+        if c.d < D_CLAIM_FLOOR {
+            return Err(format!("d = {} < D_CLAIM_FLOOR = {D_CLAIM_FLOOR} (D57)", c.d));
+        }
         range("d", c.d, 1, DEPOSIT_MAX)?;
         range("s_f", c.s_f, 0, S_F_CAP)?;
         range("s_r", c.s_r, 0, S_R_CAP)?;
@@ -271,6 +287,15 @@ impl GenesisCase {
         if d.draw_window + d.claim_window > WINDOWS_MAX {
             return Err(format!("draw_window + claim_window > WINDOWS_MAX = {WINDOWS_MAX}: D_claim could reach DAA_MAX"));
         }
+        // Route of trust (D38, D54): the drawer's instance constants are the compiled
+        // templates. draw() copies ticket_tpl into every pool, and the pool's ticket leg
+        // (M4) trusts it, so a wrong ticket_tpl would make every prize unclaimable.
+        if d.pool_tpl != t.pool.hash || d.vault_tpl != t.vault.hash {
+            return Err("drawer pool_tpl / vault_tpl do not match the templates".into());
+        }
+        if d.ticket_tpl != t.ticket.hash {
+            return Err("drawer ticket_tpl does not match the compiled ticket template (D54)".into());
+        }
         // D43: the drawer takes a TEST-ONLY seed.
         if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
             return Err(format!("network {:?}: the TEST-ONLY seed drawer is allowed only on testnet or devnet (D43)", self.network));
@@ -300,13 +325,10 @@ impl GenesisCase {
         self.build_with(Templates::get(self.b_max))
     }
 
-    /// Panics if the instance fails `validate()` or the drawer's route does not match `t`.
+    /// Panics if the instance fails `validate_with(t)` (which includes the drawer's route).
     pub fn build_with(&self, t: Arc<Templates>) -> Built {
-        if let Err(e) = self.validate() {
+        if let Err(e) = self.validate_with(&t) {
             panic!("genesis refused: {e}");
-        }
-        if self.drawer.pool_tpl != t.pool.hash || self.drawer.vault_tpl != t.vault.hash {
-            panic!("genesis refused: drawer pool_tpl / vault_tpl do not match the templates");
         }
         self.build_unchecked_for_tests(t)
     }
@@ -563,5 +585,51 @@ mod tests {
         g.drawer.claim_window = WINDOWS_MAX - WINDOWS_MAX / 2;
         assert_eq!(g.validate(), Ok(()), "windows sum = WINDOWS_MAX");
         assert_eq!(good.controller.reserve, R_MIN as i64, "fixtures use R = R_MIN");
+    }
+
+    /// KP19 (spec M4 A9): the drawer's ticket_tpl is the compiled ticket hash (D54) and is
+    /// verified; d < D_CLAIM_FLOOR is refused (D57); D_CLAIM_FLOOR itself is accepted.
+    #[test]
+    fn kp19_genesis_ticket_tpl_and_claim_floor() {
+        let good = case();
+        assert_eq!(good.validate(), Ok(()));
+        let t = Templates::get(good.b_max);
+        assert_eq!(good.drawer.ticket_tpl, t.ticket.hash, "genesis drawer ticket_tpl = compiled ticket hash");
+        assert_ne!(t.ticket.hash, [0u8; 32]);
+        // The built genesis carries the drawer with that ticket_tpl (output spk).
+        let built = good.build();
+        let spk = drawer_spk(&t, &good.drawer);
+        assert_eq!(built.outputs[good.drawer_output()].script_public_key, spk);
+        // A bad ticket_tpl is refused by validate() and by the builder.
+        for bad_tpl in [[0u8; 32], t.pool.hash, {
+            let mut h = t.ticket.hash;
+            h[31] ^= 1;
+            h
+        }] {
+            let mut g = good.clone();
+            g.drawer.ticket_tpl = bad_tpl;
+            let e = g.validate().unwrap_err();
+            assert!(e.contains("ticket_tpl"), "refused for another reason: {e}");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+            assert!(r.is_err(), "builder accepted a bad ticket_tpl");
+        }
+        // d below the claim floor (D57); every shard carries the controller's d.
+        let with_d = |d: i64| {
+            let mut g = good.clone();
+            g.controller.d = d;
+            for s in &mut g.shards {
+                s.d = d;
+            }
+            g
+        };
+        for d in [D_CLAIM_FLOOR - 1, KAS as i64 / 10, 1] {
+            let g = with_d(d);
+            let e = g.validate().unwrap_err();
+            assert!(e.contains("D_CLAIM_FLOOR"), "d = {d}: refused for another reason: {e}");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+            assert!(r.is_err(), "builder accepted d = {d}");
+        }
+        assert_eq!(good.controller.d, D_CLAIM_FLOOR, "fixtures use d = D_CLAIM_FLOOR");
+        assert_eq!(with_d(D_CLAIM_FLOOR).validate(), Ok(()));
     }
 }

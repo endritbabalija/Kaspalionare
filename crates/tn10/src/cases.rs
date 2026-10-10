@@ -411,7 +411,34 @@ async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_c
 ///   (`merged`, O-S4-4), re-read just before submission, and the draw is rebuilt if it moved.
 /// Locked on testnet afterwards: round 2's objects, the drawer', vault', controller', the
 /// new pools (no claim path in M3) and the ticket. The caller output is ours.
+/// The round-1 state the M3/M4 chain probes reach: templates, covenant ID, the
+/// buy (its ticket is output 1 of `bs`), the draw case and transaction, and the round
+/// result read back from the draw transaction bytes. `*_start` are sink hashes taken before
+/// the submissions (for `merged`).
+pub struct Drawn {
+    pub t: std::sync::Arc<lottery::buy::Templates>,
+    pub cov: kaspa_consensus_core::Hash,
+    pub bc: lottery::buy::BuyCase,
+    pub bs: Sent,
+    pub b_start: kaspa_rpc_core::RpcHash,
+    pub d: lottery::draw::DrawCase,
+    pub ds: Sent,
+    pub d_start: kaspa_rpc_core::RpcHash,
+    pub rr: lottery::draw::RoundResult,
+}
+
 pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
+    match round1_drawn(ctx, "draw-m3").await {
+        Ok(_) => Ok(()),
+        // As before the M4 refactor: a rejected draw is a report row, not a probe error.
+        Err(e) if e == "draw-m3 draw rejected" => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Genesis -> buy -> close -> draw_test_seed() of round 1 with the real scripts (the draw-m3
+/// sequence); `tag` names the probe in every report row and error.
+pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     use kaspa_consensus_core::tx::TransactionOutpoint as Op;
     use kaspa_rpc_core::api::rpc::RpcApi;
     use lottery::buy::{BuyCase, Templates, b_max};
@@ -444,12 +471,12 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
     let mut gf = g.build_with(t.clone()).finish();
     g.fee = lottery_fee(&gf);
     gf = g.build_with(t.clone()).finish();
-    gf.run().map_err(|(i, e)| format!("local engine rejects draw-m3 genesis at input {i}: {e:?}"))?;
+    gf.run().map_err(|(i, e)| format!("local engine rejects {tag} genesis at input {i}: {e:?}"))?;
     let cov = covenant_id(&gf);
     let gs = sent_of(&gf);
     let g_start = sink(ctx).await?;
-    if !ctx.submit(&format!("setup: draw-m3 genesis, K = {K}, real templates, R = {:.2} KAS", g.reserve() as f64 / KAS as f64), &gs, true).await? {
-        return Err("draw-m3 genesis rejected".into());
+    if !ctx.submit(&format!("setup: {tag} genesis, K = {K}, real templates, R = {:.2} KAS", g.reserve() as f64 / KAS as f64), &gs, true).await? {
+        return Err(format!("{tag} genesis rejected"));
     }
     let gid = gs.tx.id();
     let gn = gs.tx.outputs.len() - 1;
@@ -479,11 +506,11 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
     let bf = buy_fin(&bc);
     bc.fee = lottery_fee(&bf);
     let bf = buy_fin(&bc);
-    bf.run().map_err(|(i, e)| format!("local engine rejects draw-m3 buy at input {i}: {e:?}"))?;
+    bf.run().map_err(|(i, e)| format!("local engine rejects {tag} buy at input {i}: {e:?}"))?;
     let bs = sent_of(&bf);
     let b_start = sink(ctx).await?;
-    if !ctx.submit(&format!("setup: draw-m3 buy() of the jackpot combination {:?} + {} on shard 0", unrank(sn.rank), sn.bonus), &bs, true).await? {
-        return Err("draw-m3 buy rejected".into());
+    if !ctx.submit(&format!("setup: {tag} buy() of the jackpot combination {:?} + {} on shard 0", unrank(sn.rank), sn.bonus), &bs, true).await? {
+        return Err(format!("{tag} buy rejected"));
     }
     let bid = bs.tx.id();
     let bn = bs.tx.outputs.len() - 1;
@@ -521,12 +548,12 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
     let cf = close_fin(&c);
     c.fee = lottery_fee(&cf);
     let cf = close_fin(&c);
-    cf.run().map_err(|(i, e)| format!("local engine rejects draw-m3 close at input {i}: {e:?}"))?;
+    cf.run().map_err(|(i, e)| format!("local engine rejects {tag} close at input {i}: {e:?}"))?;
     let x = c.expected();
     let cs = sent_of(&cf);
     let c_start = sink(ctx).await?;
-    if !ctx.submit(&format!("setup: draw-m3 close(), K = {K}, one sale of 1 KAS"), &cs, true).await? {
-        return Err("draw-m3 close rejected".into());
+    if !ctx.submit(&format!("setup: {tag} close(), K = {K}, one sale of 1 KAS"), &cs, true).await? {
+        return Err(format!("{tag} close rejected"));
     }
     let cid = cs.tx.id();
     let cn = cs.tx.outputs.len() - 1;
@@ -595,9 +622,9 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
                     );
                 }
             }
-            return Err("draw-m3: the builder's input entries do not match the node's beyond the DAA score".into());
+            return Err(format!("{tag}: the builder's input entries do not match the node's beyond the DAA score"));
         }
-        df.run().map_err(|(i, e)| format!("local engine rejects draw-m3 draw at input {i}: {e:?}"))?;
+        df.run().map_err(|(i, e)| format!("local engine rejects {tag} draw at input {i}: {e:?}"))?;
         // Re-read right before submission; rebuild if anything moved.
         let mut again = Vec::new();
         for (i, op) in dops.iter().enumerate() {
@@ -612,13 +639,15 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
         }
         println!("attempt {attempt}: a node entry changed between build and submission; rebuilding");
     }
-    let df = built.ok_or("draw-m3: node entries kept changing; not submitted")?;
+    let df = built.ok_or(format!("{tag}: node entries kept changing; not submitted"))?;
     let dx = d.expected();
     let ds = sent_of(&df);
+    let d_start = sink(ctx).await?;
     let ok = ctx
         .submit(
             &format!(
-                "draw_test_seed() M3 real scripts, K = {K}, a = 0, np = {}, h_J = {}, n2 = {}, fee paid {}, R = {:.2} KAS",
+                "{}draw_test_seed() M3 real scripts, K = {K}, a = 0, np = {}, h_J = {}, n2 = {}, fee paid {}, R = {:.2} KAS",
+                if tag == "draw-m3" { "" } else { "setup: " },
                 dx.np(),
                 dx.h_j,
                 dx.n2,
@@ -629,17 +658,141 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
             true,
         )
         .await?;
-    if ok {
-        let rr = RoundResult::from_tx(&ds.tx, &t).map_err(|e| format!("round result: {e}"))?;
-        let pools: Vec<(u8, i64, u64)> = rr.pools.iter().map(|p| (p.tier, p.slice, p.value)).collect();
-        println!("round result: round {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?}", rr.round, rr.win, rr.d_claim);
-        ctx.report.push(format!(
-            "| round result from the draw tx bytes: round {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?} | | | | | | | | `{}` |",
-            rr.round,
-            rr.win,
-            rr.d_claim,
-            ds.tx.id()
-        ));
+    if !ok {
+        return Err(format!("{tag} draw rejected"));
     }
+    let rr = RoundResult::from_tx(&ds.tx, &t).map_err(|e| format!("round result: {e}"))?;
+    let pools: Vec<(u8, i64, u64)> = rr.pools.iter().map(|p| (p.tier, p.slice, p.value)).collect();
+    println!("round result: round {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?}", rr.round, rr.win, rr.d_claim);
+    ctx.report.push(format!(
+        "| round result from the draw tx bytes: round {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?} | | | | | | | | `{}` |",
+        rr.round,
+        rr.win,
+        rr.d_claim,
+        ds.tx.id()
+    ));
+    Ok(Drawn { t, cov, bc, bs, b_start, d, ds, d_start, rr })
+}
+
+/// M4 (spec M4-i): genesis -> buy -> close -> draw (the draw-m3 sequence, K = 16, real
+/// scripts) -> one `claim()` with the real ticket and pool scripts through the public
+/// mempool.
+/// - The buy holds the round 1 jackpot combination of the TEST-ONLY seed on a b = 1 ticket
+///   (buy output 1), so the draw creates a jackpot pool with slice J and h_J = 1: the claim
+///   is FINAL (D56): pool' = R, payout = J + d to our key, the ticket is consumed.
+/// - Inputs (S5-5): the ticket (buy output 1), the jackpot pool (its draw output) and one
+///   funding input (the draw's caller output), each the node's own entry read only after a
+///   chain block merged the creating transaction (`merged`), re-read just before submission
+///   (rebuilt if any moved). claim() has no time check (A4), so lock_time = 0.
+/// - The claim is built by `lottery::claim::ClaimCase` and checked in the local v2.1.0 engine
+///   before submission; the pool state is rebuilt from the draw transaction bytes alone
+///   (`RoundResult::pool_state`, R4).
+/// Locked on testnet afterwards: round 2's objects, the drawer', vault', controller', the
+/// other pools and pool' (R). The payout and the change are ours.
+pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
+    use kaspa_consensus_core::tx::TransactionOutpoint as Op;
+    use lottery::claim::ClaimCase;
+    use lottery::close::FundingIn;
+    use lottery::game::ClaimMode;
+    use lottery::state::TIER_JACKPOT;
+
+    const TAG: &str = "claim-m4";
+    let r = round1_drawn(ctx, TAG).await?;
+    let t = r.t.clone();
+    let did = r.ds.tx.id();
+
+    // ---- the claim's inputs: ticket, jackpot pool, funding (the draw's caller output)
+    let p = r.rr.pools.iter().position(|p| p.tier == TIER_JACKPOT).ok_or("claim-m4: the draw created no jackpot pool")?;
+    let pool = r.rr.pool_state(p);
+    let pool_op = r.rr.pools[p].outpoint;
+    let ticket = r.bc.ticket();
+    let bid = r.bs.tx.id();
+    let ticket_op = Op::new(bid, 1);
+    let caller = r.d.expected().caller_output();
+    let fund_op = Op::new(did, caller as u32);
+    assert_eq!(r.bs.tx.outputs[1].script_public_key, t.ticket_spk(&ticket), "buy output 1 is the ticket");
+    assert_eq!(r.ds.tx.outputs[pool_op.index as usize].script_public_key, t.pool_spk(&pool), "the pool state rebuilt from the draw bytes");
+    let ops = vec![ticket_op, pool_op, fund_op];
+    let starts = [r.b_start, r.d_start, r.d_start];
+    let spks = [r.bs.tx.outputs[1].script_public_key.clone(), r.ds.tx.outputs[pool_op.index as usize].script_public_key.clone(), r.ds.tx.outputs[caller].script_public_key.clone()];
+
+    let mut c = ClaimCase::new(4);
+    c.b_max = t.b_max;
+    c.ticket = ticket;
+    c.pool = pool;
+    c.trees = r.d.trees.clone();
+    c.idx = 0;
+    c.change = true;
+    c.lock_time = 0;
+    c.cov = r.cov;
+    c.funding_sk = ctx.sk;
+    let claim_fin = |c: &ClaimCase| {
+        let mut b = c.build_with(t.clone());
+        b.outpoints = ops.clone();
+        b.finish()
+    };
+    let mut built = None;
+    for attempt in 1..=3 {
+        let mut node = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            node.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+        }
+        c.ticket_value = node[0].amount;
+        c.ticket_daa = node[0].block_daa_score;
+        c.pool_value = node[1].amount;
+        c.pool_daa = node[1].block_daa_score;
+        c.funding = vec![FundingIn { value: node[2].amount, daa: node[2].block_daa_score }];
+        let x = c.expected();
+        if !x.rejects.is_empty() {
+            return Err(format!("{TAG}: the reference rejects the claim: {:?}", x.rejects));
+        }
+        if x.mode != ClaimMode::Final {
+            return Err(format!("{TAG}: expected a FINAL claim (b = 1), got {:?}", x.mode));
+        }
+        let cf = claim_fin(&c);
+        c.fee = lottery_fee(&cf);
+        let cf = claim_fin(&c);
+        if cf.entries != node {
+            for i in 0..node.len() {
+                if cf.entries[i] != node[i] {
+                    println!(
+                        "input {i}: builder entry differs from the node's (amount {} / {}, daa {} / {}, cov {:?} / {:?})",
+                        cf.entries[i].amount, node[i].amount, cf.entries[i].block_daa_score, node[i].block_daa_score, cf.entries[i].covenant_id, node[i].covenant_id
+                    );
+                }
+            }
+            return Err(format!("{TAG}: the builder's input entries do not match the node's"));
+        }
+        cf.run().map_err(|(i, e)| format!("local engine rejects {TAG} claim at input {i}: {e:?}"))?;
+        let mut again = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            again.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+        }
+        if again == node {
+            for (i, e) in node.iter().enumerate() {
+                println!("input {i}: node entry = builder entry (amount {}, daa {})", e.amount, e.block_daa_score);
+            }
+            built = Some(cf);
+            break;
+        }
+        println!("attempt {attempt}: a node entry changed between build and submission; rebuilding");
+    }
+    let cf = built.ok_or(format!("{TAG}: node entries kept changing; not submitted"))?;
+    let x = c.expected();
+    let cs = sent_of(&cf);
+    ctx.submit(
+        &format!(
+            "claim() M4 real scripts, FINAL on the jackpot pool: K = {}, m = {}, h = {}, prize {:.4} KAS, payout {:.4} KAS, pool' {:.4} KAS (R)",
+            c.k(),
+            c.pool.m,
+            x.h,
+            x.prize as f64 / KAS as f64,
+            x.values[1] as f64 / KAS as f64,
+            x.values[0] as f64 / KAS as f64
+        ),
+        &cs,
+        true,
+    )
+    .await?;
     Ok(())
 }
