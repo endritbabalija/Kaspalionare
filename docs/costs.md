@@ -29,7 +29,7 @@ Source: `crates/lottery/tests/m1_measure.rs` (`cargo test -p lottery --release -
 | 7 | 15,072 | 15,375 | 123,279 / 15,754 | 305,001 / 19,367 | 331,689 | 14 | 15 | 1,022,656 | 265,884 |
 | 8 | 17,033 | 17,336 | 135,131 / 17,715 | 351,589 / 21,930 | 383,500 | 12 | 13 | 1,148,160 | 297,260 |
 
-B_MAX = 5: K = 16 uses 77 % of transient mass; the largest K at 90 % is 18. B_MAX = 6 fits K = 16 at 89.7 % only against M0's controller probe (712 B of headroom), which the M2 controller will exceed (DECISIONS 2026-10-10).
+(Superseded in M2: the shard now carries the real `close_leg`, and B_MAX = 4 under D32. See the M2 section below for the rerun of this table.) B_MAX = 5: K = 16 uses 77 % of transient mass; the largest K at 90 % is 18. B_MAX = 6 fits K = 16 at 89.7 % only against M0's controller probe (712 B of headroom), which the M2 controller will exceed (DECISIONS 2026-10-10).
 
 **M-c: `buy()` masses** (d = 0.11 KAS, price 1 KAS, fresh shard at R = 1.44 KAS):
 
@@ -56,6 +56,94 @@ Smallest deposit d per combination for storage ≤ 500,000 (fresh shard at R = 1
 M_ref = 0.1 KAS: a referral output at M_ref has storage mass 100,000 on its own. At d = 0.11 a b = 1 buy with a referral reaches 96 % of the storage limit; M6 revisits d.
 
 **M-d: hash.** 16 paths of depth 18, leaf at m = 10, verify only (`covenants/m1/paths_bench.sil`): OpBlake2b 502,956 units, OpBlake3 483,804, a 3.8 % saving. Below the 25 % threshold (spec D12), so OpBlake2b stays. Pushes, not hashing, dominate the cost.
+
+## M2: controller, params and `close()` (real scripts)
+
+Source: `crates/lottery/tests/m2_measure.rs` (`cargo test -p lottery --release --test m2_measure -- --nocapture --test-threads=1`) and the `m1_measure` rerun, scripts `covenants/controller.sil`, `params.sil`, `shard.sil` (with `close_leg`) and `marker.sil` (D28 placeholder), 2026-10-10. Mass limits as above; masses from the v2.1.0 calculator with mainnet parameters.
+
+**B_MAX = 4** (D32 applied). At B_MAX = 5 a K = 16 `close()` used 98.2 % of transient mass (982,252) and so broke the 90 % target. K stays 16.
+
+**M2-a: redeem sizes** (B_MAX = 4). Re-measured after the review fix R2 (the share-room `require` in `close()` check 2): the controller grew by 19 B, from 26,302 B. The other scripts are unchanged; the params and shard legs use 133 more units each because they read the longer controller script. K = 16 `close()`: compute +19, transient +76; storage unchanged.
+
+| Object | Redeem B |
+|---|---|
+| controller | 26,321 |
+| params | 2,918 |
+| shard (`buy` + `close_leg`) | 11,361 |
+| marker (placeholder) | 756 |
+
+**M2-a: `close()` units per input and masses.** Every shard carries 1,000 KAS of sales and a non-trivial root (the worst script path). R = 1.69 KAS.
+
+| K | Controller units / sigscript B | Params units / sigscript B | Shard units (max) / sigscript B | Compute | Transient | Storage | Priority |
+|---|---|---|---|---|---|---|---|
+| 4 | 1,015,364 / 26,417 | 190,525 / 2,930 | 207,413 / 11,373 | 99,988 | 304,152 | 118,411 | 152,076 |
+| 16 | 3,358,075 / 26,417 | 190,525 / 2,930 | 207,413 / 11,373 | 289,996 | 856,824 | 402,301 | 428,412 |
+
+Each shard adds about 15,800 compute and 46,056 transient mass. `set_params()` uses 120,376 params units. With change it costs compute 6,404, transient 13,896 and storage 16,980 (fee for priority 0.0170 KAS). Without change it costs 5,992, 13,688 and 0 (0.0068 KAS).
+
+**M2-b: largest K** (B_MAX = 4, real scripts, sales in every shard):
+
+| Limit | K = 16 mass | % of limit | Largest K at 90 % | Largest K at 100 % |
+|---|---|---|---|---|
+| compute | 289,996 | 58.0 | 16 (K_MAX) | 16 (K_MAX) |
+| transient | 856,824 | 85.7 | 16 (K_MAX) | 16 (K_MAX) |
+| storage (this shape) | 402,301 | 80.5 | 16 (K_MAX) | 16 (K_MAX) |
+| storage (worst case, M2-c) | 449,692 | 89.9 | 16 | 16 |
+
+K_MAX = 16 is the layout bound (the marker holds 16 roots). Transient mass sets the real ceiling: extrapolating +46,056 per shard, it reaches 90 % at K = 16 and 100 % at K = 19.
+
+M1's model rerun (`m1_measure`, shard redeem with the real leg plus a 300 B allowance and an M0-sized controller) gives these results at B_MAX = 4: largest K 18 at 90 % and 20 at 100 %, K = 16 transient 785,152. At B_MAX = 5 the same model gives a largest K of 15 at 90 %.
+
+**M2-c: reserve R = 1.69 KAS.** `close()` has K + 3 fresh covenant outputs: controller', params', K shards and the marker. The KIP-9 storage mass (rusty-kaspa v2.1.0 `consensus/core/src/mass/mod.rs:439-512`; C = 10¹², `constants.rs:26`) is Σ C·p²/v over the outputs minus the input relief |I|²·C/Σ inputs, where p is the plurality. Covenant P2SH outputs have p = 2 and the plain caller output has p = 1 (`mass/mod.rs:83-99`).
+- The output values are:
+  - controller', O − J_boost + A + R;
+  - params', R;
+  - each new shard, R;
+  - the marker, S − P_R − C_close + J_boost + R;
+  - the caller output, funding − R − fee + C_close.
+- Because 0 ≤ J_boost ≤ O and A ≥ 0 (A3, A4 check 12), every covenant output is ≥ R.
+- All K + 3 covenant outputs sit at R only when O = J_boost = A = 0 and there are no sales. The relief then tends to 0 as the caller's funding grows. A large pot instead takes one output off R: the controller' when J_boost = 0, or the marker when J_boost = O.
+- Builder policy: the caller output is at least 1 KAS (`close::MIN_CALLER_OUTPUT`). This is not a script check. It caps the caller term at C/1 KAS = 10,000, which is below one covenant output at R (4C/R = 23,668). So the output a large pot takes off R always outweighs the caller term. With O = 0 and a small caller output, the relief exceeds the caller term.
+
+**Supremum: storage ≤ 4C(K + 3)/R. So R = 4C(K + 3)/(0.9 L) keeps every `close()` within 90 % of L = 500,000.** At K = 16 that is 168,888,889 sompi, rounded up to **R = 1.69 KAS**. At K = 32 it would be 3.12 KAS. This supersedes the M0 formula max(4C(K + 2)/L, 4C(K + 1)/(L − 10,101)) for `close()`. That formula counted K + 2 outputs at R and allowed 100 %.
+
+Measured worst case over a grid, at R = 1.69:
+- grid: sales per shard ∈ {0, 10, 10,000 KAS}; O ∈ {0, 10⁵, 10⁷ KAS}; J_boost ∈ {0, O/2, O}; A ∈ {0, 2 KAS}; caller ∈ {1, 10, 10³, 10⁶, 10⁸ KAS};
+- `m2c_reserve_recheck` asserts ≤ 90 % for every K from 1 to 16.
+
+| K | Caller output | Worst storage | % of limit | Worst shape |
+|---|---|---|---|---|
+| 4 | 1 KAS | 152,008 | 30.4 | zero sales, O = 10⁷ KAS, J_boost = 0 |
+| 4 | ≥ 10⁶ KAS | 165,676 | 33.1 | zero sales, O = A = 0 (= supremum) |
+| 16 | 1 KAS | 436,024 | 87.2 | zero sales, O = 10⁷ KAS, J_boost = 0 |
+| 16 | 10 KAS | 427,024 | 85.4 | same |
+| 16 | 1,000 KAS | 436,456 | 87.3 | zero sales, O = A = 0 |
+| 16 | ≥ 10⁶ KAS | **449,692** | **89.9** | zero sales, O = A = 0 (= supremum) |
+
+At the old R = 1.44 KAS the same K = 16 worst case is 527,763 (105.6 %), which is over the limit.
+
+**R in the other shapes.** A larger R only lowers storage mass, because R appears in outputs (C/R terms) and in inputs (relief).
+- M1 `buy()` reruns at R = 1.69, d = 0.11 KAS, price 1:
+  - b = 1, no referral, large change: storage 377,721;
+  - b = 1, referral 0.1 KAS: storage 478,296 with large change and 468,152 with 1 KAS change;
+  - b = 4, referral: storage 122,690.
+  The b = 1 referral shape is still close to the limit, but that comes from d and the referral output, not R (M6 revisits d).
+- Smallest d per combination: 0.0823 / 0.0408 / 0.0271 / 0.0203 KAS for b = 1..4 without a referral, and 0.1038 / 0.0455 / 0.0291 / 0.0214 KAS with one.
+- `set_params()`: 16,980.
+- Genesis at K = 16: 413,196 (testnet-10 below).
+- `draw()` (M3) must re-check R against its own outputs.
+
+**M2-d: priority fee against C_close** (C_close = s_C · S, s_C = 50 bp; fee = 100 sompi per gram of max(compute, transient/2, storage)):
+
+| K | Priority mass | Fee for priority (KAS) | Sales S at which C_close covers it (KAS) |
+|---|---|---|---|
+| 4 | 152,076 | 0.1521 | 30.42 |
+| 16 | 428,412 | 0.4284 | 85.68 |
+| 16, storage worst case (M2-c) | 449,692 | 0.4497 | 89.94 |
+
+Below about 90 KAS of round sales at K = 16, the caller pays part of the fee out of pocket. This is the D19 liveness note. The relay floor alone (max(compute, transient/2)) is 0.4284 KAS at K = 16.
+
+**M2-e** (testnet-10): genesis plus a real K = 16 `close()` were accepted and mined. Storage was 435,348 and the fee 0.4354 KAS (`docs/tn10-mass-check.md`).
 
 ## Scripts (M0 probes)
 
@@ -88,6 +176,6 @@ M_ref = 0.1 KAS: a referral output at M_ref has storage mass 100,000 on its own.
 | Ticket deposit at which storage stops being the block bottleneck | 5.0646 KAS | ≥ 63 buys per block, steady state. The worst-case floor of 35,974 storage per buy (13 per block) is independent of d. |
 | Last-claim payout (prize + deposit) | 0.0212 KAS | Always met because d ≥ 0.0844. |
 | Non-final claim prize on a bundle | 0.0426 / 0.0265 / 0.0236 KAS for b = 2 / 5 / 10 | Payout is the prize alone; prize 0 is invalid. |
-| Reserve R per protocol object | 1.44 KAS (K = 16), 2.72 KAS (K = 32), 5.31 KAS (K = 64) | `close()` storage mass ≤ 500,000, worst case over sales, controller value O and caller funding. |
+| Reserve R per protocol object | **1.69 KAS (K = 16, M2)**: R = 4C(K + 3)/(0.9 × 500,000), rounded up to 0.01 KAS; 3.12 KAS at K = 32. M0 figures, now superseded: 1.44 / 2.72 / 5.31 KAS (K = 16 / 32 / 64) | `close()` storage mass ≤ 90 % of 500,000, worst case over every A3 state and caller output ≥ 1 KAS (builder policy). M2-c above. |
 | Reserve R, `close()` within 10% of block storage | 17.04 KAS (K = 16), 33.06 KAS (K = 32) | Storage mass ≤ 50,000. |
 | Largest K for `close()` | 62 / 37 / 23 | Shard sigscript 3,418 / 6,000 / 10,000 B (transient-mass bound, exact search); K = 62 accepted on TN10. |

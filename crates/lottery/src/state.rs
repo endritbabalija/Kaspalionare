@@ -1,4 +1,5 @@
-//! Shard and ticket states (spec M1 section 4), as SilverScript runtime-state values.
+//! Protocol states as SilverScript runtime-state values: shard and ticket (spec M1
+//! section 4), controller, params and marker (spec M2 A3).
 
 use std::collections::BTreeMap;
 
@@ -6,8 +7,13 @@ use harness::{ArtifactValue, ScriptPublicKey};
 
 use crate::combo::{Combo, bundle_bytes};
 
+pub const ROLE_CONTROLLER: u8 = 0x01;
 pub const ROLE_SHARD: u8 = 0x02;
+pub const ROLE_MARKER: u8 = 0x03;
 pub const ROLE_TICKET: u8 = 0x05;
+pub const ROLE_PARAMS: u8 = 0x09;
+/// Largest K (spec M2 A2); the marker stores 32 x K_MAX root bytes.
+pub const K_MAX: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShardState {
@@ -41,11 +47,13 @@ impl ShardState {
         ])
     }
 
-    /// Constructor arguments after the ticket template hash.
-    pub fn ctor(&self, ticket_hash: [u8; 32]) -> Vec<ArtifactValue> {
+    /// Constructor arguments: the ticket and controller template hashes (constants), then
+    /// the state.
+    pub fn ctor(&self, ticket_hash: [u8; 32], controller_hash: [u8; 32]) -> Vec<ArtifactValue> {
         use ArtifactValue::*;
         vec![
             Bytes(ticket_hash.to_vec()),
+            Bytes(controller_hash.to_vec()),
             Int(self.round),
             Int(self.shard_index),
             Int(self.m),
@@ -153,5 +161,230 @@ impl TicketState {
             Byte(self.payout_class),
             Bytes(self.payout_key.to_vec()),
         ]
+    }
+}
+
+/// The five lower-tier shares s_t in the fixed slot order (4+b, 4, 3+b, 3, 2+b) (D18).
+pub type TierShares = [i64; 5];
+
+/// Round controller, role 0x01 (spec M2 A3.1). Field order = byte order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControllerState {
+    pub round: i64,
+    pub k: i64,
+    pub m: i64,
+    pub price: i64,
+    pub d: i64,
+    pub deadline: i64,
+    pub s_f: i64,
+    pub s_r: i64,
+    pub fee_class: u8,
+    pub fee_key: [u8; 33],
+    pub jackpot: i64,
+    pub j_boost: i64,
+    pub g2: i64,
+    pub liability: i64,
+    pub v_rec: i64,
+    pub acc: i64,
+    pub drawn: u8,
+    pub shard_tpl: [u8; 32],
+    pub marker_tpl: [u8; 32],
+    pub params_tpl: [u8; 32],
+    pub reserve: i64,
+    pub s_c: i64,
+    pub s_d: i64,
+    pub st: TierShares,
+    pub e: i64,
+    pub j: i64,
+    pub g: i64,
+    pub margin: i64,
+    pub m_min: i64,
+    pub m_max: i64,
+    pub cap: i64,
+    pub round_len: i64,
+    pub d_min: i64,
+    pub seed_offset: i64,
+}
+
+impl ControllerState {
+    pub fn set_fee(&mut self, p: &Payout) {
+        self.fee_class = p.class();
+        self.fee_key = p.key33();
+    }
+
+    /// (name, value) pairs in state order, role first.
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_CONTROLLER)),
+            ("round", Int(self.round)),
+            ("k", Int(self.k)),
+            ("m", Int(self.m)),
+            ("price", Int(self.price)),
+            ("d", Int(self.d)),
+            ("deadline", Int(self.deadline)),
+            ("s_f", Int(self.s_f)),
+            ("s_r", Int(self.s_r)),
+            ("fee_class", Byte(self.fee_class)),
+            ("fee_key", Bytes(self.fee_key.to_vec())),
+            ("jackpot", Int(self.jackpot)),
+            ("j_boost", Int(self.j_boost)),
+            ("g2", Int(self.g2)),
+            ("liability", Int(self.liability)),
+            ("v_rec", Int(self.v_rec)),
+            ("acc", Int(self.acc)),
+            ("drawn", Byte(self.drawn)),
+            ("shard_tpl", Bytes(self.shard_tpl.to_vec())),
+            ("marker_tpl", Bytes(self.marker_tpl.to_vec())),
+            ("params_tpl", Bytes(self.params_tpl.to_vec())),
+            ("reserve", Int(self.reserve)),
+            ("s_c", Int(self.s_c)),
+            ("s_d", Int(self.s_d)),
+            ("st1", Int(self.st[0])),
+            ("st2", Int(self.st[1])),
+            ("st3", Int(self.st[2])),
+            ("st4", Int(self.st[3])),
+            ("st5", Int(self.st[4])),
+            ("e", Int(self.e)),
+            ("j", Int(self.j)),
+            ("g", Int(self.g)),
+            ("margin", Int(self.margin)),
+            ("m_min", Int(self.m_min)),
+            ("m_max", Int(self.m_max)),
+            ("cap", Int(self.cap)),
+            ("round_len", Int(self.round_len)),
+            ("d_min", Int(self.d_min)),
+            ("seed_offset", Int(self.seed_offset)),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: every field after the role, in order.
+    pub fn ctor(&self) -> Vec<ArtifactValue> {
+        self.fields().into_iter().skip(1).map(|(_, v)| v).collect()
+    }
+}
+
+/// Parameter UTXO, role 0x09 (spec M2 A3.2, D16).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamsState {
+    pub round: i64,
+    /// blake2b of the 32-byte x-only admin pubkey (D34).
+    pub admin_hash: [u8; 32],
+    pub nonce: i64,
+    pub used: u8,
+    pub next_s_f: i64,
+    pub next_s_r: i64,
+    pub next_fee_class: u8,
+    pub next_fee_key: [u8; 33],
+}
+
+impl ParamsState {
+    pub fn set_next_fee(&mut self, p: &Payout) {
+        self.next_fee_class = p.class();
+        self.next_fee_key = p.key33();
+    }
+
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_PARAMS)),
+            ("round", Int(self.round)),
+            ("admin_hash", Bytes(self.admin_hash.to_vec())),
+            ("nonce", Int(self.nonce)),
+            ("used", Byte(self.used)),
+            ("next_s_f", Int(self.next_s_f)),
+            ("next_s_r", Int(self.next_s_r)),
+            ("next_fee_class", Byte(self.next_fee_class)),
+            ("next_fee_key", Bytes(self.next_fee_key.to_vec())),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the controller template hash (constant), then the state.
+    pub fn ctor(&self, controller_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(controller_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
+    }
+}
+
+/// Frozen marker, role 0x03 (spec M2 A3.3). M2 placeholder template (D28).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkerState {
+    pub round: i64,
+    pub k: i64,
+    /// 32 x K_MAX bytes; roots i >= k are all zero.
+    pub roots: Vec<u8>,
+    pub sales: i64,
+    pub ref_paid: i64,
+    pub m: i64,
+    pub jackpot: i64,
+    pub j_boost: i64,
+    pub g2: i64,
+    pub s_f: i64,
+    pub s_r: i64,
+    pub s_c: i64,
+    pub s_d: i64,
+    pub st: TierShares,
+    pub seed_ref: i64,
+    pub funder_class: u8,
+    pub funder_key: [u8; 33],
+}
+
+impl MarkerState {
+    /// Root bytes for the given shard roots: concatenated, zero-padded to 32 x K_MAX.
+    pub fn roots_bytes(roots: &[[u8; 32]]) -> Vec<u8> {
+        assert!(roots.len() <= K_MAX, "at most K_MAX roots");
+        let mut b: Vec<u8> = roots.concat();
+        b.resize(32 * K_MAX, 0);
+        b
+    }
+
+    pub fn set_funder(&mut self, p: &Payout) {
+        self.funder_class = p.class();
+        self.funder_key = p.key33();
+    }
+
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_MARKER)),
+            ("round", Int(self.round)),
+            ("k", Int(self.k)),
+            ("roots", Bytes(self.roots.clone())),
+            ("sales", Int(self.sales)),
+            ("ref_paid", Int(self.ref_paid)),
+            ("m", Int(self.m)),
+            ("jackpot", Int(self.jackpot)),
+            ("j_boost", Int(self.j_boost)),
+            ("g2", Int(self.g2)),
+            ("s_f", Int(self.s_f)),
+            ("s_r", Int(self.s_r)),
+            ("s_c", Int(self.s_c)),
+            ("s_d", Int(self.s_d)),
+            ("st1", Int(self.st[0])),
+            ("st2", Int(self.st[1])),
+            ("st3", Int(self.st[2])),
+            ("st4", Int(self.st[3])),
+            ("st5", Int(self.st[4])),
+            ("seed_ref", Int(self.seed_ref)),
+            ("funder_class", Byte(self.funder_class)),
+            ("funder_key", Bytes(self.funder_key.to_vec())),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    pub fn ctor(&self) -> Vec<ArtifactValue> {
+        self.fields().into_iter().skip(1).map(|(_, v)| v).collect()
     }
 }

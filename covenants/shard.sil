@@ -1,6 +1,8 @@
 pragma silverscript ^0.1.0;
 
-// Shard (role 0x02) of one round, spec M1 4.1 and 5. One entry: buy().
+// Shard (role 0x02) of one round, spec M1 4.1 and 5, and spec M2 A3.4.
+// Entries: buy() (spec M1 5); close_leg() (delegate of Controller.close(), spec M2 A4).
+// controllerTemplateHash is a constructor constant (spec M2 D27).
 //
 // Transaction shape (spec 5.1, decisions D2/D3):
 //   inputs : 0 = this shard; 1..n = buyer funding, zero covenant ID, 1 <= n <= F_MAX
@@ -15,6 +17,7 @@ pragma silverscript ^0.1.0;
 // Check numbers in comments refer to spec 5.3.
 contract Shard(
     byte[32] ticketTemplateHash,
+    byte[32] controllerTemplateHash,
     int init_round,
     int init_index,
     int init_m,
@@ -26,7 +29,7 @@ contract Shard(
     int init_sales,
     int init_ref_paid
 ) {
-    int constant B_MAX = 5;
+    int constant B_MAX = 4;
     int constant F_MAX = 8;
     int constant DEPTH = 18;
     int constant PATH = 576;
@@ -38,16 +41,62 @@ contract Shard(
     int constant SALES_MAX = 4611686018427387904;
     int constant S_R_MAX = 1500;
     int constant DAA_MAX = 500000000000;
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
 
     struct TicketState {
         byte role;
         int round;
         int deadline;
         int b;
-        byte[30] bundle;
+        byte[24] bundle;
         byte[1] claimed;
         byte payout_class;
         byte[33] payout_key;
+    }
+
+    // Controller state layout (spec M2 A3.1), for readInputStateWithTemplate.
+    struct ControllerState {
+        byte role;
+        int round;
+        int k;
+        int m;
+        int price;
+        int d;
+        int deadline;
+        int s_f;
+        int s_r;
+        byte fee_class;
+        byte[33] fee_key;
+        int jackpot;
+        int j_boost;
+        int g2;
+        int liability;
+        int v_rec;
+        int acc;
+        byte drawn;
+        byte[32] shard_tpl;
+        byte[32] marker_tpl;
+        byte[32] params_tpl;
+        int reserve;
+        int s_c;
+        int s_d;
+        int st1;
+        int st2;
+        int st3;
+        int st4;
+        int st5;
+        int e;
+        int j;
+        int g;
+        int margin;
+        int m_min;
+        int m_max;
+        int cap;
+        int round_len;
+        int d_min;
+        int seed_offset;
     }
 
     byte role = 0x02;
@@ -246,7 +295,7 @@ contract Shard(
         }
 
         // ---- 20: ticket, full initial state under the committed template (R5, R7)
-        byte[30] padded = byte[30](bundle + zeros.slice(0, 6 * (B_MAX - b)));
+        byte[24] padded = byte[24](bundle + zeros.slice(0, 6 * (B_MAX - b)));
         validateOutputStateWithTemplate(1, TicketState {
             role: 0x05,
             round: round,
@@ -257,5 +306,27 @@ contract Shard(
             payout_class: payout_class,
             payout_key: payout_key
         }, ticket_prefix, ticket_suffix, ticketTemplateHash);
+    }
+
+    // Delegate leg of Controller.close() (spec M2 A4, checks L1-L5).
+    entry close_leg(int ctrl_pl, int ctrl_sl) {
+        // L1: a shard slot of close() (inputs 2..k+1)
+        require(this.activeInputIndex >= 2);
+        // L2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(this.activeInputIndex);
+        require(OpInputCovenantId(0) == cov);
+        // L3: this input authorizes no output
+        require(OpAuthOutputCount(this.activeInputIndex) == 0); // mut:L3
+        // L4: the leader is a controller of this round under the committed template
+        require(ctrl_pl >= 0);
+        require(ctrl_pl <= SCRIPT_MAX);
+        require(ctrl_sl >= 0);
+        require(ctrl_sl <= SCRIPT_MAX);
+        ControllerState ctrl = readInputStateWithTemplate(0, ctrl_pl, ctrl_sl, controllerTemplateHash);
+        require(unsigned(ctrl.role) == 1); // mut:L4_role
+        require(ctrl.round == round); // mut:L4_round
+        // L5: exactly the controller, the params and k shards are covenant inputs
+        // (written as count - 2 == k so no sum of an unchecked field is formed)
+        require(OpCovInputCount(cov) - 2 == ctrl.k); // mut:L5
     }
 }

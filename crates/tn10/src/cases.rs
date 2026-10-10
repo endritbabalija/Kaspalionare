@@ -204,12 +204,107 @@ pub async fn buy_m1(ctx: &mut Ctx) -> Result<(), String> {
     tx.finalize();
     let m = harness::masses(&tx, &fin.entries);
     let sent = Sent { fee: fin.fee(), tx, m };
-    let ok = ctx.submit(&format!("buy() M1 real shard script, b = {bm}, referral, d = 0.11 KAS, R = 1.44 KAS"), &sent, true).await?;
+    let ok = ctx
+        .submit(&format!("buy() M1 real shard script, b = {bm}, referral, d = 0.11 KAS, R = {:.2} KAS", c.reserve as f64 / KAS as f64), &sent, true)
+        .await?;
     if ok {
         let outs = outs_of(&sent);
         ctx.sweep(vec![outs[2].clone(), outs[3].clone()]).await?;
     } else {
         ctx.sweep(vec![funding]).await?;
     }
+    Ok(())
+}
+
+/// M2 (spec M2-e): genesis plus a real K = 16 `close()`, both built by the `lottery` builder
+/// with the real controller, params and shard scripts and checked in the local v2.1.0 engine
+/// before submission.
+/// - Genesis (D31) creates the round 1 controller (drawn = 1, the `CloseCase` fixture's J,
+///   G2, L and V_rec, boost pot 0, acc 2 KAS), the params and 16 fresh shards at
+///   R = TEST_RESERVE, with T a little below the current DAA so that `close()` is final now.
+///   No fabricated controller is needed: genesis writes drawn = 1 (D31, D33).
+/// - The probe waits for genesis to be mined, reads the creation DAA score of its outputs
+///   (one block, so the change output's score is every output's), then spends the
+///   controller, params, 16 shards and the genesis change (caller funding) in `close()`.
+///   Zero sales, so C_close = 0; the caller output is the change minus R and the fee.
+/// - Round 2's controller, params, 16 shards and the round 1 marker have no spend path yet
+///   (round 2 is not drawn; the marker is the D28 placeholder), so 2 + 19 R stay locked on
+///   testnet. The caller output is ours.
+pub async fn close_m2(ctx: &mut Ctx) -> Result<(), String> {
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    use lottery::buy::{Templates, b_max};
+    use lottery::close::{CloseCase, FundingIn, ShardIn};
+    use lottery::genesis::{GenesisCase, covenant_id};
+    use lottery::state::Payout;
+
+    const K: usize = 16;
+    let daa = ctx.client.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+    let t = Templates::get(b_max());
+    let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
+    // Round 1 deadline T: below the current DAA, so lock_time = T is final at once.
+    let deadline = daa as i64 - 1_000;
+
+    // ---- genesis
+    let f = fund(ctx).await?;
+    let mut g = GenesisCase::new_with(K, vec![(f.op, f.entry.clone())], &t);
+    g.funding_sk = ctx.sk;
+    g.controller.deadline = deadline;
+    for s in &mut g.shards {
+        s.deadline = deadline;
+    }
+    let mut gf = g.build_with(t.clone()).finish();
+    g.fee = lottery_fee(&gf);
+    gf = g.build_with(t.clone()).finish();
+    let cov = covenant_id(&gf);
+    let gs = sent_of(&gf);
+    if !ctx.submit(&format!("setup: close-m2 genesis, K = {K}, real templates, R = {:.2} KAS", g.reserve() as f64 / KAS as f64), &gs, true).await? {
+        return Err("close-m2 genesis rejected".into());
+    }
+    // Creation DAA score of the genesis outputs (all in one block): the change output's.
+    let gid = gs.tx.id();
+    let change_idx = gs.tx.outputs.len() - 1;
+    let change = ctx
+        .funds()
+        .await?
+        .into_iter()
+        .find(|u| u.op.transaction_id == gid && u.op.index as usize == change_idx)
+        .ok_or("genesis change not found in the UTXO index")?;
+    let gdaa = change.entry.block_daa_score;
+    println!("genesis {gid} mined at DAA {gdaa}; covenant id {cov}");
+
+    // ---- close()
+    let mut c = CloseCase::new_with(K, &t);
+    c.controller = g.controller.clone();
+    c.controller_daa = gdaa;
+    c.pot = g.pot;
+    c.params = g.params.clone();
+    c.params_daa = gdaa;
+    c.shards = g.shards.iter().map(|s| ShardIn { state: s.clone(), daa: gdaa }).collect();
+    c.funding = vec![FundingIn { value: change.entry.amount, daa: gdaa }];
+    c.funder = me;
+    c.funding_sk = ctx.sk;
+    c.cov = cov;
+    c.lock_time = deadline as u64;
+    let ops = |b: &mut lottery::buy::Built| {
+        b.outpoints = (0..=K as u32 + 1).map(|i| kaspa_consensus_core::tx::TransactionOutpoint::new(gid, i)).collect();
+        b.outpoints.push(change.op);
+    };
+    let mut b = c.build_with(t.clone());
+    ops(&mut b);
+    let cf = b.finish();
+    c.fee = lottery_fee(&cf);
+    let mut b = c.build_with(t.clone());
+    ops(&mut b);
+    let cf = b.finish();
+    cf.run().map_err(|(i, e)| format!("local engine rejects close-m2 at input {i}: {e:?}"))?;
+    assert!(cf.fee() >= lottery_fee(&cf) - 10_000, "fee below the priority fee");
+    let cs = sent_of(&cf);
+    ctx.submit(
+        &format!("close() M2 real scripts, K = {K}, B_MAX = {}, zero sales, R = {:.2} KAS", t.b_max, c.reserve() as f64 / KAS as f64),
+        &cs,
+        true,
+    )
+    .await?;
+    // The caller output (last) is ours and stays as funds; the genesis change was spent.
     Ok(())
 }

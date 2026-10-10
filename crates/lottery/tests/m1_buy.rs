@@ -8,6 +8,7 @@ mod common;
 use common::*;
 use lottery::buy::{BuyCase, Final, KAS, M_REF, Templates, b_max, funding_spk};
 use lottery::combo::Combo;
+use lottery::game::{Shares, round_amounts};
 use lottery::smt::Tree;
 use lottery::state::Payout;
 
@@ -205,9 +206,10 @@ fn p13_round_amounts_from_sales() {
         c.shard = succ;
         c.tree = t;
     }
-    let (f, cc, cd, bt, h, br) = round_amounts(sales, paid, c.shard.s_r as u64);
-    assert!(br >= 0, "boost contribution b_r >= 0");
-    assert_eq!(br as u64 + paid + f + cc + cd + bt + h, sales);
+    let shares = Shares { s_r: c.shard.s_r, ..Shares::TEST };
+    let a = round_amounts(sales as i64, paid as i64, &shares);
+    assert!(a.b_r >= 0, "boost contribution b_r >= 0");
+    assert_eq!(a.b_r + paid as i64 + a.f + a.c_close + a.c_draw + a.b_sum() + a.h, sales as i64);
     // The shard holds exactly S - P_R + R.
     assert_eq!(c.shard_value(), sales - paid + c.reserve);
 }

@@ -58,7 +58,7 @@ Done when:
 - measured and recorded in `docs/costs.md`: shard script size per bundle slot (and the K it allows at `close()`, feasibility Q5), and the minimum referral output M_ref.
 
 ## M2 — `close()`, game-size rule and admin parameters
-Status: todo
+Status: done (2026-10-10, spec `docs/specs/2.md`; K = 16, B_MAX = 4, R = 1.69 KAS; open: seed_ref chosen by the caller, review R1; see `docs/DECISIONS.md` and `docs/costs.md`)
 
 Frozen marker, next-round controller and shards (7.2). Game-size rule: edge rule, whale check, m_min/m_max, estimate Ĵ (4.6). Parameter snapshot and `set_params()` (5.6). The spec sets the open parameters (s_t split and paying tiers, margin within the 4.6 bound, m_min, m_max, cap, s_C/s_D) and confirms the whale-check and parameter-storage proposals. It also lists the arithmetic order and maximum values, with range checks (R8). The admin signature covers domain tag, covenant ID, target round, parameters and nonce, and the controller's nonce is monotonic. The spec decides research item K3: whether the admin spends the controller or a separate parameter UTXO. `close()` is built as leader with the shards as delegates (R6). `close()` sets T(r+1) = max(schedule, its DAA + D_min); a test shows that a late `close()` still opens a round that sells.
 

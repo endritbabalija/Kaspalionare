@@ -1,0 +1,186 @@
+pragma silverscript ^0.1.0;
+
+// Parameter UTXO (role 0x09), spec M2 A3.2, A4 (delegate leg) and A5 (D16).
+//
+// Value: R. Holds no money. Holds the admin key hash, the admin nonce, the
+// used-this-round flag and the next-round values of s_F, s_R and the fee address.
+//
+// Entries:
+//   set_params(): admin, once per round, spends only this UTXO (spec A5);
+//   close_leg():  delegate of the controller's close() at input 1 (spec A4).
+contract Params(
+    byte[32] controllerTemplateHash,
+    int init_round,
+    byte[32] init_admin_hash,
+    int init_nonce,
+    byte init_used,
+    int init_next_sf,
+    int init_next_sr,
+    byte init_next_fee_class,
+    byte[33] init_next_fee_key
+) {
+    int constant F_MAX = 8;
+    int constant S_F_CAP = 1000;
+    int constant S_R_CAP = 1500;
+    int constant TOTAL_MAX = 4611686018427387904;
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+
+    // Controller state layout (spec M2 A3.1), for readInputStateWithTemplate.
+    struct ControllerState {
+        byte role;
+        int round;
+        int k;
+        int m;
+        int price;
+        int d;
+        int deadline;
+        int s_f;
+        int s_r;
+        byte fee_class;
+        byte[33] fee_key;
+        int jackpot;
+        int j_boost;
+        int g2;
+        int liability;
+        int v_rec;
+        int acc;
+        byte drawn;
+        byte[32] shard_tpl;
+        byte[32] marker_tpl;
+        byte[32] params_tpl;
+        int reserve;
+        int s_c;
+        int s_d;
+        int st1;
+        int st2;
+        int st3;
+        int st4;
+        int st5;
+        int e;
+        int j;
+        int g;
+        int margin;
+        int m_min;
+        int m_max;
+        int cap;
+        int round_len;
+        int d_min;
+        int seed_offset;
+    }
+
+    byte role = 0x09;
+    int round = init_round;
+    byte[32] admin_hash = init_admin_hash;
+    int nonce = init_nonce;
+    byte used = init_used;
+    int next_s_f = init_next_sf;
+    int next_s_r = init_next_sr;
+    byte next_fee_class = init_next_fee_class;
+    byte[33] next_fee_key = init_next_fee_key;
+
+    // Spec A5. Inputs: 0 params, 1..n admin funding (zero ID, 1 <= n <= F_MAX).
+    // Outputs: 0 params successor, then at most one change output (zero ID).
+    // Entry arguments are size-checked by the compiler's entry prologue (byte 1, byte[33] 33,
+    // pubkey 32, datasig 64 bytes, int at most 8 bytes: silverscript-lang
+    // src/compiler/compile/statement.rs:100-160, ast/mod.rs:204-206), so checkMsgSig never
+    // sees a malformed key or signature length.
+    entry set_params(
+        int s_f,
+        int s_r,
+        byte fee_class,
+        byte[33] fee_key,
+        int new_nonce,
+        pubkey admin_pk,
+        datasig admin_sig
+    ) {
+        byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+
+        // check 1: shape
+        require(this.activeInputIndex == 0);
+        byte[32] cov = OpInputCovenantId(0);
+        int nIn = tx.inputs.length;
+        require(nIn >= 2);
+        require(nIn <= 1 + F_MAX);
+        for(fi, 1, nIn, F_MAX) {
+            require(OpInputCovenantId(fi) == zeroId);
+        }
+        require(OpCovInputCount(cov) == 1);
+        require(OpAuthOutputCount(0) == 1);
+        require(OpAuthOutputIdx(0, 0) == 0);
+        require(OpCovOutputCount(cov) == 1);
+        int nOut = tx.outputs.length;
+        require(nOut >= 1);
+        require(nOut <= 2);
+        if (nOut == 2) {
+            require(OpOutputCovenantId(1) == zeroId);
+        }
+
+        // check 2: one change per round
+        require(unsigned(used) == 0); // mut:P2
+
+        // check 3: caps and the fee script class (D11)
+        require(s_f >= 0);
+        require(s_f <= S_F_CAP);
+        require(s_r >= 0);
+        require(s_r <= S_R_CAP);
+        int fc = unsigned(fee_class);
+        require(fc <= 2);
+        if (fc != 1) {
+            require(fee_key.slice(32, 33) == byte[](0x00));
+        }
+
+        // check 4: stored nonce < nonce < 2^62 (gaps allowed, D34)
+        require(nonce >= 0);
+        require(nonce < new_nonce); // mut:P4
+        require(new_nonce < TOTAL_MAX);
+
+        // check 5: the passed key is the admin key
+        require(blake2b(byte[](admin_pk)) == admin_hash); // mut:P5
+
+        // check 6: Schnorr signature over blake2b(D34 message), target round = round + 1
+        require(round >= 1);
+        require(round < TOTAL_MAX);
+        byte[] msg = byte[]("KLOT/set_params") + cov + ((round + 1) as byte[8]) + (s_f as byte[8])
+            + (s_r as byte[8]) + byte[](fee_class) + fee_key + (new_nonce as byte[8]);
+        require(checkMsgSig(admin_sig, blake2b(msg), admin_pk)); // mut:P6
+
+        // check 7: the value (R) is kept
+        require(tx.outputs[0].value == tx.inputs[0].value);
+
+        // check 8: successor with the new nonce, used = 1 and the pending values
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            admin_hash: admin_hash,
+            nonce: new_nonce,
+            used: 0x01,
+            next_s_f: s_f,
+            next_s_r: s_r,
+            next_fee_class: fee_class,
+            next_fee_key: fee_key
+        });
+    }
+
+    // Delegate leg of Controller.close() (spec M2 A4, checks L1-L5 with index 1).
+    entry close_leg(int ctrl_pl, int ctrl_sl) {
+        // L1: the params slot of close()
+        require(this.activeInputIndex == 1);
+        // L2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(1);
+        require(OpInputCovenantId(0) == cov);
+        // L3: this input authorizes no output
+        require(OpAuthOutputCount(1) == 0);
+        // L4: the leader is a controller of this round under the committed template
+        require(ctrl_pl >= 0);
+        require(ctrl_pl <= SCRIPT_MAX);
+        require(ctrl_sl >= 0);
+        require(ctrl_sl <= SCRIPT_MAX);
+        ControllerState ctrl = readInputStateWithTemplate(0, ctrl_pl, ctrl_sl, controllerTemplateHash);
+        require(unsigned(ctrl.role) == 1);
+        require(ctrl.round == round);
+        // L5: exactly the controller, the params and k shards are covenant inputs
+        require(OpCovInputCount(cov) - 2 == ctrl.k);
+    }
+}

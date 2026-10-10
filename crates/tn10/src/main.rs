@@ -114,6 +114,7 @@ async fn run_probes(which: &str) -> Result<(), String> {
     if all || which == "buy" { cases::buy(&mut ctx).await?; }
     if all || which == "buy-m1" { cases::buy_m1(&mut ctx).await?; }
     if all || which == "claim" { cases::claim(&mut ctx).await?; }
+    if all || which == "close-m2" { cases::close_m2(&mut ctx).await?; }
     for k in [16usize, 32, 62] {
         if all || which == format!("close{k}") { cases::close(&mut ctx, k).await?; }
     }
@@ -135,7 +136,7 @@ async fn main() -> ExitCode {
         Some("keygen") => keygen(),
         Some("info") => info().await,
         Some("probe") => run_probes(args.get(1).map(String::as_str).unwrap_or("all")).await,
-        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close16|close32|close62]>".into()),
+        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|close16|close32|close62]>".into()),
     };
     match res {
         Ok(()) => ExitCode::SUCCESS,

@@ -18,6 +18,7 @@ const CLOSE_LEG_ALLOWANCE: usize = 300;
 /// Target K and the margin of D7.
 const K_TARGET: usize = 16;
 const MARGIN_PCT: u64 = 90;
+const R_KAS: f64 = lottery::params::TEST_RESERVE as f64 / KAS as f64;
 
 fn sigscript_len(b: &lottery::buy::Built) -> usize {
     b.finish().tx.inputs[0].signature_script.len()
@@ -49,9 +50,9 @@ fn p2pk() -> ScriptPublicKey {
 const COV: Hash = Hash::from_bytes([5; 32]);
 
 /// close() with K shard inputs whose sigscripts are `shard_sig` bytes, and an M0-sized controller
-/// (redeem ~ 190 + 420 K). Reserves 1.44 KAS, sales 10,000 KAS, caller funding 1,000 KAS.
+/// (redeem ~ 190 + 420 K). Reserves R = TEST_RESERVE, sales 10,000 KAS, caller funding 1,000 KAS.
 fn close_tx(k: usize, shard_sig: usize) -> (Transaction, Vec<UtxoEntry>) {
-    let r = 144_000_000u64;
+    let r = lottery::params::TEST_RESERVE;
     let sales = 10_000 * KAS;
     let ctl_sig = 190 + 420 * k + 4;
     let ctl_budget = budget_for(1_550 + 3_840 * k as u64 + ctl_sig as u64);
@@ -127,8 +128,9 @@ fn ma_mb_script_size_and_k_per_b_max() {
     }
     println!("Largest B_MAX with K = {K_TARGET} at <= {MARGIN_PCT} %: {chosen}; committed B_MAX = {}", b_max());
     // D7 as recorded in DECISIONS: the committed B_MAX must keep K = 16 within 90 % in this model.
-    // 6 passes it by 712 bytes of transient mass against M0's controller probe; 5 is committed
-    // so that the larger M2 controller still fits.
+    // M1 committed 5 (6 passed by 712 bytes against M0's controller probe). M2 (D32, Stage 4)
+    // lowered it to 4: the shard redeem now carries the real close_leg, and the real M2
+    // controller put a K = 16 close() above 90 % of transient mass at 5 (m2_measure M2-b).
     assert!(b_max() <= chosen, "committed B_MAX breaks K = {K_TARGET} at {MARGIN_PCT} %");
     assert!(largest_k(close_sig(&Templates::get(b_max())), MARGIN_PCT) >= K_TARGET);
 }
@@ -175,7 +177,7 @@ fn min_deposit(b: usize, with_ref: bool) -> u64 {
 
 #[test]
 fn mc_deposit_floor() {
-    println!("\nM-c: smallest ticket deposit d per combination, fresh shard at R = 1.44 KAS, worst change");
+    println!("\nM-c: smallest ticket deposit d per combination, fresh shard at R = {:.2} KAS, worst change", R_KAS);
     println!("| b | no referral (KAS) | with referral 0.1 x b KAS (KAS) |\n|---|---|---|");
     for b in 1..=b_max() {
         let (a, r) = (min_deposit(b, false), min_deposit(b, true));
@@ -185,7 +187,7 @@ fn mc_deposit_floor() {
 
 #[test]
 fn mc_buy_masses_and_referral_minimum() {
-    println!("\nM-c: buy() masses, d = 0.11 KAS, price 1 KAS, fresh shard at R = 1.44 KAS (K = 16)");
+    println!("\nM-c: buy() masses, d = 0.11 KAS, price 1 KAS, fresh shard at R = {:.2} KAS (K = 16)", R_KAS);
     println!("| shape | compute | transient | storage | shard units | fee for priority (KAS) |");
     println!("|---|---|---|---|---|---|");
     let bm = b_max();

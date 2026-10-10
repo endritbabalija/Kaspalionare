@@ -103,3 +103,27 @@ Aspectron's 0.019 KAS figure is just over the limit. The research doc's 0.1 / 0.
 | `buy()`, real shard script, b = 5, referral, d = 0.11 KAS, R = 1.44 KAS | 19,347 | 59,148 | 99,453 | 99,453 | 2 | 0.5000 | accepted; 1.4 s | `2ff25ef4744517e7c1eba4523859a3f876f89d7d79931a4d3d76757959b27b7f` |
 
 The shard successor and the ticket have no spend path in M1 (the ticket template is a placeholder until M4; `close()` comes in M2), so about 7.0 testnet KAS stay locked in them. The referral and change outputs were swept back.
+
+## M2: real genesis and K = 16 `close()` (spec M2-e, 2026-10-10)
+
+`cargo run -p tn10 -- probe close-m2`. This runs the real controller, params and shard scripts (B_MAX = 4, R = 1.69 KAS). The `lottery` builder builds both transactions, and the local v2.1.0 engine checks the `close()` before submission.
+- **Genesis (D31)** creates the round 1 controller, the params and 16 fresh shards under a new KIP-20 covenant ID.
+  - The controller is drawn = 1 with the fixture's J, G2, L and V_rec, boost pot 0 and acc 2 KAS. No fabricated controller was needed, because genesis writes drawn = 1.
+  - Deadline T is 1,000 DAA below the virtual DAA at build time, so a `close()` with lock_time = T is final at once.
+- **`close()`** runs after genesis is mined (creation DAA score of the genesis outputs: 593,039,315).
+  - It spends the controller, the params, the 16 shards and the genesis change as caller funding.
+  - Zero sales, so C_close = 0. The caller output is the change minus R and the fee.
+  - Its fee is the minimum feerate over the priority mass, plus 0.0001 KAS.
+- Node: `muon-10.kaspa.blue`, version 2.1.0, DAA ≈ 593,039,254.
+- Covenant ID: `f3c1b539f195d8d2300b32a3012989cec373215ed4cc3ed9a4c0e6880b492cb3`.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 9,852 | 7,328 | 413,196 | 413,196 | 1 | 0.4133 | accepted; visible after 1.3 s | `30716f96f2eff9e60ed1ed9ba10d685030a5d03742665acba8b06715308be027` |
+| `close()`, real scripts, K = 16, B_MAX = 4, zero sales, R = 1.69 KAS | 289,977 | 856,748 | 435,348 | 435,348 | 19 | 0.4354 | accepted; visible after 1.3 s | `ae28c020a8ce0f12e982ae2fb5e24cc2b533a404ad029abaf917a90884daa7d9` |
+
+Compute and transient mass match the local M2-a figures exactly (289,977 and 856,748, 85.7 % of the transient limit). Storage (87.1 %) is this shape's: pot 0, acc 2 KAS and a large caller output. The worst case at R = 1.69 is 449,692 (`docs/costs.md` M2-c).
+
+This probe ran before the review fix R2 added one `require` to `close()` check 2. The controller redeem is now 19 B larger (26,321 B), and a local K = 16 `close()` measures compute 289,996 and transient 856,824 (+19 and +76; storage unchanged; `docs/costs.md` M2-a). That is 85.7 % of the transient limit, as before, so the probe was not repeated.
+
+About 34.1 testnet KAS stay locked: 2 + 19 × 1.69, i.e. the round 2 controller (acc + R), params and 16 shards, plus the round 1 marker. They have no spend path yet: round 2 is not drawn, and the marker is the D28 placeholder. The caller output is ours.

@@ -1,4 +1,5 @@
-//! Transaction builder for `buy()` (spec M1 section 5) and the compiled templates.
+//! Transaction builder for `buy()` (spec M1 section 5), the compiled templates, and the
+//! editable transaction (`Built`/`Final`) shared by every builder (`close`, `params`).
 //!
 //! A `BuyCase` describes a purchase; `BuyCase::build` turns it into an editable `Built`
 //! (sigscript arguments, inputs, outputs). Tests mutate a `Built` to make one attack,
@@ -18,7 +19,7 @@ use silverscript_abi::{encode_contract_entry_sig_script, encode_runtime_state_sc
 
 use crate::combo::{Combo, bundle_bytes};
 use crate::smt::{Tree, counts_bytes, num_bytes};
-use crate::state::{Payout, ShardState, TicketState};
+use crate::state::{ControllerState, K_MAX, MarkerState, ParamsState, Payout, ShardState, TicketState};
 
 pub const KAS: u64 = 100_000_000;
 pub const M_REF: u64 = 10_000_000;
@@ -99,19 +100,59 @@ pub fn shard_source(b_max_to: usize) -> String {
     resize_ticket_arrays(&src.replace(&from, &format!("int constant B_MAX = {b_max_to};")), b_max_to)
 }
 
+/// Covenant sources for one compile (attack and mutant tests swap one of them).
+#[derive(Clone)]
+pub struct Sources {
+    pub ticket: String,
+    pub controller: String,
+    pub shard: String,
+    pub params: String,
+    pub marker: String,
+}
+
+fn read_covenant(name: &str) -> String {
+    std::fs::read_to_string(covenant_path(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+}
+
+impl Sources {
+    /// The committed sources, with the ticket and shard resized to `b_max`.
+    pub fn committed(b_max: usize) -> Self {
+        Self {
+            ticket: ticket_source(b_max),
+            controller: read_covenant("controller.sil"),
+            shard: shard_source(b_max),
+            params: read_covenant("params.sil"),
+            marker: read_covenant("marker.sil"),
+        }
+    }
+}
+
+/// Compiled templates. Compile order (spec M2 D27): ticket -> controller ->
+/// shard(ticket, controller) -> params(controller) -> marker. The controller depends on
+/// no template: its route table (shard, marker, params hashes) is state.
 pub struct Templates {
     pub b_max: usize,
-    pub ticket: Template,
-    pub shard: Template,
+    pub ticket: Arc<Template>,
+    pub controller: Arc<Template>,
+    pub shard: Arc<Template>,
+    pub params: Arc<Template>,
+    pub marker: Arc<Template>,
 }
 
 impl Templates {
     pub fn compile(b_max: usize) -> Self {
-        Self::compile_with(b_max, &ticket_source(b_max), &shard_source(b_max))
+        Self::compile_sources(b_max, &Sources::committed(b_max))
     }
 
-    /// Compile from given sources (attack tests use look-alike templates).
+    /// Compile with a given ticket and shard source, the rest committed (M1 attack tests
+    /// use look-alike templates).
     pub fn compile_with(b_max: usize, ticket_src: &str, shard_src: &str) -> Self {
+        let src = Sources { ticket: ticket_src.to_string(), shard: shard_src.to_string(), ..Sources::committed(b_max) };
+        Self::compile_sources(b_max, &src)
+    }
+
+    /// Compile from given sources.
+    pub fn compile_sources(b_max: usize, src: &Sources) -> Self {
         let dummy_shard = ShardState {
             round: 1,
             shard_index: 0,
@@ -125,9 +166,19 @@ impl Templates {
             ref_paid: 0,
         };
         let dummy_ticket = TicketState::new(&dummy_shard, &[Combo::new([1, 2, 3, 4, 5], 1)], &Payout::Schnorr([1; 32]), b_max);
-        let ticket = Template::from(compile_source(ticket_src, &dummy_ticket.ctor()));
-        let shard = Template::from(compile_source(shard_src, &dummy_shard.ctor(ticket.hash)));
-        Self { b_max, ticket, shard }
+        let ticket = Template::from(compile_source(&src.ticket, &dummy_ticket.ctor()));
+        let controller = Template::from(compile_source(&src.controller, &dummy_controller().ctor()));
+        let shard = Template::from(compile_source(&src.shard, &dummy_shard.ctor(ticket.hash, controller.hash)));
+        let params = Template::from(compile_source(&src.params, &dummy_params().ctor(controller.hash)));
+        let marker = Template::from(compile_source(&src.marker, &dummy_marker().ctor()));
+        Self {
+            b_max,
+            ticket: Arc::new(ticket),
+            controller: Arc::new(controller),
+            shard: Arc::new(shard),
+            params: Arc::new(params),
+            marker: Arc::new(marker),
+        }
     }
 
     /// Shared compiled templates per B_MAX (compiling is slow).
@@ -151,6 +202,92 @@ impl Templates {
 
     pub fn ticket_spk(&self, t: &TicketState) -> ScriptPublicKey {
         pay_to_script_hash_script(&self.ticket.redeem(&t.values()))
+    }
+
+    pub fn controller_redeem(&self, c: &ControllerState) -> Vec<u8> {
+        self.controller.redeem(&c.values())
+    }
+
+    pub fn controller_spk(&self, c: &ControllerState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.controller_redeem(c))
+    }
+
+    pub fn params_redeem(&self, p: &ParamsState) -> Vec<u8> {
+        self.params.redeem(&p.values())
+    }
+
+    pub fn params_spk(&self, p: &ParamsState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.params_redeem(p))
+    }
+
+    pub fn marker_spk(&self, m: &MarkerState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.marker.redeem(&m.values()))
+    }
+}
+
+/// Placeholder states for compiling (the template hash does not depend on state values).
+fn dummy_controller() -> ControllerState {
+    ControllerState {
+        round: 1,
+        k: 1,
+        m: 10,
+        price: KAS as i64,
+        d: (KAS / 10) as i64,
+        deadline: 1_000,
+        s_f: 500,
+        s_r: 1_000,
+        fee_class: 0,
+        fee_key: [0; 33],
+        jackpot: 0,
+        j_boost: 0,
+        g2: 0,
+        liability: 0,
+        v_rec: 0,
+        acc: 0,
+        drawn: 1,
+        shard_tpl: [0; 32],
+        marker_tpl: [0; 32],
+        params_tpl: [0; 32],
+        reserve: 1,
+        s_c: 50,
+        s_d: 50,
+        st: [400, 300, 300, 0, 0],
+        e: 1_500,
+        j: 1_000,
+        g: 100,
+        margin: 11_700,
+        m_min: 2,
+        m_max: 50,
+        cap: 2_000,
+        round_len: 864_000,
+        d_min: 72_000,
+        seed_offset: 600,
+    }
+}
+
+fn dummy_params() -> ParamsState {
+    ParamsState { round: 1, admin_hash: [0; 32], nonce: 0, used: 0, next_s_f: 500, next_s_r: 1_000, next_fee_class: 0, next_fee_key: [0; 33] }
+}
+
+fn dummy_marker() -> MarkerState {
+    MarkerState {
+        round: 1,
+        k: 1,
+        roots: vec![0; 32 * K_MAX],
+        sales: 0,
+        ref_paid: 0,
+        m: 10,
+        jackpot: 0,
+        j_boost: 0,
+        g2: 0,
+        s_f: 500,
+        s_r: 1_000,
+        s_c: 50,
+        s_d: 50,
+        st: [400, 300, 300, 0, 0],
+        seed_ref: 0,
+        funder_class: 0,
+        funder_key: [0; 33],
     }
 }
 
@@ -194,7 +331,7 @@ pub struct BuyCase {
 
 impl BuyCase {
     /// A valid one-combination buy on a fresh shard of round 1 (m = 10, price 1 KAS,
-    /// d = TEST_DEPOSIT, s_R = 10 %, R = 1.44 KAS), no referral, with change.
+    /// d = TEST_DEPOSIT, s_R = 10 %, R = TEST_RESERVE), no referral, with change.
     pub fn new(b_max: usize) -> Self {
         let tree = Tree::new(10);
         Self {
@@ -211,7 +348,7 @@ impl BuyCase {
                 sales: 0,
                 ref_paid: 0,
             },
-            reserve: 144_000_000,
+            reserve: crate::params::TEST_RESERVE,
             shard_daa: 5_000,
             tree,
             bundle: vec![Combo::new([3, 7, 12, 19, 28], 4)],
@@ -332,6 +469,7 @@ impl BuyCase {
             inputs,
             outputs,
             genesis: vec![],
+            lock_time: 0,
             shard_budget: None,
             budget_delta: 0,
             outpoints,
@@ -351,6 +489,10 @@ pub enum InKind {
     Covenant { redeem: Vec<u8>, args: Vec<ArtifactValue> },
     /// A fixed sigscript and units estimate (e.g. a ticket spent through its placeholder entry).
     Raw(Vec<u8>),
+    /// A covenant input spent through `entry` of `template` with `args`:
+    /// sigscript = entry(args) + push(redeem). Used by `close()` (controller, params and
+    /// shard legs) and `set_params()`.
+    Entry { template: Arc<Template>, entry: String, args: Vec<ArtifactValue>, redeem: Vec<u8> },
 }
 
 #[derive(Clone)]
@@ -367,9 +509,12 @@ pub struct Built {
     pub inputs: Vec<In>,
     pub outputs: Vec<TransactionOutput>,
     pub genesis: Vec<GenesisCovenantGroup>,
-    /// Override for the shard's committed compute budget.
+    /// Transaction lock time (absolute DAA score; `require(tx.daa >= T)` in `close()`).
+    pub lock_time: u64,
+    /// Override for input 0's committed compute budget (the shard in `buy()`, the leader in
+    /// `close()`, the params in `set_params()`).
     pub shard_budget: Option<u16>,
-    /// Added to the covering budget of the shard (attack A11 uses -1).
+    /// Added to the covering budget of input 0 (attack A11 and CA14 use -1).
     pub budget_delta: i32,
     /// Outpoints of the inputs (dummy ones in local tests).
     pub outpoints: Vec<TransactionOutpoint>,
@@ -382,7 +527,13 @@ pub fn push_redeem(mut sig: Vec<u8>, redeem: &[u8]) -> Vec<u8> {
 }
 
 fn buy_sigscript(t: &Templates, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8> {
-    let sig = encode_contract_entry_sig_script(&t.shard.art, t.shard.name(), "buy", args).expect("encode buy args");
+    entry_sigscript(&t.shard, "buy", args, redeem)
+}
+
+/// Sigscript calling `entry` of `template` with `args`, followed by the redeem script.
+pub fn entry_sigscript(template: &Template, entry: &str, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8> {
+    let sig = encode_contract_entry_sig_script(&template.art, template.name(), entry, args)
+        .unwrap_or_else(|e| panic!("encode {}.{entry} args: {e}", template.name()));
     push_redeem(sig, redeem)
 }
 
@@ -405,6 +556,25 @@ impl Built {
     /// Replace output 0's script with the given successor state.
     pub fn set_successor(&mut self, s: &ShardState) {
         self.outputs[0].script_public_key = self.templates.shard_spk(s);
+    }
+
+    /// Arguments of input `i` when it is an `InKind::Entry` (close, close_leg, set_params).
+    pub fn entry_args_mut(&mut self, i: usize) -> &mut Vec<ArtifactValue> {
+        match &mut self.inputs[i].kind {
+            InKind::Entry { args, .. } => args,
+            _ => panic!("input {i} is not an entry input"),
+        }
+    }
+
+    /// Replace input `i`'s covenant state (redeem and P2SH script), keeping its value, DAA
+    /// score and covenant ID. Only for `InKind::Entry` inputs.
+    pub fn set_entry_redeem(&mut self, i: usize, redeem: Vec<u8>) {
+        let e = &self.inputs[i].entry;
+        self.inputs[i].entry = UtxoEntry::new(e.amount, pay_to_script_hash_script(&redeem), e.block_daa_score, false, e.covenant_id);
+        match &mut self.inputs[i].kind {
+            InKind::Entry { redeem: r, .. } => *r = redeem,
+            _ => panic!("input {i} is not an entry input"),
+        }
     }
 
     /// Replace output 1's script with the given ticket state.
@@ -431,6 +601,7 @@ impl Built {
                 InKind::Funding => vec![0; P2PK_SIG_LEN],
                 InKind::Covenant { redeem, args } => buy_sigscript(&self.templates, args, redeem),
                 InKind::Raw(sig) => sig.clone(),
+                InKind::Entry { template, entry, args, redeem } => entry_sigscript(template, entry, args, redeem),
             })
             .collect()
     }
@@ -442,11 +613,20 @@ impl Built {
             .enumerate()
             .map(|(n, (s, &b))| TransactionInput::new_with_compute_budget(self.op(n), s.clone(), 0, b))
             .collect();
-        let mut tx = Transaction::new(1, inputs, self.outputs.clone(), 0, Default::default(), 0, vec![]);
+        let mut tx = Transaction::new(1, inputs, self.outputs.clone(), self.lock_time, Default::default(), 0, vec![]);
         if !self.genesis.is_empty() {
             tx.populate_genesis_covenants(&self.genesis).expect("genesis groups");
         }
         tx
+    }
+
+    /// KIP-9 storage mass of this transaction. It depends only on input and output values
+    /// and output scripts, so no script runs (measurement grids use it; `finish()` commits
+    /// the same value).
+    pub fn storage_mass(&self) -> u64 {
+        let entries: Vec<UtxoEntry> = self.inputs.iter().map(|i| i.entry.clone()).collect();
+        let n = self.inputs.len();
+        harness::masses(&self.assemble(&vec![vec![]; n], &vec![0; n]), &entries).storage
     }
 
     /// Size budgets from an unlimited run, commit storage mass, sign funding inputs.
@@ -488,6 +668,7 @@ impl Built {
                 tx.inputs[i].signature_script = sig;
             }
         }
+        tx.finalize();
         Final { tx, entries, units }
     }
 }
@@ -499,6 +680,17 @@ impl Final {
             execute(&self.tx, &self.entries, i, true).map_err(|e| (i, e))?;
         }
         Ok(())
+    }
+
+    /// Run one input under its committed budget; returns the script units used.
+    pub fn run_input(&self, i: usize) -> Result<u64, TxScriptError> {
+        execute(&self.tx, &self.entries, i, true)
+    }
+
+    /// Every input's result under its committed budget (attack tests check which input
+    /// fails, and that it is the named one).
+    pub fn run_all(&self) -> Vec<Result<u64, TxScriptError>> {
+        (0..self.tx.inputs.len()).map(|i| self.run_input(i)).collect()
     }
 
     pub fn fee(&self) -> u64 {

@@ -1,0 +1,61 @@
+pragma silverscript ^0.1.0;
+
+// Frozen marker (role 0x03) of one round, spec M2 A3.3. M2 placeholder (D28): the final
+// state layout with one always-rejecting entry. M3 replaces the code (the draw() leader),
+// which changes the template hash in the controller's route table at genesis.
+//
+// Value: S - P_R - C_close + J_boost + R. Created only by Controller.close(), which
+// validates every field (spec A4 check 24).
+contract Marker(
+    int init_round,
+    int init_k,
+    byte[512] init_roots,
+    int init_sales,
+    int init_ref_paid,
+    int init_m,
+    int init_jackpot,
+    int init_j_boost,
+    int init_g2,
+    int init_sf,
+    int init_sr,
+    int init_sc,
+    int init_sd,
+    int init_st1,
+    int init_st2,
+    int init_st3,
+    int init_st4,
+    int init_st5,
+    int init_seed_ref,
+    byte init_funder_class,
+    byte[33] init_funder_key
+) {
+    // roots: 32 x K_MAX bytes (K_MAX = 16); roots i >= k are all zero.
+
+    byte role = 0x03;
+    int round = init_round;
+    int k = init_k;
+    byte[512] roots = init_roots;
+    int sales = init_sales;
+    int ref_paid = init_ref_paid;
+    int m = init_m;
+    int jackpot = init_jackpot;
+    int j_boost = init_j_boost;
+    int g2 = init_g2;
+    int s_f = init_sf;
+    int s_r = init_sr;
+    int s_c = init_sc;
+    int s_d = init_sd;
+    int st1 = init_st1;
+    int st2 = init_st2;
+    int st3 = init_st3;
+    int st4 = init_st4;
+    int st5 = init_st5;
+    int seed_ref = init_seed_ref;
+    byte funder_class = init_funder_class;
+    byte[33] funder_key = init_funder_key;
+
+    // No spend path in M2.
+    entry locked() {
+        require(this.activeInputIndex < 0);
+    }
+}

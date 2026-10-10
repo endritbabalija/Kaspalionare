@@ -282,3 +282,17 @@ pub fn r_min(k: usize) -> u64 {
 
 pub const SHARD_SIG_LEN: usize = SHARD_SIG;
 pub const SHARD_BUDGET: u16 = SHARD_BUY_BUDGET;
+
+/// Fee for a lottery-built transaction: the minimum feerate over its priority mass (also
+/// covers the relay floor), plus 0.0001 KAS.
+pub fn lottery_fee(f: &lottery::buy::Final) -> u64 {
+    let m = harness::masses(&f.tx, &f.entries);
+    harness::priority_fee(&m).max(m.compute.max(m.transient.div_ceil(2)) * 100) + 10_000
+}
+
+pub fn sent_of(f: &lottery::buy::Final) -> Sent {
+    let mut tx = f.tx.clone();
+    tx.finalize();
+    let m = harness::masses(&tx, &f.entries);
+    Sent { fee: f.fee(), tx, m }
+}
