@@ -118,7 +118,7 @@ fn d2_a() {
 
 #[test]
 fn redundant_d2_a_upper() {
-    // a = 6: `for(ci, 1, 4 + a, 3 + A_MAX)` and the other A_MAX-bounded loops reject
+    // a = A_MAX + 1 = 8: `for(ci, 1, 4 + a, 3 + A_MAX)` and the other A_MAX-bounded loops reject
     // end - start > max_iterations (silverscript-lang compiler/for.rs:136-150).
     redundant(D, &["D2_a"], a_above_max());
 }

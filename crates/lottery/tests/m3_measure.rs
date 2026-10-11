@@ -225,7 +225,7 @@ fn m3c_drawer_size_and_m_max() {
     assert_eq!(sizes[&(16, 50)], committed, "the (16, 50) variant is the committed drawer");
 
     // m_max: the DP21 shape at m in {10, 25, 50} with the committed drawer.
-    println!("\nM3-c: worst shape (K = 16, a = 5, np = 7, F_MAX funding inputs) by m, committed drawer");
+    println!("\nM3-c: worst shape (K = 16, a = A_MAX = {A_MAX}, np = 7, F_MAX funding inputs) by m, committed drawer");
     println!("| m | compute | transient | storage | % c / t / s | <= 90 % |\n|---|---|---|---|---|---|");
     let mut last = None;
     for m in [10, 25, M_DRAW] {

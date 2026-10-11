@@ -426,12 +426,13 @@ fn da8_shape() {
     hit(&c, DRW, |b| {
         b.outputs.pop();
     });
-    // a = A_MAX + 1 absorbed pools (A_MAX = 5 is valid).
-    let mut five = DrawCase::at_round(4, 2);
-    five.absorb(5);
-    let mut six = five.clone();
-    six.absorb(1);
-    pair(&five, &six, DRW);
+    // a = A_MAX + 1 absorbed pools (A_MAX = 7 is valid; M4 review U5).
+    assert_eq!(lottery::game::A_MAX, 7);
+    let mut full = DrawCase::at_round(4, 2);
+    full.absorb(lottery::game::A_MAX);
+    let mut over = full.clone();
+    over.absorb(1);
+    pair(&full, &over, DRW);
     // F_MAX + 1 = 9 funding inputs (8 is valid).
     let mut eight = base();
     eight.funding = vec![FundingIn { value: 15 * KAS, daa: eight.funding[0].daa }; 8];
@@ -439,7 +440,7 @@ fn da8_shape() {
     nine.funding.push(nine.funding[0]);
     pair(&eight, &nine, DRW);
     done(&c);
-    done(&five);
+    done(&full);
     done(&eight);
     // (Stage 4 addition, mutant gap) a = -1 (controller without the ID), no funding input, the marker under another ID (check 2).
     s4::a_negative().strike();

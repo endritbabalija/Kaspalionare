@@ -31,7 +31,10 @@ contract Drawer(
     // Spec M3 A2.
     int constant K_MAX = 16;
     int constant M_DRAW = 50;
-    int constant A_MAX = 5;
+    // M4 review U5: A_MAX = 7 (was 5, D44), so one draw() can absorb as many expired
+    // pools as one draw() creates (jackpot, second prize, five lower tiers). DP21 at a = 7
+    // measured within 90 % of every mass (docs/specs/4-handoff.md, Review fixes).
+    int constant A_MAX = 7;
     int constant F_MAX = 8;
     int constant N = 142506;
     int constant DEPTH = 18;

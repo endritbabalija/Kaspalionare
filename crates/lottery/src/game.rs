@@ -283,8 +283,9 @@ pub fn close_math(c: &ControllerState, p: &ParamsState, shards: &[(i64, i64)], c
 
 /// Largest m the drawer can draw (D49): its count loop is unrolled to M_DRAW.
 pub const M_DRAW: i64 = 50;
-/// Most expired pools one `draw()` absorbs (D44).
-pub const A_MAX: usize = 5;
+/// Most expired pools one `draw()` absorbs (D44; 7 since M4 review U5, as many as one
+/// `draw()` creates). Mirrors drawer.sil `A_MAX`.
+pub const A_MAX: usize = 7;
 /// Minimum fee payout, 1 KAS (D41).
 pub const F_MIN: i64 = 100_000_000;
 /// Upper bound of the drawer's f_min (spec M3 A3 ranges).

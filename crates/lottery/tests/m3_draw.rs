@@ -17,7 +17,7 @@ use lottery::buy::{Final, KAS};
 use lottery::close::FundingIn;
 use lottery::combo::{Combo, unrank};
 use lottery::draw::{DrawCase, DrawExpected, RoundResult};
-use lottery::game::{CLAIM_WINDOW, DRAW_WINDOW, F_MIN, F_MIN_FLOOR, TOTAL_MAX, muldiv, witness_ok};
+use lottery::game::{A_MAX, CLAIM_WINDOW, DRAW_WINDOW, F_MIN, F_MIN_FLOOR, TOTAL_MAX, muldiv, witness_ok};
 use lottery::smt::{Tree, empty_hashes};
 use lottery::state::{Payout, TIER_JACKPOT, TIER_LOWER0, TIER_SECOND};
 
@@ -345,7 +345,16 @@ fn dp13_fee_paid_at_and_above_f_min() {
 /// Round 1 of a chain that produces all five pools (jackpot, second prize, three lower
 /// tiers): genesis -> buys -> close -> draw. Returns the chain after the round 2 close.
 fn two_round_chain(seed1: [u8; 32]) -> Chain {
-    let mut ch = Chain::genesis(4);
+    two_round_chain_with(seed1, None, 5)
+}
+
+/// `two_round_chain` with the controller's lower-tier shares `st` (fixture's when `None`);
+/// round 1's draw creates `np` pools.
+fn two_round_chain_with(seed1: [u8; 32], st: Option<[i64; 5]>, np: usize) -> Chain {
+    let mut ch = match st {
+        None => Chain::genesis(4),
+        Some(st) => Chain::genesis_with(4, |g| g.controller.st = st, true),
+    };
     let w = ch.winning(&seed1);
     let second = if w.bonus == 1 { 2 } else { 1 };
     let (mut b, ops) = ch.buy_case(0);
@@ -357,7 +366,7 @@ fn two_round_chain(seed1: [u8; 32]) -> Chain {
     ch.close(&cc, ops, lottery::close::TEST_DEADLINE as u64 + 10);
     let seed_ref = ch.marker.as_ref().unwrap().1.seed_ref;
     let (c, ops) = ch.draw_case(seed1, &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
-    assert_eq!(c.expected().np(), 5, "round 1 creates five pools");
+    assert_eq!(c.expected().np(), np, "round 1 creates {np} pools");
     ch.draw(&c, ops, c.lock_time + 10);
     // Round 2: one buy, close at T2.
     let t2 = ch.controller.1.deadline as u64;
@@ -369,18 +378,23 @@ fn two_round_chain(seed1: [u8; 32]) -> Chain {
     ch
 }
 
-/// DP14: round 2's draw absorbs one round 1 pool, and (separately) A_MAX = 5 of them, at
-/// lock_time = their deadline: Q goes to O'; each pool's funder gets R.
+/// DP14: round 2's draw absorbs one round 1 pool, and (separately) all five of them, at
+/// lock_time = their deadline: Q goes to O'; each pool's funder gets R. With every lower
+/// tier funded (`ST_ALL`, seven round 1 pools), it absorbs A_MAX = 7 of them (M4 review U5).
 #[test]
 fn dp14_round_2_absorbs_round_1_pools() {
-    let ch = two_round_chain([1u8; 32]);
-    assert_eq!(ch.pools.len(), 5);
-    let deadline = ch.pools[0].1.deadline as u64;
-    for absorb in [vec![2], vec![0, 1, 2, 3, 4]] {
+    assert_eq!(A_MAX, 7);
+    let five = two_round_chain([1u8; 32]);
+    let seven = two_round_chain_with([1u8; 32], Some(ST_ALL), 7);
+    for (ch, absorb) in [(&five, vec![2]), (&five, vec![0, 1, 2, 3, 4]), (&seven, (0..A_MAX).collect())] {
+        let n0 = ch.pools.len();
+        let deadline = ch.pools[0].1.deadline as u64;
+        assert!(ch.pools.iter().all(|p| p.1.deadline as u64 == deadline));
         let mut ch = ch.clone();
         let (c, ops) = ch.draw_case([2u8; 32], &absorb, deadline);
         assert_eq!(c.lock_time, deadline, "lock_time = the pools' deadline");
         let x = c.expected();
+        assert_eq!(x.a, absorb.len());
         let q: i64 = absorb.iter().map(|&i| ch.pools[i].2 as i64).sum();
         assert_eq!(x.q.iter().sum::<i64>(), q);
         let unpaid: i64 = (0..5).filter(|&t| !x.pools.lp[t]).map(|t| x.amounts.b[t]).sum();
@@ -391,9 +405,13 @@ fn dp14_round_2_absorbs_round_1_pools() {
         for i in 0..absorb.len() {
             assert_eq!(f.tx.outputs[x.pool_refund(i)].value, c.reserve());
         }
-        assert_eq!(ch.pools.len(), 5 - absorb.len() + x.np());
+        assert_eq!(ch.pools.len(), n0 - absorb.len() + x.np());
     }
+    assert_eq!(seven.pools.len(), A_MAX);
 }
+
+/// Every lower tier funded (shares 400, 300, 300, 200, 200): a draw creates seven pools.
+const ST_ALL: [i64; 5] = [400, 300, 300, 200, 200];
 
 /// DP16: two full rounds: round 2's close uses J(2), m and the flags from draw 1, and round
 /// 2 is drawn.

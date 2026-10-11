@@ -160,11 +160,11 @@ pub fn a_negative() -> Atk {
     })
 }
 
-/// a = A_MAX + 1 = 6 absorbed pools (D2_a upper half; DA8).
+/// a = A_MAX + 1 = 8 absorbed pools (D2_a upper half; DA8). The base absorbs A_MAX.
 pub fn a_above_max() -> Atk {
-    let mut five = DrawCase::at_round(4, 2);
-    five.absorb(5);
-    Atk::case(DRW, five, |c| c.absorb(1))
+    let mut full = DrawCase::at_round(4, 2);
+    full.absorb(lottery::game::A_MAX);
+    Atk::case(DRW, full, |c| c.absorb(1))
 }
 
 /// No funding input (D2_fund, n_fund = 0). Sales of 100,000 KAS make C_draw cover the five

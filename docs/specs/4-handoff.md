@@ -1363,3 +1363,87 @@ Feature gates:
 - `cargo build -p tn10` is clean (no warnings).
 
 The tn10 probe was **not run**.
+
+## Review (covenant-reviewer @ 2dd53ca) and user decisions (2026-10-11)
+No must-fix. Should-fix S1–S4, notes N1–N3 (full report summarised by the orchestrator).
+- U3 (S1): add genesis checks in `validate_with`: claim_window ≥ 6,048,000 (7 days) and seed_offset + draw_window + claim_window ≤ D_RET. Failing test first (reviewer repro: claim_window = 14 days → return_deposit_after forfeits a winning ticket before its pool deadline; claim_window = 0; draw_window = 7 days).
+- U4 (S2): late draw() can create pools whose claim deadline already passed (caller picks old funding inputs; drawer check 19). Park with the missed-draw item and release gate; DECISIONS row stating design 4.5 "at least 7 days" holds only for a draw within draw_window. No M4 code change.
+- U5 (S3): one draw() creates up to 7 pools but absorbs A_MAX = 5. Measure DP21 with A_MAX = 7; if every mass ≤ 90 %, raise A_MAX to 7 in the drawer; otherwise stop and ask.
+- S4: DECISIONS rows, costs.md M4, spec U1 text, tn10 M4-i (probe ran OK 2026-10-11, results in crates/tn10/results-claim-m4.md) — Stage 5 recording.
+- Notes: N1 third-party forfeits after deadline and zero-prize ACCRUE/path-a re-spends without D_IDLE are by design (D56/D58); N2 refresh only raises next draw's own_daa (extends D_claim); N3 claim fee economics near P_MIN → M6.
+
+## Review fixes (U3, U4, U5) (2026-10-11, branch `m4-claim`, uncommitted)
+
+### What changed
+
+| File | Change |
+|---|---|
+| `crates/lottery/src/genesis.rs` | **U3:** `validate_with` refuses `claim_window < CLAIM_WINDOW` (6,048,000) and `seed_offset + draw_window + claim_window > D_RET` (sum in i128; D_RET is `game::D_RET`). New unit tests `u3_genesis_refuses_windows_beyond_d_ret`, `d_ret_mirrors_ticket_sil`, `a_max_mirrors_drawer_sil`. The accepted instance in `genesis_refuses_rereview_instances` (windows summing to WINDOWS_MAX) is now refused, so the test asserts that refusal ("D_RET") and that D_RET <= WINDOWS_MAX (see R-2) |
+| `crates/lottery/tests/m4_claim.rs` | **U3:** `u3_r1_windows_refused_at_genesis` (the reviewer's three repros, through `validate()` and the checked `Chain::genesis_with`), `u3_default_windows_claim_deadline_before_return_after` (the r1 sequence on the default genesis: pool deadline < T + D_RET, and >= 7 days after the draw). **U4:** `parked_u4_late_draw_creates_already_expired_pools` (the reviewer's r2, documents the parked behaviour, see R-3) |
+| `covenants/drawer.sil`, `crates/lottery/src/game.rs` | **U5:** `A_MAX = 7` (was 5, D44), with a comment |
+| `crates/lottery/tests/common/m3.rs`, `m3_attacks.rs` | A_MAX + 1 attacks now use `A_MAX` (valid base absorbs 7, attack 8). With the old literal 5 + 1 = 6 the attack would have been a valid transaction |
+| `crates/lottery/tests/m3_draw.rs` | DP14 also absorbs A_MAX = 7 round-1 pools on a real two-round chain whose genesis funds every lower tier (`ST_ALL`, round 1 creates 7 pools); `two_round_chain_with(seed, st, np)` added |
+| `crates/lottery/tests/m3_mutants.rs`, `m3_measure.rs` | Comment / printed label only (a = A_MAX + 1 = 8; M3-c label prints A_MAX) |
+
+No other fixture or genesis uses non-default windows: every genesis (tests and tn10 `close-m2`, `draw-m3`, `claim-m4`) uses CLAIM_WINDOW, DRAW_WINDOW and seed_offset 600 (sum 6,480,600 <= 12,096,000). `m3_game.rs` uses seed_offset 0 in a controller state that is not a genesis. No test needed short windows, so no test escape hatch was needed.
+
+### Failing-first output (before the `validate_with` change)
+
+```
+test genesis::tests::d_ret_mirrors_ticket_sil ... ok
+test genesis::tests::u3_genesis_refuses_windows_beyond_d_ret ... FAILED
+thread 'genesis::tests::u3_genesis_refuses_windows_beyond_d_ret' panicked at lottery\src\genesis.rs:619:27:
+claim_window = 14 days: bad instance accepted
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out
+
+test u3_r1_windows_refused_at_genesis ... FAILED
+test u3_default_windows_claim_deadline_before_return_after ... ok
+---- u3_r1_windows_refused_at_genesis stdout ----
+genesis accepted: ["claim_window = 14 days", "claim_window = 0", "draw_window = 7 days"]
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out
+```
+
+After the change: lib 30 passed (27 + 3 new); `m4_claim` u3 tests 2 passed.
+
+### U5: DP21 with A_MAX = 7 (release, measured before raising A_MAX; all <= 90 %, so A_MAX = 7 is kept)
+
+| Shape (K = 16, m = 50, a = 7) | compute | transient | storage | % c / t / s |
+|---|---|---|---|---|
+| np 5, 1 funding input | 160,788 | 432,912 | 71,007 | 32.2 / 43.3 / 14.2 |
+| np 5, 8 funding inputs | 168,628 | 436,272 | 71,007 | 33.7 / 43.6 / 14.2 |
+| np 7, 1 funding input | 162,202 | 433,608 | 71,009 | 32.4 / 43.4 / 14.2 |
+| **np 7, 8 funding inputs (worst: 7 created + 7 absorbed, 19 inputs, 20 outputs)** | 170,042 | 436,968 | 71,009 | **34.0 / 43.7 / 14.2** |
+
+At A_MAX = 5 (Stage 4) the worst was 30.7 / 40.6 / 11.8 %. M4-e (M4 pool, 2,481 B redeem) gives the same figures; pool leg units at most 323,673.
+
+Storage, M3-d (values at the worst, R = 1.69 KAS): a = 7 reaches 58.8 % (f_min = F_MIN) and 76.8 % (f_min = F_MIN_FLOOR). The supremum with input relief dropped is 304,016 (60.8 %) and 394,016 (**78.8 %**, was 76.4 % at a = 5). With the drawer alone at a = 7, R = 1.116 KAS would be enough. M3-c worst by m (a = 7, np 7, F_MAX): 34.0 / 43.7 / 14.2 % at m = 50. Drawer redeem 45,466 B (K 16, M_DRAW 50).
+
+`close()` K = 16 does not change: 58.9 / 86.8 / 80.5 % (M3-f and M4-f).
+
+### Decisions
+
+| ID | Decision | Why |
+|---|---|---|
+| R-1 | U3 as decided: `claim_window >= CLAIM_WINDOW` and `seed_offset + draw_window + claim_window <= D_RET`, both in genesis `validate_with`. These are genesis-only rules: all three values are fixed for the instance's life (seed_offset is copied unchanged by close/draw, and the windows by draw). Tests `d_ret_mirrors_ticket_sil` and `a_max_mirrors_drawer_sil` tie the Rust constants to the .sil sources | User decision U3 |
+| R-2 | The WINDOWS_MAX check (M3 re-review S1) is kept, though the new rule implies it while D_RET <= WINDOWS_MAX (asserted). Its accept-boundary instance (windows sum = WINDOWS_MAX) is now asserted refused, by the D_RET rule | A stricter rule supersedes the old boundary. The test still pins each refusal |
+| R-3 | U4: no code change. `parked_u4_late_draw_creates_already_expired_pools` asserts today's behaviour as a tripwire. When the missed-draw item is fixed, it fails and must be replaced by the attack test | The decision is parked. The test keeps the gap visible |
+| R-4 | U5: A_MAX = 7 in drawer.sil and `game::A_MAX`. DP14 now absorbs 7 real pools; A_MAX + 1 = 8 is rejected (`m3_attacks` pair, `m3_mutants::redundant_d2_a_upper`) | Measured within 90 % (table above) |
+
+DECISIONS rows for R-1..R-4 (and the D44 update to A_MAX = 7) are left for Stage 5 recording with S4.
+
+### Open questions
+
+1. **The U3 rule is exact only for a `close()` at exactly T.** The pool deadline after an on-time draw is `close_own + seed_offset + draw_window + claim_window`, with `close_own >= T`. So `return_deposit_after` (T + D_RET) cannot precede the claim deadline only while `close_own - T <= D_RET - (seed_offset + draw_window + claim_window)`. At the defaults that slack is 5,615,400 DAA (about 6.5 days). At an instance on the boundary (sum = D_RET), any late `close()` reopens the r1 forfeit for the delay. This is the same family as U4 (late close or draw), so it was not changed. Options: park it with the missed-draw item, require a minimum slack at genesis, or anchor return_deposit_after to the pool deadline instead of T.
+2. The M3 ATTRIB instrument has no built-in mismatch flag (it prints the first failing check). It was compared line by line with a HEAD run in a temporary worktree: 262 lines, identical.
+
+### Gate (from `crates/`)
+
+- Full `cargo test --no-fail-fast` (debug): **EXIT 0**. harness 0 / 3 / 3 / 5 / 2 / 6; lottery unit **30**; m1 25 / 14 / 4 / 11; m2 40 / 8 / 2 / 5 / 25 / 17; m3_attacks 22, m3_draw 24, m3_game 13, m3_measure 7, m3_mutants 93; m4_attacks 21, **m4_claim 25** (22 + 3), m4_game 4, m4_measure 8, m4_mutants 211 (1 ignored, as before). The only warnings are the 2 pre-existing ones in `harness/tests/m0_mass.rs`.
+- Release `m3_measure`: `test result: ok. 7 passed`. Release `m4_measure`: `test result: ok. 8 passed` (tail: `P_MIN ... D57 confirmed` unchanged; `A_MAX = 7 stands (D44).`).
+- `M3_ATTRIB=1 ... m3_attacks`: 262 ATTRIB lines, identical to HEAD; `22 passed`. `M4_ATTRIB=1 ... m4_attacks`: **274 lines, 274 OK, 0 MISMATCH, 0 NO MARKERS**; `21 passed`.
+- `cargo check -p lottery --no-default-features --features mainnet,test-seed` fails: `error: TEST-ONLY seed cannot be built for mainnet`. `--features mainnet` compiles. `cargo build -p tn10` is clean.
+- The tn10 probe was not re-run. The drawer script changed (A_MAX), so the `claim-m4` and `draw-m3` probe results describe the A_MAX = 5 drawer.
+
+## Orchestrator: user decisions after review fixes (2026-10-11)
+- U6: the late-close slack gap (U3 only fully protects a close at T; slack D_RET − (seed_offset + draw_window + claim_window) ≈ 6.5 days at defaults) is parked with U4 / the missed-draw item and the release gate. DECISIONS row; no M4 code change.
+- U7: re-run `probe claim-m4` on tn10 after the fix diff is reviewed; record final-script results as M4-i.

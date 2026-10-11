@@ -619,3 +619,91 @@ fn kp19_genesis_ticket_tpl() {
     g.drawer.ticket_tpl = t.pool.hash;
     assert!(g.validate().unwrap_err().contains("ticket_tpl"));
 }
+
+// ---------------------------------------------------------------- M4 review U3 (S1)
+
+/// M4 review S1, user decision U3: the reviewer's r1 instances are refused at genesis.
+/// `r1_return_after_before_claim_deadline` (claim_window = 14 days) let a third party forfeit
+/// a winning jackpot ticket with `return_deposit_after` (T + D_RET) before its pool's claim
+/// deadline, with an on-time close and draw. claim_window = 0 and draw_window = 7 days are
+/// the reviewer's other repros. Each is refused by `validate()` and by the checked builder.
+#[test]
+fn u3_r1_windows_refused_at_genesis() {
+    use lottery::game::{CLAIM_WINDOW, DRAW_WINDOW};
+    let edits: [(&str, fn(&mut GenesisCase), &str); 3] = [
+        ("claim_window = 14 days", |g| g.drawer.claim_window = 2 * CLAIM_WINDOW, "D_RET"),
+        ("claim_window = 0", |g| g.drawer.claim_window = 0, "claim_window"),
+        ("draw_window = 7 days", |g| g.drawer.draw_window = CLAIM_WINDOW, "D_RET"),
+    ];
+    let mut accepted = vec![];
+    for (name, edit, needle) in edits {
+        let mut g = GenesisCase::new(4, vec![]);
+        edit(&mut g);
+        match g.validate() {
+            Ok(()) => accepted.push(name),
+            Err(e) => assert!(e.contains(needle), "{name}: refused for another reason: {e}"),
+        }
+        // The chain fixture builds through the checked builder (`build_with`).
+        let r = std::panic::catch_unwind(|| Chain::genesis_with(4, edit, true));
+        if r.is_ok() && !accepted.contains(&name) {
+            accepted.push(name);
+        }
+    }
+    assert!(accepted.is_empty(), "genesis accepted: {accepted:?}");
+    let _ = DRAW_WINDOW;
+}
+
+/// U3 positive: on the default genesis (seed_offset + draw_window + claim_window <= D_RET),
+/// the r1 sequence (on-time close at T + 10, on-time draw) gives the jackpot pool a claim
+/// deadline strictly before the earliest `return_deposit_after` lock_time T + D_RET, so path
+/// b cannot forfeit the winning ticket while its pool is claimable.
+#[test]
+fn u3_default_windows_claim_deadline_before_return_after() {
+    let mut ch = Chain::genesis(4);
+    let seed = [1u8; 32];
+    let win = win6(&ch, &seed);
+    let (mut b, ops) = ch.buy_case(0);
+    b.bundle = vec![tc(&win, TIER_JACKPOT), nowin(&win, 1)];
+    ch.buy(0, &b, ops, 300_000);
+    let (cc, ops) = ch.close_case(900_000);
+    ch.close(&cc, ops, TEST_DEADLINE as u64 + 10);
+    let seed_ref = ch.marker.as_ref().unwrap().1.seed_ref;
+    let (c, ops) = ch.draw_case(seed, &[], (seed_ref + 10) as u64);
+    let lt = c.lock_time;
+    ch.draw(&c, ops, lt + 10);
+    let pi = ch.pool_of(1, TIER_JACKPOT);
+    let deadline = ch.pools[pi].1.deadline;
+    let (r, _) = ch.return_after_case(0, 2_000_000);
+    assert_eq!(r.lock_time as i64, TEST_DEADLINE + D_RET);
+    assert!(deadline < r.lock_time as i64, "pool deadline {deadline} >= return_after lock_time {}", r.lock_time);
+    assert!(deadline - (lt as i64) >= lottery::game::CLAIM_WINDOW, "at least 7 days to claim after an on-time draw");
+}
+
+/// PARKED (M4 review S2, user decision U4; the missed-draw item, release gate): this test
+/// DOCUMENTS current behaviour, it does not endorse it. A late `draw()` whose caller funds
+/// it with old inputs (drawer check 19: D_claim = max(own, seed_ref + draw_window) +
+/// claim_window, own = the latest input creation score) creates pools whose claim deadline
+/// has already passed, so a third party can forfeit a winning ticket through
+/// `return_deposit_with_pool` one DAA after the draw. Design 4.5's "at least 7 days" holds
+/// only for a draw within draw_window. When the missed-draw item is resolved, this test
+/// must fail and be replaced by the attack test for the fix.
+#[test]
+fn parked_u4_late_draw_creates_already_expired_pools() {
+    let mut ch = Chain::genesis(4);
+    let seed = [1u8; 32];
+    let win = win6(&ch, &seed);
+    let (mut b, ops) = ch.buy_case(0);
+    b.bundle = vec![tc(&win, TIER_JACKPOT), nowin(&win, 1)];
+    ch.buy(0, &b, ops, 300_000);
+    let (cc, ops) = ch.close_case(900_000);
+    ch.close(&cc, ops, TEST_DEADLINE as u64 + 10);
+    let (mut c, ops) = ch.draw_case(seed, &[], 1_000);
+    let late = 8_000_000u64;
+    c.lock_time = late;
+    ch.draw(&c, ops, late);
+    let pi = ch.pool_of(1, TIER_JACKPOT);
+    let deadline = ch.pools[pi].1.deadline;
+    assert!(deadline <= late as i64, "pool deadline {deadline} is not past at the late draw {late}");
+    let (r, ops) = ch.return_with_pool_case(0, pi, late);
+    ch.return_deposit(&r, ops, late + 1);
+}

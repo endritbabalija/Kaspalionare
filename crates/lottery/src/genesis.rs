@@ -28,7 +28,7 @@ use kaspa_consensus_core::tx::GenesisCovenantGroup;
 
 use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, spk_of};
 use crate::close::{CloseCase, z18};
-use crate::game::{BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, S_F_CAP, S_R_CAP, TOTAL_MAX, muldiv};
+use crate::game::{BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, S_F_CAP, S_R_CAP, TOTAL_MAX, muldiv};
 use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, ShardState, VaultState};
 
 /// Spec M2 A3 range bounds that have no named constant elsewhere (as in `controller.sil`).
@@ -286,6 +286,18 @@ impl GenesisCase {
         range("draw_window", d.draw_window, 0, DAA_MAX - 1)?;
         if d.draw_window + d.claim_window > WINDOWS_MAX {
             return Err(format!("draw_window + claim_window > WINDOWS_MAX = {WINDOWS_MAX}: D_claim could reach DAA_MAX"));
+        }
+        // M4 review S1, user decision U3: every pool of an on-time draw keeps at least 7
+        // days to claim (design 4.5), and the claim deadline of a round closed at T and
+        // drawn within draw_window, seed_ref + draw_window + claim_window, is at most
+        // T + D_RET, the earliest return_deposit_after (ticket.sil A5b.3), so path b
+        // cannot forfeit a winning ticket while its pool is claimable. Exact in i128.
+        if d.claim_window < CLAIM_WINDOW {
+            return Err(format!("claim_window = {} < CLAIM_WINDOW = {CLAIM_WINDOW} (7 days, design 4.5)", d.claim_window));
+        }
+        let span = c.seed_offset as i128 + d.draw_window as i128 + d.claim_window as i128;
+        if span > D_RET as i128 {
+            return Err(format!("seed_offset + draw_window + claim_window = {span} > D_RET = {D_RET}: return_deposit_after could forfeit a winning ticket before its claim deadline"));
         }
         // Route of trust (D38, D54): the drawer's instance constants are the compiled
         // templates. draw() copies ticket_tpl into every pool, and the pool's ticket leg
@@ -580,11 +592,87 @@ mod tests {
                 Ok(()) => panic!("{name}: bad instance accepted"),
             }
         }
+        // M4 review U3: windows summing to WINDOWS_MAX were accepted here before U3; the
+        // tighter rule seed_offset + draw_window + claim_window <= D_RET now refuses them
+        // (D_RET < WINDOWS_MAX, so the WINDOWS_MAX check is implied while seed_offset >= 0;
+        // it stays as a guard should D_RET change). The accepted boundary is in
+        // `u3_genesis_refuses_windows_beyond_d_ret`.
+        assert!(D_RET <= WINDOWS_MAX);
         let mut g = good.clone();
         g.drawer.draw_window = WINDOWS_MAX / 2;
         g.drawer.claim_window = WINDOWS_MAX - WINDOWS_MAX / 2;
-        assert_eq!(g.validate(), Ok(()), "windows sum = WINDOWS_MAX");
+        let e = g.validate().unwrap_err();
+        assert!(e.contains("D_RET"), "windows sum = WINDOWS_MAX: refused for another reason: {e}");
         assert_eq!(good.controller.reserve, R_MIN as i64, "fixtures use R = R_MIN");
+    }
+
+    /// M4 review S1, user decision U3: the windows must fit inside the ticket's
+    /// return_deposit_after delay, so a winning ticket of a round closed at T and drawn
+    /// within draw_window cannot be forfeited by return_deposit_after (T + D_RET) before
+    /// its pool's claim deadline (seed_ref + draw_window + claim_window), and every pool
+    /// keeps at least 7 days to claim (design 4.5). Rules: claim_window >= CLAIM_WINDOW
+    /// (6,048,000) and seed_offset + draw_window + claim_window <= D_RET.
+    #[test]
+    fn u3_genesis_refuses_windows_beyond_d_ret() {
+        let good = case();
+        assert_eq!(good.validate(), Ok(()));
+        let so = good.controller.seed_offset;
+        assert_eq!((good.drawer.claim_window, good.drawer.draw_window), (CLAIM_WINDOW, DRAW_WINDOW), "fixture defaults");
+        for (name, f, needle) in [
+            // Reviewer repros (S1).
+            ("claim_window = 14 days", (|g: &mut GenesisCase| g.drawer.claim_window = 2 * CLAIM_WINDOW) as fn(&mut GenesisCase), "D_RET"),
+            ("claim_window = 0", |g| g.drawer.claim_window = 0, "claim_window"),
+            ("draw_window = 7 days", |g| g.drawer.draw_window = CLAIM_WINDOW, "D_RET"),
+            // Boundaries.
+            ("claim_window = CLAIM_WINDOW - 1", |g| g.drawer.claim_window = CLAIM_WINDOW - 1, "claim_window"),
+            ("sum = D_RET + 1 (draw_window)", |g| g.drawer.draw_window = D_RET - g.controller.seed_offset - g.drawer.claim_window + 1, "D_RET"),
+            ("sum = D_RET + 1 (claim_window)", |g| g.drawer.claim_window = D_RET - g.controller.seed_offset - g.drawer.draw_window + 1, "D_RET"),
+            ("sum = D_RET + 1 (seed_offset)", |g| g.controller.seed_offset = D_RET - g.drawer.draw_window - g.drawer.claim_window + 1, "D_RET"),
+            ("seed_offset = D_RET", |g| g.controller.seed_offset = D_RET, "D_RET"),
+        ] {
+            let mut g = good.clone();
+            f(&mut g);
+            match g.validate() {
+                Err(e) => assert!(e.contains(needle), "{name}: refused for another reason: {e}"),
+                Ok(()) => panic!("{name}: bad instance accepted"),
+            }
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+            assert!(r.is_err(), "{name}: builder accepted the instance");
+        }
+        // Accepted boundaries: claim_window = CLAIM_WINDOW exactly (the default), and the
+        // sum = D_RET exactly through each of the three terms.
+        for (name, f) in [
+            ("sum = D_RET (draw_window)", (|g: &mut GenesisCase| g.drawer.draw_window = D_RET - g.controller.seed_offset - g.drawer.claim_window) as fn(&mut GenesisCase)),
+            ("sum = D_RET (claim_window)", |g| g.drawer.claim_window = D_RET - g.controller.seed_offset - g.drawer.draw_window),
+            ("sum = D_RET (seed_offset)", |g| g.controller.seed_offset = D_RET - g.drawer.draw_window - g.drawer.claim_window),
+            ("draw_window = 0", |g| g.drawer.draw_window = 0),
+        ] {
+            let mut g = good.clone();
+            f(&mut g);
+            assert_eq!(g.validate(), Ok(()), "{name}");
+        }
+        assert!(so + DRAW_WINDOW + CLAIM_WINDOW <= D_RET, "the defaults satisfy the rule");
+    }
+
+    /// The Rust D_RET mirrors `int constant D_RET` of ticket.sil (the genesis window rule
+    /// above is only sound if they agree).
+    #[test]
+    fn d_ret_mirrors_ticket_sil() {
+        let src = crate::buy::read_covenant("ticket.sil");
+        let line = src.lines().find(|l| l.trim_start().starts_with("int constant D_RET = ")).expect("D_RET line in ticket.sil");
+        let v: i64 = line.trim().trim_start_matches("int constant D_RET = ").trim_end_matches(';').parse().expect("D_RET value");
+        assert_eq!(v, D_RET, "ticket.sil D_RET != game::D_RET");
+        assert_eq!(src.matches("int constant D_RET").count(), 1);
+    }
+
+    /// M4 review U5: the Rust A_MAX mirrors `int constant A_MAX` of drawer.sil.
+    #[test]
+    fn a_max_mirrors_drawer_sil() {
+        let src = crate::buy::read_covenant("drawer.sil");
+        let line = src.lines().find(|l| l.trim_start().starts_with("int constant A_MAX = ")).expect("A_MAX line in drawer.sil");
+        let v: usize = line.trim().trim_start_matches("int constant A_MAX = ").trim_end_matches(';').parse().expect("A_MAX value");
+        assert_eq!(v, crate::game::A_MAX, "drawer.sil A_MAX != game::A_MAX");
+        assert_eq!(v, 7, "U5: one draw() absorbs as many pools as it creates (7)");
     }
 
     /// KP19 (spec M4 A9): the drawer's ticket_tpl is the compiled ticket hash (D54) and is
