@@ -8,7 +8,7 @@
 //!   valid base transaction is still accepted by every input.
 //! - `redundant`: the mutant still rejects the attack at the named input, because another
 //!   check (or a compiler-inserted loop bound, or an engine error) implies the removed one.
-//!   The argument is in each test's comment and in docs/specs/4-handoff.md (Stage 4). If a
+//!   The argument is in each test's comment and in docs/DECISIONS.md ("Mutant results" row, M4). If a
 //!   later change removes the implying check, the test fails and the gap is noticed.
 //!
 //! Granularity is the line: a tag that marks several `require` lines (a range's two halves)

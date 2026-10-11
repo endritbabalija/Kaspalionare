@@ -187,3 +187,32 @@ Compute and transient mass match the local M3-b figures for this shape. The `clo
 Round result from the draw transaction bytes (`RoundResult::from_tx`): round 1, win (6, 7, 8, 12, 14, 7), D_claim 599,675,540; pools (tier, slice, value in sompi) (0, 10 KAS, 1,169,000,000), (2, 32,000, 173,000,000), (3, 2,666, 172,000,000), (4, 1,000, 172,000,000). The draw's compute and transient are 4 and 16 above run 3 (the drawer grew by 4 B).
 
 Locked on testnet (no spend path in M3), for each of runs 3 and 4: the round 2 objects, drawer', vault', controller', the 4 pools and the ticket. Runs 1 and 2 also left their genesis (and run 2's round 1 to 2) objects. The caller and marker refund outputs are ours. Balance after run 3: 8,648.65 testnet KAS (the balance after run 4 was not recorded).
+
+## M4: `claim()` with the real ticket and pool scripts (spec M4-i, 2026-10-11)
+
+`cargo run -p tn10 -- probe claim-m4`. It runs the `draw-m3` sequence (shared code, `round1_drawn`) with the final M4 scripts and then one `claim()`. Every transaction is built by the `lottery` builder and checked in the local v2.1.0 engine before submission.
+- **Genesis** as in M3 (K = 16, J(1) = 10 KAS, V0 = 60 KAS, T = virtual DAA + 600), with the M4 templates: the drawer carries `ticket_tpl` and A_MAX = 7, the pool has `ticket_leg` and `refresh`, the marker has `refresh`.
+- **`buy()`** of the round 1 jackpot combination of the TEST-ONLY seed `[0x5e; 32]` on a b = 1 ticket in shard 0; then `close()` and `draw_test_seed()` as in M3.
+- **`claim()`** spends the ticket (buy output 1), the jackpot pool (its draw output; the pool state is rebuilt from the draw bytes by `RoundResult::pool_state` and checked equal to the output script) and the draw's caller output as funding. Each input is the node's chain-merged entry (builder policy S5-5), re-read before submission. The reference gives mode FINAL (b = 1, h_J = 1): pool' = R, payout = J + d to our key, change. lock_time 0.
+- Node: public testnet-10 node, version 2.1.0, network `testnet-10`.
+
+Final-script run (2026-10-11):
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: claim-m4 genesis, K = 16, real templates, R = 1.69 KAS | 10766 | 8024 | 437512 | 437512 | 1 | 0.4376 | accepted | `89849e12d4ec45b875feda18a1d25fd9d97d213cc693971bfef2baf1b5850015` |
+| setup: buy() of the jackpot combination [8, 10, 11, 15, 20] + 9 on shard 0 | 43472 | 151488 | 378497 | 378497 | 2 | 0.3786 | accepted | `68b0770124fdf8b87f9894b0ed2107c54efacd1564be584c778bf91902fade81` |
+| setup: close(), K = 16, one sale of 1 KAS | 294619 | 867716 | 426466 | 433858 | 19 | 0.4340 | accepted | `544c55868d92716c635b8054ecfa8f3e603ff992ca27ba8d46e5ff1b015b344b` |
+| setup: draw_test_seed(), K = 16, a = 0, np = 4, h_J = 1, n2 = 0, R = 1.69 KAS | 113931 | 354644 | 130534 | 177322 | 5 | 0.1774 | accepted | `a80be9729d305823b0e186cdde37ff8e4a8c4ecd6c126938d6ddaf3c3e627c4b` |
+| **claim() FINAL on the jackpot pool: K = 16, m = 10, h = 1, prize 10.0000 KAS, payout 10.1100 KAS, pool' 1.6900 KAS (R)** | **47503** | **152052** | **24633** | 76026 | 3 | 0.0761 | **accepted** | `e7dfa473296baae3ce89bb498a891ee9cc73671d1758e232109ca28a118334b8` |
+
+Round result from the draw transaction bytes (`RoundResult::from_tx`): round 1, win [8, 10, 11, 15, 20, 9], D_claim 599,918,756, pools (tier, slice, value) [(0, 1000000000, 1169000000), (2, 32000, 173000000), (3, 2666, 172000000), (4, 1000, 172000000)].
+
+The masses match the local measurements:
+- `buy()` = M4-d (b = 1, no referral: 43,472 / 151,488; storage 378,497 is this shape's);
+- `close()` = M4-f (294,619 / 867,716, 86.8 % of transient);
+- the claim = M4-b FINAL, K = 16, m = 10 (47,503 / 152,052; storage 24,633 here vs 24,581 in the measured shape, from the different output values). The claim is 9.5 % of compute, 15.2 % of transient and 4.9 % of storage; its priority mass 76,026 is transient / 2.
+
+**Earlier run, superseded.** A first `claim-m4` run on 2026-10-11 used the A_MAX = 5 drawer (before review fix U5). It was also accepted end to end; claim `e0787782f4d2f9cc3ebd4bd16f3009b84f7a6e3b22291516206428d3eaee4fe0` had the same claim masses (47,503 / 152,052 / 24,633), and its draw measured 110,779 / 344,436 / 130,534. The run above replaces it (DECISIONS U7).
+
+**Note on the M3 rows above.** The `draw-m3` runs (M3 section) predate the M4 layout (drawer `ticket_tpl`, pool `reserve`, the larger pool and marker) and A_MAX = 7. Their figures describe the M3 scripts; the `draw()` row in this section is the current one.

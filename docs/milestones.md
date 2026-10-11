@@ -99,7 +99,7 @@ Done when:
 - measured: `draw()` script size as a function of K and m_max, and `draw()` at maximum K with worst-case proofs within the mass limits.
 
 ## M4 — `claim()`, `return_deposit()` and `refresh()`
-Status: todo
+Status: done (2026-10-11, spec `docs/specs/4.md`; the ticket leads `claim()` (D53); P_MIN = 0.05 KAS confirmed, D_RET 14 days, D_IDLE 24 h, A_MAX raised to 7 (U5); carried items closed: same covenant ID (D61), minimum non-final prize (D56, D57), A_MAX re-check (U5); `close()` K = 16 at 86.8 % transient; open: late `draw()`/`close()` window gaps (U4, U6) on the release gate, claim fees near P_MIN and `buy()` storage at d = 0.11 KAS for M6; see `docs/DECISIONS.md` and `docs/costs.md`)
 
 Bundle claims with K-leaf proofs (7.4), deposit return after the window, and refresh (7.5). The spec confirms the `return_deposit()` condition (co-spent pool past its deadline, or T + D_ret).
 
@@ -149,6 +149,7 @@ Done when:
 - purchase conflict rate is measured;
 - `docs/costs.md` lists size and mass per transition, the minimum ticket deposit, M_ref and the minimum fee payout;
 - final R, d, K, b_max and m_max are recorded in `docs/DECISIONS.md`.
+- carried from M4: P_MIN and d against claim fees under load (a PAY claim near P_MIN pays about 5–8 × P_MIN at the priority floor, M4-h); the b = 1 referral `buy()` at 95.7 % of storage with d = 0.11 KAS (U2); `close()` K = 16 transient headroom is 32,284 grams (86.8 %, M4-f).
 
 ## M7 — Testnet-10 end to end
 Status: todo
@@ -171,3 +172,4 @@ Release gate (not a milestone):
 - the `close()` caller can no longer choose seed_ref (review R1, M2), fixed as part of the real seed design;
 - `draw()` caps the next round's G2 at G2_MAX (O-S5-1, M3);
 - the toolchain check is done: SilverScript's rusty-kaspa rev `a41a333` is an ancestor of the pinned release and `crypto/txscript` is diffed (DECISIONS pins row, 2026-10-09).
+- the missed-draw item is resolved, including the claim-window gaps it causes (M4): a late `draw()` whose caller uses old inputs can create pools whose claim deadline has already passed (U4; tripwire test `parked_u4_late_draw_creates_already_expired_pools`), and a `close()` later than T + D_RET − (seed_offset + draw_window + claim_window) lets `return_deposit_after` forfeit winning tickets before their pool deadline (U6).
