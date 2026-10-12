@@ -75,7 +75,7 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 | Counter leaf per 5-number key with per-bonus counts (8.2) | Proposed | M1 (buy), M3 (draw) |
 | Prize formula and solvency | Proposed; argued in 4.4 | Negative tests in prototype |
 | Game-size rule, jackpot fixing, boost hold-back | Decided; details proposed (4.6) | M2, M3 specs |
-| House vault settlement at draw | Proposed | M3, M5 |
+| House vault settlement at draw, backer shares | Built and tested (M3 settlement, M5 shares; testnet-10 accepted) | Request batching and tuning in M6 |
 | Claim window of at least 7 days | Decided | — |
 | Reserve R, ticket deposit, largest K for `close()` | Measured lower bounds (feasibility Q4–Q5); M0 shapes accepted on testnet-10 up to K = 62 (Q7) | Final values in M6 |
 | Largest bundle per `buy()` (b_max) and m_max | **Open** | M1, M3, M6 measurements |
@@ -103,7 +103,7 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 Supporting functions:
 - `return_deposit()`: anyone, after the claim window (7.5). Pays a ticket's deposit to its payout script.
 - `set_params()`: admin key (5.6).
-- Vault `deposit()` and `withdraw()` (5.4).
+- Vault `request_deposit()`, `request_withdraw()` and `settle()` (5.4, 7.5).
 - `refresh()` (7.5).
 
 ## 3.2 Round timeline
@@ -352,17 +352,17 @@ The vault is the house for the jackpot and the second prize. At `draw()` of roun
 
 This settlement is exact, so backers' results are final at every draw. No vault money is locked after a draw except the next round's liability L(r+1) (4.4).
 
-**Shares, deposits and withdrawals.** Backers hold vault shares. Deposit and withdrawal requests convert at the share price set by the next `draw()` after the request (V' ÷ shares, after settlement), as in MegaPot's pending-deposit and pending-withdrawal model [S12]. Withdrawals cannot take the vault below L of the round whose jackpot is fixed, until that round is drawn. J(r+1) is fixed from V' before any of that draw's conversions, so a new backer cannot capture returns from earlier rounds. The request and conversion transactions, and how they keep `draw()`'s shape fixed, are specified in M5, subject to these requirements:
-- **Internal accounting.** The vault state holds total_assets and total_shares, and the UTXO value equals total_assets + R at every transition. Outside value is never counted.
-- **Requests** *(proposal; confirm in the M5 spec)*. Creating a request spends the vault and adds the request to the vault's pending totals; a deposit's KAS enters the vault's value at that point. The request targets the vault's next draw and is irrevocable.
-  - `draw()` converts the pending totals in aggregate, at its post-settlement price: it mints shares for pending deposits and burns pending withdrawal shares. It moves the withdrawn assets into that draw's settlement record, so `draw()` never gathers individual requests.
-  - Withdrawals are capped so the vault keeps L(r+1). The excess stays pending, pro rata, for the next draw.
-  - Each owner later settles their own request against that draw's record: a share position for a deposit, a payout for a withdrawal. Amounts are fixed at the draw, so the owner's timing gives no option.
+**Shares, deposits and withdrawals.** Backers hold vault shares. Deposit and withdrawal requests convert at the share price set by the next `draw()` after the request (V' ÷ shares, after settlement), as in MegaPot's pending-deposit and pending-withdrawal model [S12]. Withdrawals cannot take the vault below L of the round whose jackpot is fixed, until that round is drawn. J(r+1) is fixed from V' before any of that draw's conversions, so a new backer cannot capture returns from earlier rounds. The request, conversion and settlement transactions are specified in the M5 spec (`docs/specs/5.md`, D65–D79):
+- **Internal accounting.** The vault state holds total_assets, total_shares, the pending deposit assets and the pending withdrawal shares, and the UTXO value equals total_assets + pending deposits + R at every transition. Outside value is never counted.
+- **Requests** *(confirmed in the M5 spec: D65, D69, D72)*. `request_deposit()` and `request_withdraw()` spend the vault, add the request to its pending totals and create a vault request UTXO; a deposit's KAS enters the vault's value at that point. The request targets the vault's next draw and is irrevocable. Only the position's owner can request a withdrawal: the transaction must spend an input whose scriptPubKey equals the owner's script (P2PK Schnorr, P2PK ECDSA or P2SH, D67). A withdrawal may take part of a position; the rest stays in the position.
+  - `draw()` converts the pending totals in aggregate, at its post-settlement price: it mints shares for pending deposits and burns pending withdrawal shares. It writes one settlement record when anything is pending, so `draw()` never gathers individual requests and its input count does not depend on them.
+  - Withdrawals are capped so the vault keeps L(r+1), counting the same draw's converted deposits (D69). The excess stays pending, pro rata, for the next draw.
+  - Each request is later settled against that draw's record by `settle()`, by anyone (D77): a share position for a deposit, a payout for a withdrawal. Each settlement takes its pro-rata part of the record's *remaining* totals, rounded down, and the last settler of each side takes exactly what is left, so nothing is left as dust (D72). Amounts are fixed at the draw, so the owner's timing gives no option. A drained record is consumed and its R refunded to its funder.
   - There is no cancellation. A refund exists only if the target draw never happens (parked missed-draw item).
   - Because the price is set after the round's own settlement, knowing that round's seed early gives no advantage. The research doc's "lock before the seed" requirement (E4) is therefore not needed. *Flag: deviation from the research doc.*
-  - Requests serialize on the vault UTXO; backer actions are rare, so this contention is accepted.
-- **Rounding.** Shares round down on deposit and assets round down on withdrawal. Zero-share mints and payouts below the minimum output are rejected. Products of shares and prices are range-checked (R8).
-- **Share-price attacks.** Dead shares or a virtual offset at genesis defend against share-price manipulation (offset chosen in M5).
+  - Requests serialize on the vault UTXO and must wait until the vault is VAULT_REQ_DELAY = 600 DAA old, so after every vault spend `draw()` has a window in which no request can race it. This allows at most one request per 600 DAA (about 1,440 a day), won by the highest fee; batching and request griefing are open for M6 (DECISIONS 2026-10-12, U-4, U-6).
+- **Rounding.** Shares round down on deposit and assets round down on withdrawal. A zero-share mint is impossible: `draw()` converts the deposits only if the aggregate mint gives every request at least one share; otherwise the record is in refund mode and each deposit settlement repays its deposit (D70). A withdrawal payout below P_MIN accrues in the request and is paid with its final settlement. Products of shares and prices use `mulfrac` (floor(a × r / c) without a 64-bit overflow, D73) and are range-checked (R8).
+- **Share-price attacks.** A virtual offset defends against share-price manipulation: the price is (A + VA) / (S + VS) with VS = 1,000 virtual shares and VA = 1 sompi, so no division by zero is possible. Genesis mints S₀ = floor(V₀ / SHARE_UNIT) shares (SHARE_UNIT = 1,000 sompi) into a share position owned by the deployer (D66). A floor on S₀ relative to VS is open for M6 (U-5).
 - **Inflows.** Inflows that raise the share price without minting shares, such as the house share, enter only at `draw()`.
 
 ## 5.5 Conservation
@@ -396,7 +396,7 @@ This settlement is exact, so backers' results are final at every draw. No vault 
   - the second-prize pool (n2 × G2);
   - the lower-tier pools (ΣB_t);
   - the vault, holding V' after settlement, then adjusted by that draw's aggregate conversions (5.4);
-  - the draw's settlement record, holding the converted withdrawals (5.4);
+  - the draw's settlement record when anything is pending, holding the converted withdrawals' payout (plus the deposits, in refund mode) (5.4);
   - the fee payout (A + F, when ≥ the minimum output);
   - the caller's output (C_draw);
   - the controller of round r+1, holding O' + A' (A' = 0 if the fee was paid, else A + F);
@@ -432,9 +432,10 @@ An admin key, committed at deployment, can change s_F, s_R and the fee address. 
 | Frozen marker | Round, all K roots, S, P_R, m, J, J_boost, G2, shares, absolute seed reference, reserve funder. Value: S − P_R − C_close + J_boost (+ R) | Until `draw()` |
 | Prize pool (jackpot, second prize, each lower tier) | Round, tier, slice (J, G2 or slice_t), winning numbers, m, K roots, claim deadline, reserve funder | Until absorbed after the window |
 | Round result record | Winning numbers, roots, slices, m, claim deadline, pool reserve funder: the public data claimants need and pools are rebuilt from | Kept by wallets and indexers (section 9) |
-| House vault | Last drawn round, total_assets, total_shares, pending deposit assets, pending withdrawal shares, locked liability L. Value: total_assets + pending deposits + R | Permanent, touched every draw and every request |
-| Vault request | Owner payout script, deposit amount or withdrawal shares, target draw | Until settled against its draw's record |
-| Draw settlement record (per draw) | Round, share price, totals converted. Value: withdrawn assets of that draw (+ R) | Until all its withdrawals are settled |
+| House vault | Last drawn round, total_assets, total_shares, pending deposit assets, pending withdrawal shares, locked liability L, and the record, request and position template hashes (instance constants set at genesis). Value: total_assets + pending deposits + R | Permanent, touched every draw and every request |
+| Vault request | Target draw, kind (deposit or withdrawal), amount (deposit sompi or withdrawal shares), owner (script class and key). Value: R + accrued payouts | Until settled against its draw's record |
+| Draw settlement record (per draw) | Round, request template hash, refund flag, remaining deposit assets, shares to mint, withdrawal shares, shares to burn and assets to pay, reserve funder. Value: remaining payout + (deposits, in refund mode) + R | Until both sides are drained by settlements |
+| Share position | Round of the minting draw (informational), shares, owner (script class and key). Value: R | Until fully withdrawn |
 
 Every state begins with a role byte and its round number (R5).
 
@@ -517,7 +518,8 @@ The script:
 -   computes each lower-tier budget and slice from S and the shares, and the jackpot and second-prize pools from J, G2, h_J and n2 (5.3);
 -   creates one pool per paying lower tier, plus the jackpot pool if h_J ≥ 1 and the second-prize pool if n2 ≥ 1. Each carries the winning numbers, m, the K roots and the claim deadline;
 -   settles the vault (5.4), pays the protocol fee if it reaches the minimum output, pays C_draw to the caller and absorbs expired pools into the boost pot;
--   fixes J(r+1) by the rule in 4.6, records it with V_rec = V' in the round r+1 controller, and sets its flag.
+-   converts the vault's pending requests in aggregate and, when anything is pending, creates the settlement record at output 3 + np (np = the number of new pools), with its R posted by the caller (5.4);
+-   fixes J(r+1) by the rule in 4.6 from V' before the conversions, records it with V_rec = the vault's total_assets after the conversions (D71) in the round r+1 controller, and sets its flag.
 
 Every output follows from the inputs and fixed rules. The caller's wallet assembles the transaction and the K proofs; it decides nothing.
 
@@ -545,8 +547,9 @@ Anyone may submit a claim, because the payout script is fixed in the ticket; the
 |:----------------|:------------------------------------------------|
 | `return_deposit()` | Anyone. The ticket cannot read the claim deadline, because `draw()` sets it after the ticket exists. *Proposal (confirm in the M4 spec):* valid either (a) when co-spending any prize pool of the same round whose claim deadline has passed (lower-bound locktime; the pool is recreated unchanged), or (b) from T + D_ret. T is the round deadline stored in the ticket. D_ret is a committed delay of at least the allowed draw delay plus 7 days, which covers rounds whose pools were all absorbed. Consumes the ticket and pays d × b to its payout script. Unclaimed winning indices are forfeited, as they would be at absorption. If `draw()` is later than T + D_ret − 7 days, path (b) shortens the window; this belongs to the parked missed-draw item |
 | `set_params()` | Admin key only, once per round, caps checked in script. Writes the pending slot of the open round's controller (5.6) |
-| `deposit()` / `withdraw()` | Backer requests, converted at a draw's share price, subject to the liability lock (5.4); mechanics in M5 |
-| `refresh()` | Any idle long-lived object may be re-spent into an identical successor after an idle delay, republishing its state (R3 keeps all times fixed) |
+| `request_deposit()` / `request_withdraw()` | Backer requests: spend the vault (once it is 600 DAA old), add to its pending totals and create a vault request. A deposit names any owner; a withdrawal needs the position owner's input and may be partial (5.4) |
+| `settle()` | Anyone. Settles one request against its draw's settlement record: a share position for a deposit (or the deposit back in refund mode), a payout for a withdrawal, with the request's R returned to its owner (5.4) |
+| `refresh()` | Any idle long-lived object may be re-spent into an identical successor after an idle delay, republishing its state (R3 keeps all times fixed). This covers the marker, pools, tickets, share positions, vault requests and settlement records; the vault needs none, because every `draw()` re-spends it |
 
 # 8. The combination counter
 
@@ -722,14 +725,14 @@ No real-value launch while randomness is parked.
 **Open**
 
 -   Set in milestone specs: split of s_t across tiers, the whale margin (≤ 1.256 at the starting values, 4.6), m_min, m_max and the cap (maximum liability share of the vault); the exact s_C/s_D split. M2 sets these, and M3 confirms the tier split.
--   Proposals to confirm: the J-fixing order, hold-back and cap on total liability (4.6); s_C + s_D in the whale check (4.6); the counter-leaf layout (8.2); output binding through the authorized-output index (R2); the late-buy bound and D_min (7.1, 7.2); the vault request mechanics (5.4); parameter storage (5.6); M_ref; the `return_deposit()` condition and D_ret (7.5).
+-   Proposals to confirm: the J-fixing order, hold-back and cap on total liability (4.6); s_C + s_D in the whale check (4.6); the counter-leaf layout (8.2); output binding through the authorized-output index (R2); the late-buy bound and D_min (7.1, 7.2); parameter storage (5.6); M_ref; the `return_deposit()` condition and D_ret (7.5).
 -   b_max and its effect on K (7.1).
 -   Empty-leaf rule (M1).
 -   Covenant family structure: each round a new genesis or a continuation of one ID, and roles sharing one covenant ID or using separate IDs (M1 spec).
 -   Shape policy and who pays fees (R2 options, M1 spec); late-buy bound (7.1).
 -   Refund paths for a round that cannot close or draw, and vault-request timeouts.
 -   Lower-tier money of other players in the whale check (4.6).
--   Vault request and conversion transactions (M5).
+-   Vault request batching, request griefing and the S₀ floor (M6; the request and conversion transactions were built in M5).
 -   Round length, given the roughly 30-hour data window (section 9).
 -   Ticket deposit d and final R and K (M6).
 -   Ticket transfer.
