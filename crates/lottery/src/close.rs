@@ -484,15 +484,18 @@ mod tests {
         let f = g.build().finish();
         funding_ok(&f, 0);
         let cov = covenant_id(&f);
-        // Controller, params, 4 shards, vault, drawer (D50), then change.
-        assert!(f.tx.outputs[..8].iter().all(|o| o.covenant.map(|b| b.covenant_id) == Some(cov)));
-        assert!(f.tx.outputs[8].covenant.is_none());
+        // Controller, params, 4 shards, vault, drawer (D50), deployer position (M5 D66),
+        // then change.
+        assert!(f.tx.outputs[..9].iter().all(|o| o.covenant.map(|b| b.covenant_id) == Some(cov)));
+        assert!(f.tx.outputs[9].covenant.is_none());
         assert_eq!(f.tx.outputs[g.vault_output()].value, g.vault_value());
         assert_eq!(f.tx.outputs[g.vault_output()].script_public_key, g.build().templates.vault_spk(&g.vault));
         assert_eq!(f.tx.outputs[g.drawer_output()].value, g.reserve());
         assert_eq!(f.tx.outputs[g.drawer_output()].script_public_key, g.build().templates.drawer_spk(&g.drawer));
+        assert_eq!(f.tx.outputs[g.position_output()].value, g.reserve());
+        assert_eq!(f.tx.outputs[g.position_output()].script_public_key, g.build().templates.position_spk(&g.position));
         let outs = ledger.apply(&f.tx, &f.entries, 200).unwrap();
-        assert_eq!(outs.len(), 9);
+        assert_eq!(outs.len(), 10);
         assert_eq!(ledger.get(&outs[2]).unwrap().covenant_id, Some(cov));
         // Spending the funding outpoint again is rejected.
         assert_eq!(ledger.apply(&f.tx, &f.entries, 300), Err(LedgerError::Missing { index: 0, outpoint: op }));

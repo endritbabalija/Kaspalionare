@@ -1,14 +1,22 @@
 //! `draw()` with a TEST-ONLY seed (spec M3 A4, D42, D43). This module exists only with the
 //! `test-seed` feature, and it is the only place `covenants/drawer.sil` is compiled (D43).
 //!
-//! Shape (A4):
+//! Shape (A4, extended by spec M5 A5):
 //!   inputs : 0 drawer r (leader, `draw_test_seed`); 1 marker r (`draw_leg`); 2 vault r - 1
 //!            (`draw_leg`); 3 controller r + 1, drawn = 0 (`draw_leg`); 4 + i absorbed pool i
 //!            (`absorb_leg`), i < a <= A_MAX; 4 + a .. caller funding (zero ID, 1..F_MAX)
-//!   outputs: 0 drawer'; 1 vault'; 2 controller'; 3 .. 2 + np the new pools in tier order
-//!            (all authorized by input 0 under the instance covenant ID); then plain: the fee
+//!   outputs: 0 drawer'; 1 vault'; 2 controller'; 3 .. 2 + np the new pools in tier order;
+//!            3 + np the settlement record iff anything was pending (spec M5 A5 C3; all
+//!            authorized by input 0 under the instance covenant ID); then plain: the fee
 //!            output (only if A + F >= f_min), the marker refund, one refund per absorbed pool
 //!            in input order, the caller output (last).
+//!
+//! Spec M5 (D65): the vault's pending totals are converted at the post-settlement price
+//! (`game::convert`, C1-C3) and the record is written; the caller posts the record's R.
+//! The M5 entry signature (`SIG_DRAW_M5`, arguments wc, record_prefix, record_suffix
+//! inserted before own_daa) is used once the compiled drawer has it; until then (M5 Stages
+//! 2 and 3) the builder encodes the M4 signature (`SIG_DRAW_M4`), so draws with nothing
+//! pending, whose outputs are the M4 ones, still run against the M4 drawer (S2-2).
 //!
 //! `DrawCase` describes a draw with public fields; `expected()` derives every output from
 //! the Rust reference in `game` (never from the script); `build()` returns an editable
@@ -24,12 +32,12 @@ use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, Template, Templates, b
 use crate::close::{CloseCase, FundingIn, TEST_DEADLINE, TEST_ROUND_LEN};
 use crate::combo::unrank;
 use crate::game::{
-    CLAIM_WINDOW, DRAW_WINDOW, F_MIN, FeeSplit, JackpotFix, JackpotRule, PoolSet, RoundAmounts, SeedNumbers, boost_after, claim_deadline,
-    draw_amounts, fee_split, fix_jackpot, muldiv, pool_set, seed_numbers, vault_settle, win_counts,
+    CLAIM_WINDOW, Conversion, DRAW_WINDOW, F_MIN, FeeSplit, JackpotFix, JackpotRule, PoolSet, RoundAmounts, SeedNumbers, VA, VS, boost_after,
+    claim_deadline, convert, draw_amounts, fee_split, fix_jackpot, muldiv, pool_set, seed_numbers, vault_settle, win_counts, withdraw_out,
 };
 use crate::params::xonly;
 use crate::smt::{Tree, proofs_at};
-use crate::state::{ControllerState, DrawerState, K_MAX, MarkerState, Payout, PoolState, TIER_LOWER0, VaultState};
+use crate::state::{ControllerState, DrawerState, K_MAX, MarkerState, Payout, PoolState, RecordState, TIER_LOWER0, VaultState};
 
 /// Compile the drawer source with the controller template hash as its constructor constant
 /// (D38). The template hash does not depend on the state values. Public for the tests'
@@ -65,9 +73,37 @@ pub const ARG_POOL_PREFIX: usize = 15;
 pub const ARG_POOL_SUFFIX: usize = 16;
 pub const ARG_FUNDER_CLASS: usize = 17;
 pub const ARG_FUNDER_KEY: usize = 18;
+/// Spec M5 A5: the withdrawal witness wc and the record template's prefix and suffix,
+/// inserted before own_daa.
+pub const ARG_WC: usize = 19;
+pub const ARG_RECORD_PREFIX: usize = 20;
+pub const ARG_RECORD_SUFFIX: usize = 21;
 /// `own_daa`: the maximum creation DAA score of the inputs, verified by check 19 (user
-/// decision 2026-10-10, spec correction of A4 check 19 and A9).
-pub const ARG_OWN: usize = 19;
+/// decision 2026-10-10, spec correction of A4 check 19 and A9). Its position in the M5
+/// signature; `ARG_OWN_M4` in the M4 one.
+pub const ARG_OWN: usize = 22;
+pub const ARG_OWN_M4: usize = 19;
+
+/// The M4 `draw_test_seed` signature (20 arguments).
+pub const SIG_DRAW_M4: &str = "draw_test_seed(byte[32],byte[5],byte[],byte[],int,int,int,int,int,int,int,int,int,int,int,byte[],byte[],byte,byte[33],int)";
+/// The M5 signature (spec M5 A5 "New arguments", 23 arguments): wc, record_prefix and
+/// record_suffix before own_daa.
+pub const SIG_DRAW_M5: &str =
+    "draw_test_seed(byte[32],byte[5],byte[],byte[],int,int,int,int,int,int,int,int,int,int,int,byte[],byte[],byte,byte[33],int,byte[],byte[],int)";
+
+/// Whether the compiled drawer of `t` has the M5 entry signature (S2-2). Panics if it has
+/// neither the M4 nor the M5 one.
+pub fn drawer_is_m5(t: &Templates) -> bool {
+    let c = t.drawer.art.contracts.values().next().unwrap();
+    let tag = c.entries.get("draw_test_seed").expect("drawer has draw_test_seed").dispatch_tag.as_bytes().to_vec();
+    if tag == crate::buy::dispatch_tag(SIG_DRAW_M5) {
+        true
+    } else if tag == crate::buy::dispatch_tag(SIG_DRAW_M4) {
+        false
+    } else {
+        panic!("the compiled draw_test_seed has neither the M4 nor the M5 signature")
+    }
+}
 
 /// An expired pool of an earlier round absorbed by this draw (input 4 + i). Value
 /// remaining + R.
@@ -102,6 +138,23 @@ pub struct Lie {
     /// `own_daa` argument instead of the true maximum input DAA score; D_claim follows it
     /// (DA17).
     pub own: Option<i64>,
+    // Spec M5 (stage 2 attacks). Each changes the conversion the builder writes; vault',
+    // the record and controller' v_rec follow it.
+    /// The withdrawal witness wc instead of the reference's; out_c = out(wc) follows (VA5).
+    pub wc: Option<i64>,
+    /// Convert at this V instead of V' (VA7 stale or future price). vault' total_assets is
+    /// still V' + D_c - out_c.
+    pub conv_v: Option<i64>,
+    /// Fix J(r+1) from this V instead of V' (VA14); L' follows.
+    pub j_v: Option<i64>,
+    /// The refund decision instead of C1's (VA1, VA6): `Some(false)` converts D at
+    /// mint = floor(D (S + VS) / (V' + VA)) even when C1 refunds; `Some(true)` refunds.
+    pub refund: Option<bool>,
+    /// Write a record (`Some(true)`, all zero when nothing is pending) or omit it
+    /// (`Some(false)`) regardless of what is pending (VA8).
+    pub record: Option<bool>,
+    /// Added to out_c after wc (VA5 out_c + 1).
+    pub out_delta: i64,
 }
 
 #[derive(Clone)]
@@ -169,6 +222,11 @@ pub struct DrawExpected {
     pub controller: ControllerState,
     /// The new pools, output order 3..2+np.
     pub new_pools: Vec<PoolState>,
+    /// Spec M5 A5: the conversion (C1-C2, `Lie` applied), whether the record is written
+    /// (C3), and the record (output 3 + np).
+    pub conv: Conversion,
+    pub rec: bool,
+    pub record: Option<RecordState>,
     /// Every output value in order (the caller output last, as the remainder).
     pub values: Vec<u64>,
     /// Number of absorbed pools a.
@@ -182,12 +240,20 @@ impl DrawExpected {
     pub fn pool_output(&self, p: usize) -> usize {
         3 + p
     }
+    /// The record's index 3 + np (spec M5 A5 check 13), if written.
+    pub fn record_output(&self) -> Option<usize> {
+        self.rec.then_some(3 + self.np())
+    }
+    /// nCov = 3 + np + rec (spec M5 A5 check 13).
+    pub fn n_cov(&self) -> usize {
+        3 + self.np() + self.rec as usize
+    }
     /// The fee output's index, if the fee is paid.
     pub fn fee_output(&self) -> Option<usize> {
-        self.fee.paid.then_some(3 + self.np())
+        self.fee.paid.then_some(self.n_cov())
     }
     pub fn marker_refund(&self) -> usize {
-        3 + self.np() + self.fee.paid as usize
+        self.n_cov() + self.fee.paid as usize
     }
     pub fn pool_refund(&self, i: usize) -> usize {
         self.marker_refund() + 1 + i
@@ -195,7 +261,7 @@ impl DrawExpected {
     pub fn caller_output(&self) -> usize {
         self.marker_refund() + 1 + self.a
     }
-    /// 3 + np + paid + 1 + a + 1 (A4 check 20).
+    /// 3 + np + rec + paid + 1 + a + 1 (A4 check 20, spec M5 A5).
     pub fn n_outputs(&self) -> usize {
         self.caller_output() + 1
     }
@@ -260,10 +326,14 @@ impl DrawCase {
         let vault = VaultState {
             round: r - 1,
             total_assets: TEST_VAULT,
-            total_shares: 0,
+            // D66: S0 = floor(V0 / SHARE_UNIT), as genesis (S1-10, S2-3).
+            total_shares: TEST_VAULT / crate::game::SHARE_UNIT,
             pend_dep: 0,
             pend_wsh: 0,
             liability: 1_040_000 * KAS as i64,
+            record_tpl: t.record.hash,
+            request_tpl: t.request.hash,
+            position_tpl: t.position.hash,
         };
         let drawer = DrawerState {
             round: r,
@@ -466,26 +536,53 @@ impl DrawCase {
             fee.paid = p;
             fee.a_next = if p { 0 } else { fee.t_f };
         }
-        let rule = JackpotRule::new(ctrl, v_prime);
+        // M5 VA14: J may be fixed (falsely) from another V.
+        let j_v = self.lie.j_v.unwrap_or(v_prime);
+        let rule = JackpotRule::new(ctrl, j_v);
         let fix = match self.lie.witness {
-            None => fix_jackpot(&rule, v_prime, o_prime, ctrl.j),
+            None => fix_jackpot(&rule, j_v, o_prime, ctrl.j),
             Some((x1, y, x2)) => {
                 let jackpot = x2 + y;
                 let g2 = muldiv(jackpot, rule.g);
-                JackpotFix { x_b: muldiv(v_prime, ctrl.j), x1, y, x2, jackpot, j_boost: y, g2, liability: x2 + g2 * (rule.m - 1) }
+                JackpotFix { x_b: muldiv(j_v, ctrl.j), x1, y, x2, jackpot, j_boost: y, g2, liability: x2 + g2 * (rule.m - 1) }
             }
         };
         let own = self.lie.own.unwrap_or(self.own() as i64);
         let d_claim = claim_deadline(own, mk.seed_ref, self.drawer.draw_window, self.drawer.claim_window).expect("D_claim < DAA_MAX (check 19)");
 
         let drawer = DrawerState { round: self.drawer.round + 1, ..self.drawer.clone() };
-        let vault = VaultState { round: mk.round, total_assets: v_prime, liability: fix.liability, ..self.vault.clone() };
+        // Spec M5 A5 C1-C3 (D65, D69, D71): convert the pending totals at V'.
+        let conv = self.conversion(v_prime, fix.liability);
+        let rec = self.lie.record.unwrap_or(conv.rec());
+        let total_assets = v_prime + conv.d_c - conv.out_c;
+        let vault = VaultState {
+            round: mk.round,
+            total_assets,
+            total_shares: self.vault.total_shares + conv.mint_c - conv.wc,
+            pend_dep: 0,
+            pend_wsh: self.vault.pend_wsh - conv.wc,
+            liability: fix.liability,
+            ..self.vault.clone()
+        };
+        let record = rec.then(|| RecordState {
+            round: mk.round,
+            request_tpl: self.vault.request_tpl,
+            refund: conv.refund as u8,
+            dep_rem: conv.d,
+            mint_rem: conv.mint_c,
+            wsh_rem: conv.w,
+            burn_rem: conv.wc,
+            out_rem: conv.out_c,
+            funder_class: self.funder.class(),
+            funder_key: self.funder.key33(),
+        });
         let controller = ControllerState {
             jackpot: fix.jackpot,
             j_boost: fix.j_boost,
             g2: fix.g2,
             liability: fix.liability,
-            v_rec: v_prime,
+            // D71: V_rec = total_assets after the conversions.
+            v_rec: total_assets,
             acc: fee.a_next,
             drawn: 1,
             ..ctrl.clone()
@@ -516,8 +613,13 @@ impl DrawCase {
             .collect();
 
         let r = self.reserve();
-        let mut values = vec![r, (v_prime + self.vault.pend_dep) as u64 + r, (o_prime + fee.a_next) as u64 + r];
+        // vault' = total_assets' + R (pend_dep' = 0, spec M5 A5 check 20).
+        let mut values = vec![r, (total_assets as i128 + r as i128) as u64, (o_prime + fee.a_next) as u64 + r];
         values.extend(pools.pools.iter().map(|p| p.value as u64 + r));
+        if rec {
+            // The record: out_c + (D - D_c) + R (C3).
+            values.push((conv.out_c as i128 + (conv.d - conv.d_c) as i128 + r as i128) as u64);
+        }
         if fee.paid {
             values.push(fee.t_f as u64);
         }
@@ -558,9 +660,68 @@ impl DrawCase {
             vault,
             controller,
             new_pools,
+            conv,
+            rec,
+            record,
             values,
             a: self.a(),
         }
+    }
+
+    /// The conversion of this draw's vault at V' with L' (spec M5 A5 C1-C2, `game::convert`),
+    /// with the `Lie` applied. Outside the reference's domain (fabricated range attacks, D79)
+    /// nothing converts (D_c = mint_c = wc = out_c = 0, refund = D > 0), so the builder still
+    /// produces a transaction for the script to reject.
+    pub fn conversion(&self, v_prime: i64, l_next: i64) -> Conversion {
+        let vt = &self.vault;
+        let v = self.lie.conv_v.unwrap_or(v_prime);
+        let (s, d, w) = (vt.total_shares, vt.pend_dep, vt.pend_wsh);
+        let mut c = convert(v, s, d, w, l_next).unwrap_or(Conversion {
+            v_prime: v,
+            s,
+            d,
+            w,
+            l_next,
+            mint: 0,
+            ok: false,
+            d_c: 0,
+            mint_c: 0,
+            refund: d > 0,
+            slack: 0,
+            wc: 0,
+            out_c: 0,
+        });
+        let raw_out = |wc: i64| -> i64 {
+            withdraw_out(v, s, wc).unwrap_or_else(|| ((v as i128 + VA as i128) * wc as i128 / (s as i128 + VS as i128).max(1)) as i64)
+        };
+        if let Some(wc) = self.lie.wc {
+            c.wc = wc;
+            c.out_c = raw_out(wc);
+        }
+        match self.lie.refund {
+            Some(false) if d > 0 => {
+                let mint = ((d as i128) * (s as i128 + VS as i128) / (v as i128 + VA as i128).max(1)).min(i64::MAX as i128) as i64;
+                c.mint = mint;
+                c.ok = true;
+                c.d_c = d;
+                c.mint_c = mint;
+                c.refund = false;
+            }
+            Some(true) => {
+                c.ok = false;
+                c.d_c = 0;
+                c.mint_c = 0;
+                c.refund = d > 0;
+            }
+            _ => {}
+        }
+        c.out_c += self.lie.out_delta;
+        c
+    }
+
+    /// Whether anything is pending in the input vault (spec M5 C3), before any `Lie`.
+    pub fn pending(&self) -> bool {
+        self.vault.pend_dep > 0 || self.vault.pend_wsh > 0
     }
 
     /// The caller output by the A4 formula: funding - np R + C_draw - fee.
@@ -571,7 +732,21 @@ impl DrawCase {
     /// draw_test_seed(test_only_seed, win5, leaves, siblings, x1, y, x2, ctrl_pl, ctrl_sl,
     /// marker_pl, marker_sl, vault_pl, vault_sl, pool_pl, pool_sl, pool_prefix, pool_suffix,
     /// funder_class, funder_key, own_daa).
+    ///
+    /// Spec M5: wc, record_prefix and record_suffix before own_daa when the compiled drawer
+    /// has the M5 signature (`drawer_is_m5`); the M4 argument list otherwise (S2-2).
     pub fn args(&self, t: &Templates, x: &DrawExpected) -> Vec<ArtifactValue> {
+        use ArtifactValue::*;
+        let mut v = self.args_m4(t, x);
+        if drawer_is_m5(t) {
+            let own = v.pop().unwrap();
+            v.extend([Int(x.conv.wc), Bytes(t.record.prefix.clone()), Bytes(t.record.suffix.clone()), own]);
+        }
+        v
+    }
+
+    /// The M4 argument list (20 arguments, own_daa last).
+    pub fn args_m4(&self, t: &Templates, x: &DrawExpected) -> Vec<ArtifactValue> {
         use ArtifactValue::*;
         vec![
             Bytes(self.test_only_seed.to_vec()),
@@ -626,7 +801,7 @@ impl DrawCase {
                 entry: UtxoEntry::new(self.reserve(), t.drawer_spk(&self.drawer), self.drawer_daa, false, cov),
                 kind: InKind::Entry {
                     template: t.drawer.clone(),
-                    entry: "draw_test_seed".into(),
+                    entry: if drawer_is_m5(&t) { SIG_DRAW_M5.into() } else { "draw_test_seed".into() },
                     args: self.args(&t, &x),
                     redeem: t.drawer_redeem(&self.drawer),
                 },
@@ -667,6 +842,9 @@ impl DrawCase {
         ];
         for (p, s) in x.new_pools.iter().enumerate() {
             outputs.push(TransactionOutput::with_covenant(x.values[x.pool_output(p)], t.pool_spk(s), bind));
+        }
+        if let (Some(i), Some(rc)) = (x.record_output(), &x.record) {
+            outputs.push(TransactionOutput::with_covenant(x.values[i], t.record_spk(rc), bind));
         }
         if let Some(i) = x.fee_output() {
             let fee_addr = Payout::from_fields(self.controller.fee_class, &self.controller.fee_key);
@@ -722,6 +900,18 @@ pub struct RoundResult {
     pub ticket_tpl: [u8; 32],
     /// R: the drawer' value, output 0 (spec M4 A8, D55).
     pub reserve: u64,
+    /// Spec M5 A5 (R4 for the record): the settlement record written by this draw, if
+    /// anything was pending.
+    pub record: Option<ResultRecord>,
+}
+
+/// The settlement record of a round result (spec M5 A3.3, A5 C3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResultRecord {
+    pub state: RecordState,
+    /// out_c + (D - D_c) + R.
+    pub value: u64,
+    pub outpoint: TransactionOutpoint,
 }
 
 impl RoundResult {
@@ -752,6 +942,10 @@ impl RoundResult {
             funder: case.funder,
             ticket_tpl: case.drawer.ticket_tpl,
             reserve: x.values[0],
+            record: match (x.record_output(), &x.record) {
+                (Some(i), Some(s)) => Some(ResultRecord { state: s.clone(), value: x.values[i], outpoint: TransactionOutpoint::new(txid, i as u32) }),
+                _ => None,
+            },
         }
     }
 
@@ -767,16 +961,27 @@ impl RoundResult {
     ///   - D_claim from the `own_daa` argument, which check 19 requires to equal the maximum
     ///     creation DAA score of the inputs (user decision 2026-10-10), seed_ref and the
     ///     drawer's windows (D39).
-    /// `t` supplies the committed marker and drawer layouts. Returns an error on any
-    /// inconsistency (wrong shape, pool count or value).
+    ///   - spec M5: the record (if anything was pending) from the vault's redeem (input 2:
+    ///     S, D, W, request_tpl), V' (as check 14), L' (from x2, y and the controller's g
+    ///     and m, input 3's redeem), the wc argument and the funder; checked against the
+    ///     record output's script and value at 3 + np.
+    /// `t` supplies the committed marker, drawer, vault, controller and record layouts.
+    /// Returns an error on any inconsistency (wrong shape, pool count or value). Both the M5
+    /// entry (23 arguments) and the M4 one (20, no record) are read.
     pub fn from_tx(tx: &Transaction, t: &Templates) -> Result<Self, String> {
         let cov = tx.outputs.first().and_then(|o| o.covenant).ok_or("output 0 has no covenant binding")?.covenant_id;
         let drawer_pushes = pushes(&tx.inputs.first().ok_or("no input 0")?.signature_script)?;
         let marker_pushes = pushes(&tx.inputs.get(1).ok_or("no input 1")?.signature_script)?;
-        // draw_test_seed has 20 arguments, then the dispatch tag and the redeem script.
-        if drawer_pushes.len() != 22 {
-            return Err(format!("input 0: {} pushes, expected 22", drawer_pushes.len()));
-        }
+        let vault_pushes = pushes(&tx.inputs.get(2).ok_or("no input 2")?.signature_script)?;
+        let ctrl_pushes = pushes(&tx.inputs.get(3).ok_or("no input 3")?.signature_script)?;
+        // draw_test_seed has 23 arguments (M5; 20 in M4), then the dispatch tag and the
+        // redeem script.
+        let m5 = match drawer_pushes.len() {
+            25 => true,
+            22 => false,
+            n => return Err(format!("input 0: {n} pushes, expected 25 (M5) or 22 (M4)")),
+        };
+        let arg_own = if m5 { ARG_OWN } else { ARG_OWN_M4 };
         let drawer = state_values(&t.drawer, drawer_pushes.last().unwrap())?;
         let mk = state_values(&t.marker, marker_pushes.last().ok_or("input 1: empty sigscript")?)?;
         let int = |v: &std::collections::BTreeMap<String, ArtifactValue>, k: &str| -> Result<i64, String> {
@@ -837,9 +1042,13 @@ impl RoundResult {
         let (h_j, n2) = win_counts(&counts, sn.bonus, m);
         let amounts = draw_amounts(&marker);
         let set = pool_set(h_j, n2, marker.jackpot, marker.g2, &amounts.b, m);
+        let vt = state_values(&t.vault, vault_pushes.last().ok_or("input 2: empty sigscript")?)?;
+        let ctrl = state_values(&t.controller, ctrl_pushes.last().ok_or("input 3: empty sigscript")?)?;
+        let (s_tot, d_pend, w_pend) = (int(&vt, "total_shares")?, int(&vt, "pend_dep")?, int(&vt, "pend_wsh")?);
+        let rec = d_pend > 0 || w_pend > 0;
         let n_cov = tx.outputs.iter().filter(|o| o.covenant.is_some()).count();
-        if n_cov != 3 + set.np() {
-            return Err(format!("{n_cov} covenant outputs, expected 3 + {}", set.np()));
+        if n_cov != 3 + set.np() + rec as usize {
+            return Err(format!("{n_cov} covenant outputs, expected 3 + {} + {}", set.np(), rec as usize));
         }
         let txid = tx.id();
         // R = drawer' value (check 20).
@@ -852,14 +1061,42 @@ impl RoundResult {
             }
             pools.push(ResultPool { tier: np.tier, slice: np.slice, value, outpoint: TransactionOutpoint::new(txid, 3 + p as u32) });
         }
-        let own = script_num(&drawer_pushes[ARG_OWN])?;
+        let own = script_num(&drawer_pushes[arg_own])?;
         let d_claim = claim_deadline(own, marker.seed_ref, int(&drawer, "draw_window")?, int(&drawer, "claim_window")?).ok_or("D_claim out of range")?;
         let roots = (0..k as usize).map(|i| roots_bytes[32 * i..32 * (i + 1)].try_into().unwrap()).collect();
-        let ticket_tpl: [u8; 32] = match drawer.get("ticket_tpl") {
-            Some(ArtifactValue::Bytes(b)) if b.len() == 32 => b.as_slice().try_into().unwrap(),
-            other => return Err(format!("drawer ticket_tpl: {other:?}")),
+        let bytes32 = |v: &std::collections::BTreeMap<String, ArtifactValue>, f: &str| -> Result<[u8; 32], String> {
+            match v.get(f) {
+                Some(ArtifactValue::Bytes(b)) if b.len() == 32 => Ok(b.as_slice().try_into().unwrap()),
+                other => Err(format!("state field {f}: {other:?}")),
+            }
         };
-        Ok(Self { round, win: [win5[0], win5[1], win5[2], win5[3], win5[4], sn.bonus], m, k, roots, pools, d_claim, funder, ticket_tpl, reserve: r })
+        let ticket_tpl = bytes32(&drawer, "ticket_tpl")?;
+        // Spec M5 A5 C1-C3: the record, rebuilt from the transaction bytes.
+        let record = if rec {
+            if !m5 {
+                return Err("an M4 draw_test_seed with something pending".into());
+            }
+            let wc = script_num(&drawer_pushes[ARG_WC])?;
+            let (x2, y) = (script_num(&drawer_pushes[ARG_X2])?, script_num(&drawer_pushes[ARG_Y])?);
+            let (g, cm) = (int(&ctrl, "g")?, int(&ctrl, "m")?);
+            let l_next = x2 + muldiv(x2 + y, g) * (cm - 1);
+            let v_prime = vault_settle(int(&vt, "total_assets")?, amounts.h, marker.jackpot - marker.j_boost, set.jp, marker.g2, n2, set.sp)
+                .ok_or("V' < 0")?;
+            let conv = convert(v_prime, s_tot, d_pend, w_pend, l_next).ok_or("the conversion is outside its domain")?;
+            if conv.wc != wc {
+                return Err(format!("wc argument {wc} is not the largest fitting share count {}", conv.wc));
+            }
+            let state = conv.record(round, bytes32(&vt, "request_tpl")?, &funder).expect("rec");
+            let i = 3 + set.np();
+            let value = conv.record_value(r as i64) as u64;
+            if tx.outputs[i].value != value || tx.outputs[i].script_public_key != t.record_spk(&state) {
+                return Err(format!("record output {i} does not match the conversion"));
+            }
+            Some(ResultRecord { state, value, outpoint: TransactionOutpoint::new(txid, i as u32) })
+        } else {
+            None
+        };
+        Ok(Self { round, win: [win5[0], win5[1], win5[2], win5[3], win5[4], sn.bonus], m, k, roots, pools, d_claim, funder, ticket_tpl, reserve: r, record })
     }
 
     /// Pool p's state rebuilt from the record alone (R4).

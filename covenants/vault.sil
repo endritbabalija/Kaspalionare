@@ -1,13 +1,28 @@
 pragma silverscript ^0.1.0;
 
-// House vault (role 0x06), spec M3 A3.2 (design 5.4, 6; D40, D50).
+// House vault (role 0x06), spec M3 A3.2 (design 5.4, 6; D40, D50), layout extended by
+// spec M5 A3.1 (D74): record_tpl, request_tpl and position_tpl are instance constants set
+// at genesis and copied unchanged (the drawer reads record_tpl and request_tpl from this
+// state; the vault's request entries bind request and position outputs to them).
 //
 // Value: total_assets + pend_dep + R. Created at genesis (round 0) and recreated by every
-// draw(), which validates every field (spec M3 A4 check 23). total_shares and the pending
-// fields are carried unchanged until M5 adds requests and the settlement record.
+// draw(), which validates every field (spec M3 A4 check 23), and by the request entries.
+// M5 Stage 3: total_shares and the pending fields are still carried unchanged by draw()
+// (the conversion is M5 Stage 4).
 //
-// Entries: draw_leg() only (delegate of Drawer.draw_test_seed() at input 2). M5 adds the
-// request entries.
+// Entries:
+//   draw_leg(): delegate of Drawer.draw_test_seed() at input 2;
+//   request_deposit(): spec M5 A4.1 (leader; anyone pays D, naming any owner, D77);
+//   request_withdraw(): spec M5 A4.2 (leader; the position at input 1 runs
+//     Position.vault_leg(); the owner proves ownership with an input of its script, D67).
+//
+// Template bytes (handoff S2-1 / U-1): validateOutputStateWithTemplate takes the template
+// prefix and suffix (refs/silverscript/docs/TUTORIAL.md:1218-1229), so the request entries
+// take the request template bytes as arguments; the binding is by request_tpl (own state).
+//
+// Each check of a request entry starts at a "// ==== check <label>" line (labels D1..D9,
+// W1..W11, handoff S2-6), in spec order, outside any if/for body. `// mut:M5<ID>` tags mark
+// the requires the mutation tests remove one at a time (handoff S2-8).
 contract Vault(
     byte[32] drawerTemplateHash,
     int init_round,
@@ -15,11 +30,22 @@ contract Vault(
     int init_total_shares,
     int init_pend_dep,
     int init_pend_wsh,
-    int init_liability
+    int init_liability,
+    byte[32] init_record_tpl,
+    byte[32] init_request_tpl,
+    byte[32] init_position_tpl
 ) {
     // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
     // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
     int constant SCRIPT_MAX = 1000000;
+    // Spec M5 A2: TOTAL_MAX = 2^62; ASSETS_MAX = TOTAL_MAX - VA (VA = 1); SHARES_MAX =
+    // TOTAL_MAX - VS (VS = 1,000); funding inputs; reserve bound; minimum deposit (1 KAS).
+    int constant TOTAL_MAX = 4611686018427387904;
+    int constant ASSETS_MAX = 4611686018427387903;
+    int constant SHARES_MAX = 4611686018427386904;
+    int constant F_MAX = 8;
+    int constant RESERVE_MAX = 10000000000;
+    int constant MIN_DEPOSIT = 100000000;
 
     // Drawer state layout (spec M3 A3.1; ticket_tpl added by spec M4 A3.2, D54), for
     // readInputStateWithTemplate.
@@ -34,6 +60,26 @@ contract Vault(
         int draw_window;
     }
 
+    // Request state layout (spec M5 A3.2), for validateOutputStateWithTemplate.
+    struct RequestState {
+        byte role;
+        int round;
+        byte kind;
+        int amount;
+        byte owner_class;
+        byte[33] owner_key;
+    }
+
+    // Share position state layout (spec M5 A3.4), for readInputStateWithTemplate and
+    // validateOutputStateWithInputTemplate.
+    struct PositionState {
+        byte role;
+        int round;
+        int shares;
+        byte owner_class;
+        byte[33] owner_key;
+    }
+
     byte role = 0x06;
     int round = init_round;
     int total_assets = init_total_assets;
@@ -41,6 +87,9 @@ contract Vault(
     int pend_dep = init_pend_dep;
     int pend_wsh = init_pend_wsh;
     int liability = init_liability;
+    byte[32] record_tpl = init_record_tpl;
+    byte[32] request_tpl = init_request_tpl;
+    byte[32] position_tpl = init_position_tpl;
 
     // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, vault L1-L4).
     entry draw_leg(int drawer_pl, int drawer_sl) {
@@ -60,5 +109,249 @@ contract Vault(
         DrawerState drw = readInputStateWithTemplate(0, drawer_pl, drawer_sl, drawerTemplateHash);
         require(unsigned(drw.role) == 10); // mut:VL4_role
         require(drw.round == round + 1); // mut:VL4_round
+    }
+
+    // Version-0 scriptPubKey bytes (2-byte version, then the script) of a D11 payout class
+    // and 33-byte key, as state::Payout::spk (rusty-kaspa v2.1.0
+    // crypto/txscript/src/standard.rs:19-37): 0 P2PK Schnorr, 1 P2PK ECDSA, 2 P2SH. The
+    // caller has checked c <= 2. Same code as Drawer.payoutSpk and Ticket.payoutSpk.
+    // OpTxInputSpk pushes the same encoding as OpTxOutputSpk (script_public_key.to_bytes(),
+    // rusty-kaspa v2.1.0 crypto/txscript/src/opcodes/mod.rs:1112-1121, 1163-1173).
+    function payoutSpk(int c, byte[33] key): byte[] {
+        byte[] s = byte[](0x0000aa20) + key.slice(0, 32) + byte[](0x87);
+        if (c == 0) {
+            s = byte[](0x000020) + key.slice(0, 32) + byte[](0xac);
+        }
+        if (c == 1) {
+            s = byte[](0x000021) + key + byte[](0xab);
+        }
+        return s;
+    }
+
+    // Spec M5 A4.1. Inputs: 0 this vault, 1..n funding (zero ID, 1 <= n <= F_MAX).
+    // Outputs: 0 vault' (value + D), 1 request (deposit, value R), then at most one change
+    // output (zero ID).
+    entry request_deposit(byte owner_class_arg, byte[33] owner_key_arg, byte[] req_prefix, byte[] req_suffix) {
+        // ==== check D1: leader at input 0; own A3.1 ranges; R from the value
+        require(this.activeInputIndex == 0); // mut:M5D1_active
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 6); // mut:M5D1_role
+        require(round >= 0); // mut:M5D1_round
+        require(round < TOTAL_MAX); // mut:M5D1_round
+        require(total_assets >= 0); // mut:M5D1_assets
+        require(total_assets <= ASSETS_MAX); // mut:M5D1_assets
+        require(total_shares >= 0); // mut:M5D1_shares
+        require(total_shares <= SHARES_MAX); // mut:M5D1_shares
+        require(pend_dep >= 0); // mut:M5D1_dep
+        require(pend_dep <= TOTAL_MAX - total_assets); // mut:M5D1_dep
+        require(pend_wsh >= 0); // mut:M5D1_wsh
+        require(pend_wsh <= total_shares); // mut:M5D1_wsh
+        require(liability >= 0); // mut:M5D1_liab
+        require(liability <= TOTAL_MAX); // mut:M5D1_liab
+        // OpTxInputAmount pushes a value in [0, 2^63) or fails (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1100-1107); total_assets, pend_dep >= 0, so the
+        // subtraction cannot overflow.
+        int v0 = tx.inputs[0].value;
+        int rsv = v0 - total_assets - pend_dep;
+        require(rsv >= 0); // mut:M5D1_rsv
+        require(rsv <= RESERVE_MAX); // mut:M5D1_rsv
+
+        // ==== check D2: inputs (R2): this vault alone under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 1); // mut:M5D2_count
+        require(tx.inputs.length >= 2); // mut:M5D2_fund
+        require(tx.inputs.length <= 1 + F_MAX); // mut:M5D2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 1, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:M5D2_zero
+            }
+        }
+
+        // ==== check D3: two covenant outputs (vault', request) at 0, 1, authorized by input 0
+        require(OpAuthOutputCount(0) == 2); // mut:M5D3_auth
+        require(OpAuthOutputIdx(0, 0) == 0); // mut:M5D3_idx
+        require(OpAuthOutputIdx(0, 1) == 1); // mut:M5D3_idx
+        require(OpCovOutputCount(cov) == 2); // mut:M5D3_cov
+
+        // ==== check D4: two or three outputs; output 2, if present, has the zero ID
+        require(tx.outputs.length >= 2); // mut:M5D4_count
+        require(tx.outputs.length <= 3); // mut:M5D4_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 2, tx.outputs.length, 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:M5D4_zero
+            }
+        }
+
+        // ==== check D5: D = out0 - in0 in [MIN_DEPOSIT, TOTAL_MAX - total_assets - pend_dep]
+        // Both values are in [0, 2^63) (OpTxOutputAmount, mod.rs:1151-1161), so the
+        // difference fits; the bound is >= 0 by D1.
+        int d = tx.outputs[0].value - v0;
+        require(d >= MIN_DEPOSIT); // mut:M5D5_min
+        require(d <= TOTAL_MAX - total_assets - pend_dep); // mut:M5D5_max
+
+        // ==== check D6: owner class (D11) and key padding
+        int oc = unsigned(owner_class_arg);
+        require(oc <= 2); // mut:M5D6_class
+        if (oc != 1) {
+            require(owner_key_arg.slice(32, 33) == byte[](0x00)); // mut:M5D6_pad
+        }
+
+        // ==== check D7: the request carries exactly R
+        require(tx.outputs[1].value == rsv); // mut:M5D7
+
+        // ==== check D8: vault' = pend_dep + D (<= TOTAL_MAX - total_assets by D5), every other field unchanged
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            total_assets: total_assets,
+            total_shares: total_shares,
+            pend_dep: pend_dep + d,
+            pend_wsh: pend_wsh,
+            liability: liability,
+            record_tpl: record_tpl,
+            request_tpl: request_tpl,
+            position_tpl: position_tpl
+        });
+
+        // ==== check D9: the request {round + 1, deposit, D, owner} under request_tpl
+        validateOutputStateWithTemplate(1, RequestState {
+            role: 0x07,
+            round: round + 1,
+            kind: 0x00,
+            amount: d,
+            owner_class: owner_class_arg,
+            owner_key: owner_key_arg
+        }, req_prefix, req_suffix, request_tpl);
+    }
+
+    // Spec M5 A4.2. Inputs: 0 this vault, 1 a position (Position.vault_leg), 2..1+n plain
+    // inputs (zero ID, 1 <= n <= F_MAX), one of them (owner_idx) of the owner's script.
+    // Outputs: 0 vault' (value unchanged), 1 request (withdrawal, value R); partial
+    // (w < shares): 2 position' (shares - w, value R); then at most one change output.
+    // Whole: the position's R becomes the request's; partial: the plain inputs post it.
+    entry request_withdraw(int w, int owner_idx, int pos_pl, int pos_sl, byte[] req_prefix, byte[] req_suffix) {
+        // ==== check W1: leader at input 0; own A3.1 ranges; R from the value; argument ranges
+        require(this.activeInputIndex == 0); // mut:M5W1_active
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 6); // mut:M5W1_role
+        require(round >= 0); // mut:M5W1_round
+        require(round < TOTAL_MAX); // mut:M5W1_round
+        require(total_assets >= 0); // mut:M5W1_assets
+        require(total_assets <= ASSETS_MAX); // mut:M5W1_assets
+        require(total_shares >= 0); // mut:M5W1_shares
+        require(total_shares <= SHARES_MAX); // mut:M5W1_shares
+        require(pend_dep >= 0); // mut:M5W1_dep
+        require(pend_dep <= TOTAL_MAX - total_assets); // mut:M5W1_dep
+        require(pend_wsh >= 0); // mut:M5W1_wsh
+        require(pend_wsh <= total_shares); // mut:M5W1_wsh
+        require(liability >= 0); // mut:M5W1_liab
+        require(liability <= TOTAL_MAX); // mut:M5W1_liab
+        int v0 = tx.inputs[0].value;
+        int rsv = v0 - total_assets - pend_dep;
+        require(rsv >= 0); // mut:M5W1_rsv
+        require(rsv <= RESERVE_MAX); // mut:M5W1_rsv
+        require(pos_pl >= 0); // mut:M5W1_tpl
+        require(pos_pl <= SCRIPT_MAX); // mut:M5W1_tpl
+        require(pos_sl >= 0); // mut:M5W1_tpl
+        require(pos_sl <= SCRIPT_MAX); // mut:M5W1_tpl
+
+        // ==== check W2: inputs (R2): vault and position under cov, then 1..F_MAX plain inputs with the zero ID
+        require(OpCovInputCount(cov) == 2); // mut:M5W2_count
+        require(OpInputCovenantId(1) == cov); // mut:M5W2_pos
+        require(tx.inputs.length >= 3); // mut:M5W2_fund
+        require(tx.inputs.length <= 2 + F_MAX); // mut:M5W2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 2, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:M5W2_zero
+            }
+        }
+
+        // ==== check W3: the position under position_tpl (own state); A3.4 ranges; value R
+        PositionState ps = readInputStateWithTemplate(1, pos_pl, pos_sl, position_tpl);
+        require(unsigned(ps.role) == 11); // mut:M5W3_role
+        require(ps.shares >= 1); // mut:M5W3_shares
+        require(ps.shares <= SHARES_MAX); // mut:M5W3_shares
+        int pc = unsigned(ps.owner_class);
+        require(pc <= 2); // mut:M5W3_class
+        if (pc != 1) {
+            require(ps.owner_key.slice(32, 33) == byte[](0x00)); // mut:M5W3_pad
+        }
+        require(tx.inputs[1].value == rsv); // mut:M5W3_value
+
+        // ==== check W4: 1 <= w <= shares; w <= total_shares - pend_wsh (>= 0 by W1)
+        require(w >= 1); // mut:M5W4_min
+        require(w <= ps.shares); // mut:M5W4_shares
+        require(w <= total_shares - pend_wsh); // mut:M5W4_total
+
+        // ==== check W5: the owner input (D67): 2 <= owner_idx < inputs, with the owner's script
+        require(owner_idx >= 2); // mut:M5W5_idx
+        require(owner_idx < tx.inputs.length); // mut:M5W5_idx
+        require(tx.inputs[owner_idx].scriptPubKey == payoutSpk(pc, ps.owner_key)); // mut:M5W5_spk
+
+        // ==== check W6: covenant outputs 0..nCov-1 (nCov = 2 + partial), all authorized by input 0 (R2)
+        bool partial = w < ps.shares;
+        int nCov = 2;
+        if (partial) {
+            nCov = 3;
+        }
+        require(OpAuthOutputCount(0) == nCov); // mut:M5W6_auth
+        for(ai, 0, nCov, 3) {
+            require(OpAuthOutputIdx(0, ai) == ai); // mut:M5W6_idx
+        }
+        require(OpCovOutputCount(cov) == nCov); // mut:M5W6_cov
+
+        // ==== check W7: nCov or nCov + 1 outputs; the output at nCov, if present, has the zero ID
+        require(tx.outputs.length >= nCov); // mut:M5W7_count
+        require(tx.outputs.length <= nCov + 1); // mut:M5W7_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, nCov, tx.outputs.length, 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:M5W7_zero
+            }
+        }
+
+        // ==== check W8: values: vault' unchanged; request R; position' R (partial)
+        require(tx.outputs[0].value == v0); // mut:M5W8_vault
+        require(tx.outputs[1].value == rsv); // mut:M5W8_request
+        if (partial) {
+            require(tx.outputs[2].value == rsv); // mut:M5W8_position
+        }
+
+        // ==== check W9: vault' = pend_wsh + w (<= total_shares by W4), every other field unchanged
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            total_assets: total_assets,
+            total_shares: total_shares,
+            pend_dep: pend_dep,
+            pend_wsh: pend_wsh + w,
+            liability: liability,
+            record_tpl: record_tpl,
+            request_tpl: request_tpl,
+            position_tpl: position_tpl
+        });
+
+        // ==== check W10: the request {round + 1, withdrawal, w, the position's owner} under request_tpl
+        validateOutputStateWithTemplate(1, RequestState {
+            role: 0x07,
+            round: round + 1,
+            kind: 0x01,
+            amount: w,
+            owner_class: ps.owner_class,
+            owner_key: ps.owner_key
+        }, req_prefix, req_suffix, request_tpl);
+
+        // ==== check W11: partial: position' {round, shares - w, owner} under input 1's template
+        if (partial) {
+            validateOutputStateWithInputTemplate(2, PositionState {
+                role: ps.role,
+                round: ps.round,
+                shares: ps.shares - w,
+                owner_class: ps.owner_class,
+                owner_key: ps.owner_key
+            }, 1, pos_pl, pos_sl, position_tpl);
+        }
     }
 }

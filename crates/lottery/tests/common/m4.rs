@@ -92,6 +92,9 @@ impl Case {
                 RefreshObj::Marker(_) => "refresh marker (attack base)",
                 RefreshObj::Pool(_) => "refresh pool (attack base)",
                 RefreshObj::Ticket(_) => "refresh ticket (attack base)",
+                RefreshObj::Position(_) => "refresh position (attack base)",
+                RefreshObj::Request(_) => "refresh request (attack base)",
+                RefreshObj::Record(_) => "refresh record (attack base)",
             },
         }
     }

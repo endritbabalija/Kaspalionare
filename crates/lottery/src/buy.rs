@@ -19,7 +19,9 @@ use silverscript_abi::{encode_contract_entry_sig_script, encode_runtime_state_sc
 
 use crate::combo::{Combo, bundle_bytes};
 use crate::smt::{Tree, counts_bytes, num_bytes};
-use crate::state::{ControllerState, K_MAX, MarkerState, ParamsState, Payout, PoolState, ShardState, TicketState, VaultState};
+use crate::state::{
+    ControllerState, K_MAX, MarkerState, ParamsState, Payout, PoolState, PositionState, RecordState, RequestState, ShardState, TicketState, VaultState,
+};
 #[cfg(feature = "test-seed")]
 use crate::state::DrawerState;
 
@@ -113,6 +115,10 @@ pub struct Sources {
     pub marker: String,
     pub vault: String,
     pub pool: String,
+    /// Spec M5 (D74): the settlement record, the share position and the vault request.
+    pub record: String,
+    pub position: String,
+    pub request: String,
     /// TEST-ONLY seed drawer (D43): only with the `test-seed` feature.
     #[cfg(feature = "test-seed")]
     pub drawer: String,
@@ -134,18 +140,25 @@ impl Sources {
             vault: read_covenant("vault.sil"),
             // The pool reads the ticket state (ticket_leg), so its TicketState struct follows B_MAX.
             pool: resize_ticket_arrays(&read_covenant("pool.sil"), b_max),
+            record: read_covenant("record.sil"),
+            position: read_covenant("position.sil"),
+            request: read_covenant("request.sil"),
             #[cfg(feature = "test-seed")]
             drawer: read_covenant("drawer.sil"),
         }
     }
 }
 
-/// Compiled templates. Compile order (spec M2 D27, M3 D38, M4 D54): controller ->
-/// drawer(controller) -> marker, vault, pool(drawer) -> ticket(pool) -> shard(ticket,
-/// controller) and params(controller). The controller depends on no template: its route
-/// table (shard, marker, params hashes) is state. The drawer holds pool_tpl, vault_tpl and
-/// ticket_tpl in state (the pool cannot commit to the ticket hash: the ticket commits to
-/// POOL_TPL, so draw() writes ticket_tpl into every pool state).
+/// Compiled templates. Compile order (spec M2 D27, M3 D38, M4 D54, M5 D74): controller ->
+/// drawer(controller) -> marker, vault, pool(drawer) and record -> position(vault) ->
+/// request(record, position) -> ticket(pool) -> shard(ticket, controller) and
+/// params(controller). The controller depends on no template: its route table (shard,
+/// marker, params hashes) is state. The drawer holds pool_tpl, vault_tpl and ticket_tpl in
+/// state (the pool cannot commit to the ticket hash: the ticket commits to POOL_TPL, so
+/// draw() writes ticket_tpl into every pool state). The vault holds record_tpl, request_tpl
+/// and position_tpl in state (D74: the position commits to VAULT_TPL and the request to
+/// RECORD_TPL and POSITION_TPL); the record has no constructor constant (its request_tpl is
+/// state, written by draw()).
 ///
 /// Without the `test-seed` feature there is no drawer (D43): marker, vault and pool are then
 /// compiled with a zero drawer hash, so their draw legs can never pass.
@@ -158,6 +171,9 @@ pub struct Templates {
     pub marker: Arc<Template>,
     pub vault: Arc<Template>,
     pub pool: Arc<Template>,
+    pub record: Arc<Template>,
+    pub position: Arc<Template>,
+    pub request: Arc<Template>,
     #[cfg(feature = "test-seed")]
     pub drawer: Arc<Template>,
 }
@@ -199,6 +215,9 @@ impl Templates {
         let marker = Template::from(compile_source(&src.marker, &dummy_marker().ctor(drawer_hash)));
         let vault = Template::from(compile_source(&src.vault, &dummy_vault().ctor(drawer_hash)));
         let pool = Template::from(compile_source(&src.pool, &dummy_pool().ctor(drawer_hash)));
+        let record = Template::from(compile_source(&src.record, &dummy_record().ctor()));
+        let position = Template::from(compile_source(&src.position, &dummy_position().ctor(vault.hash)));
+        let request = Template::from(compile_source(&src.request, &dummy_request().ctor(record.hash, position.hash)));
         let ticket = Template::from(compile_source(&src.ticket, &dummy_ticket.ctor(pool.hash)));
         let shard = Template::from(compile_source(&src.shard, &dummy_shard.ctor(ticket.hash, controller.hash)));
         let params = Template::from(compile_source(&src.params, &dummy_params().ctor(controller.hash)));
@@ -211,6 +230,9 @@ impl Templates {
             marker: Arc::new(marker),
             vault: Arc::new(vault),
             pool: Arc::new(pool),
+            record: Arc::new(record),
+            position: Arc::new(position),
+            request: Arc::new(request),
             #[cfg(feature = "test-seed")]
             drawer: Arc::new(drawer),
         }
@@ -286,6 +308,30 @@ impl Templates {
 
     pub fn pool_spk(&self, p: &PoolState) -> ScriptPublicKey {
         pay_to_script_hash_script(&self.pool_redeem(p))
+    }
+
+    pub fn record_redeem(&self, r: &RecordState) -> Vec<u8> {
+        self.record.redeem(&r.values())
+    }
+
+    pub fn record_spk(&self, r: &RecordState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.record_redeem(r))
+    }
+
+    pub fn position_redeem(&self, p: &PositionState) -> Vec<u8> {
+        self.position.redeem(&p.values())
+    }
+
+    pub fn position_spk(&self, p: &PositionState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.position_redeem(p))
+    }
+
+    pub fn request_redeem(&self, r: &RequestState) -> Vec<u8> {
+        self.request.redeem(&r.values())
+    }
+
+    pub fn request_spk(&self, r: &RequestState) -> ScriptPublicKey {
+        pay_to_script_hash_script(&self.request_redeem(r))
     }
 
     #[cfg(feature = "test-seed")]
@@ -366,7 +412,40 @@ fn dummy_marker() -> MarkerState {
 }
 
 fn dummy_vault() -> VaultState {
-    VaultState { round: 0, total_assets: 0, total_shares: 0, pend_dep: 0, pend_wsh: 0, liability: 0 }
+    VaultState {
+        round: 0,
+        total_assets: 0,
+        total_shares: 0,
+        pend_dep: 0,
+        pend_wsh: 0,
+        liability: 0,
+        record_tpl: [0; 32],
+        request_tpl: [0; 32],
+        position_tpl: [0; 32],
+    }
+}
+
+fn dummy_record() -> RecordState {
+    RecordState {
+        round: 1,
+        request_tpl: [0; 32],
+        refund: 0,
+        dep_rem: 0,
+        mint_rem: 0,
+        wsh_rem: 0,
+        burn_rem: 0,
+        out_rem: 0,
+        funder_class: 0,
+        funder_key: [0; 33],
+    }
+}
+
+fn dummy_position() -> PositionState {
+    PositionState { round: 0, shares: 1, owner_class: 0, owner_key: [0; 33] }
+}
+
+fn dummy_request() -> RequestState {
+    RequestState { round: 1, kind: 0, amount: 0, owner_class: 0, owner_key: [0; 33] }
 }
 
 fn dummy_pool() -> PoolState {
@@ -588,6 +667,88 @@ pub enum InKind {
     /// sigscript = entry(args) + push(redeem). Used by `close()` (controller, params and
     /// shard legs) and `set_params()`.
     Entry { template: Arc<Template>, entry: String, args: Vec<ArtifactValue>, redeem: Vec<u8> },
+    /// Spec M5 D67: a plain (zero-ID) input spent by a share position's owner, whose
+    /// scriptPubKey is the owner's D11 script (`request_withdraw` check 5). It may also fund
+    /// the transaction. Signed in `Built::finish` with the owner's key.
+    Owner(OwnerKey),
+}
+
+/// The key behind a D11 owner script (spec M5 D67): P2PK Schnorr, P2PK ECDSA, or P2SH whose
+/// redeem script is the Schnorr P2PK script of the key (a P2SH-wrapped P2PK).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnerKey {
+    Schnorr([u8; 32]),
+    Ecdsa([u8; 32]),
+    P2sh([u8; 32]),
+}
+
+impl OwnerKey {
+    fn keypair(&self) -> Keypair {
+        let sk = match self {
+            OwnerKey::Schnorr(k) | OwnerKey::Ecdsa(k) | OwnerKey::P2sh(k) => k,
+        };
+        Keypair::from_seckey_slice(SECP256K1, sk).unwrap()
+    }
+
+    /// The P2SH redeem script (Schnorr P2PK of the key); `None` for the P2PK classes.
+    pub fn redeem(&self) -> Option<Vec<u8>> {
+        match self {
+            OwnerKey::P2sh(_) => Some(Payout::Schnorr(self.keypair().x_only_public_key().0.serialize()).script()),
+            _ => None,
+        }
+    }
+
+    /// The owner's D11 payout (the position's owner_class and owner_key).
+    pub fn payout(&self) -> Payout {
+        let kp = self.keypair();
+        match self {
+            OwnerKey::Schnorr(_) => Payout::Schnorr(kp.x_only_public_key().0.serialize()),
+            OwnerKey::Ecdsa(_) => Payout::Ecdsa(kp.public_key().serialize()),
+            OwnerKey::P2sh(_) => {
+                let spk = pay_to_script_hash_script(&self.redeem().unwrap());
+                // OP_BLAKE2B OP_DATA_32 <hash> OP_EQUAL (rusty-kaspa v2.1.0
+                // crypto/txscript/src/standard.rs:31-37).
+                Payout::P2sh(spk.script()[2..34].try_into().unwrap())
+            }
+        }
+    }
+
+    pub fn spk(&self) -> ScriptPublicKey {
+        let spk = self.payout().spk();
+        if let OwnerKey::P2sh(_) = self {
+            debug_assert_eq!(spk, pay_to_script_hash_script(&self.redeem().unwrap()));
+        }
+        spk
+    }
+
+    /// The signature script of input `i` of `tx` (SIG_HASH_ALL): Schnorr as `sign_input`;
+    /// ECDSA: OP_DATA_65 <compact sig || type> over the ECDSA sighash (rusty-kaspa v2.1.0
+    /// consensus/core/src/hashing/sighash.rs:282-293, crypto/txscript/src/opcodes/mod.rs:804
+    /// OpCheckSigECDSA, crypto/txscript/src/lib.rs:885-892 `Signature::from_compact`); P2SH:
+    /// the Schnorr signature push, then the redeem script push.
+    fn sign(&self, tx: &PopulatedTransaction, i: usize) -> Vec<u8> {
+        let sk = self.keypair().secret_bytes();
+        match self {
+            OwnerKey::Schnorr(_) => sign_input(tx, i, &sk, SIG_HASH_ALL),
+            OwnerKey::Ecdsa(_) => {
+                let reused = kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync::new();
+                let h = kaspa_consensus_core::hashing::sighash::calc_ecdsa_signature_hash(tx, i, SIG_HASH_ALL, &reused);
+                let msg = secp256k1::Message::from_digest_slice(h.as_bytes().as_slice()).unwrap();
+                let sk = secp256k1::SecretKey::from_slice(&sk).unwrap();
+                let sig = SECP256K1.sign_ecdsa(&msg, &sk).serialize_compact();
+                std::iter::once(65u8).chain(sig).chain([SIG_HASH_ALL.to_u8()]).collect()
+            }
+            OwnerKey::P2sh(_) => push_redeem(sign_input(tx, i, &sk, SIG_HASH_ALL), &self.redeem().unwrap()),
+        }
+    }
+
+    /// A placeholder sigscript of the final size (for the units probe and the storage mass).
+    fn placeholder(&self) -> Vec<u8> {
+        match self {
+            OwnerKey::Schnorr(_) | OwnerKey::Ecdsa(_) => vec![0; P2PK_SIG_LEN],
+            OwnerKey::P2sh(_) => push_redeem(vec![0; P2PK_SIG_LEN], &self.redeem().unwrap()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -756,6 +917,7 @@ impl Built {
                 InKind::Covenant { redeem, args } => buy_sigscript(&self.templates, args, redeem),
                 InKind::Raw(sig) => sig.clone(),
                 InKind::Entry { template, entry, args, redeem } => entry_sigscript(template, entry, args, redeem),
+                InKind::Owner(k) => k.placeholder(),
             })
             .collect()
     }
@@ -783,47 +945,71 @@ impl Built {
         harness::masses(&self.assemble(&vec![vec![]; n], &vec![0; n]), &entries).storage
     }
 
-    /// Size budgets from an unlimited run, commit storage mass, sign funding inputs.
+    /// Size budgets from an unlimited run, commit storage mass, sign funding and owner
+    /// inputs. An owner input (spec M5) is budgeted at one signature check (P2PK_UNITS) and,
+    /// if its signed run needs more (P2SH), re-budgeted from that run and signed again.
     pub fn finish(&self) -> Final {
         let entries: Vec<UtxoEntry> = self.inputs.iter().map(|i| i.entry.clone()).collect();
         let sigs = self.sigscripts();
         let max_budget = vec![u16::MAX; sigs.len()];
         let probe = self.assemble(&sigs, &max_budget);
-        let units: Vec<u64> = (0..sigs.len())
+        let mut units: Vec<u64> = (0..sigs.len())
             .map(|i| match self.inputs[i].kind {
-                InKind::Funding => P2PK_UNITS,
+                InKind::Funding | InKind::Owner(_) => P2PK_UNITS,
                 // A rejected dry run (attack tests) gets a generous budget, so the run under the
                 // committed budget fails on the script's own check, not on the budget.
                 _ => execute(&probe, &entries, i, false).unwrap_or(FAILED_RUN_UNITS),
             })
             .collect();
-        let budgets: Vec<u16> = units
-            .iter()
-            .enumerate()
-            .map(|(i, &u)| {
-                let b = budget_for(u);
-                if i == 0 {
-                    self.shard_budget.unwrap_or((b as i32 + self.budget_delta).max(0) as u16)
-                } else {
-                    b
+        loop {
+            let budgets: Vec<u16> = units
+                .iter()
+                .enumerate()
+                .map(|(i, &u)| {
+                    let b = budget_for(u);
+                    if i == 0 {
+                        self.shard_budget.unwrap_or((b as i32 + self.budget_delta).max(0) as u16)
+                    } else {
+                        b
+                    }
+                })
+                .collect();
+            let tx = self.assemble(&sigs, &budgets);
+            // Zero-value outputs (range tests with d = 0) are consensus-invalid and the mass
+            // calculator divides by the value; the script check is what is under test there.
+            if tx.outputs.iter().all(|o| o.value > 0) {
+                harness::commit_storage_mass(&tx, &entries);
+            }
+            let mut tx = tx;
+            for (i, inp) in self.inputs.iter().enumerate() {
+                match &inp.kind {
+                    InKind::Funding => {
+                        let sig = sign_input(&PopulatedTransaction::new(&tx, entries.clone()), i, &self.funding_sk, SIG_HASH_ALL);
+                        tx.inputs[i].signature_script = sig;
+                    }
+                    InKind::Owner(k) => {
+                        let sig = k.sign(&PopulatedTransaction::new(&tx, entries.clone()), i);
+                        tx.inputs[i].signature_script = sig;
+                    }
+                    _ => {}
                 }
-            })
-            .collect();
-        let tx = self.assemble(&sigs, &budgets);
-        // Zero-value outputs (range tests with d = 0) are consensus-invalid and the mass
-        // calculator divides by the value; the script check is what is under test there.
-        if tx.outputs.iter().all(|o| o.value > 0) {
-            harness::commit_storage_mass(&tx, &entries);
-        }
-        let mut tx = tx;
-        for (i, inp) in self.inputs.iter().enumerate() {
-            if matches!(inp.kind, InKind::Funding) {
-                let sig = sign_input(&PopulatedTransaction::new(&tx, entries.clone()), i, &self.funding_sk, SIG_HASH_ALL);
-                tx.inputs[i].signature_script = sig;
+            }
+            tx.finalize();
+            let mut rerun = false;
+            for (i, inp) in self.inputs.iter().enumerate() {
+                if let InKind::Owner(_) = inp.kind {
+                    if let Ok(u) = execute(&tx, &entries, i, false) {
+                        if budget_for(u) > budget_for(units[i]) {
+                            units[i] = u;
+                            rerun = true;
+                        }
+                    }
+                }
+            }
+            if !rerun {
+                return Final { tx, entries, units };
             }
         }
-        tx.finalize();
-        Final { tx, entries, units }
     }
 }
 

@@ -18,3 +18,4 @@ pub mod ledger;
 pub mod params;
 pub mod smt;
 pub mod state;
+pub mod vault;

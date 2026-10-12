@@ -1,6 +1,6 @@
 //! Protocol states as SilverScript runtime-state values: shard and ticket (spec M1
 //! section 4), controller, params and marker (spec M2 A3), drawer, vault and pool (spec M3
-//! A3).
+//! A3), and the vault request, settlement record and share position (spec M5 A3).
 
 use std::collections::BTreeMap;
 
@@ -14,8 +14,15 @@ pub const ROLE_MARKER: u8 = 0x03;
 pub const ROLE_POOL: u8 = 0x04;
 pub const ROLE_TICKET: u8 = 0x05;
 pub const ROLE_VAULT: u8 = 0x06;
+pub const ROLE_REQUEST: u8 = 0x07;
+pub const ROLE_RECORD: u8 = 0x08;
 pub const ROLE_PARAMS: u8 = 0x09;
 pub const ROLE_DRAWER: u8 = 0x0A;
+/// Share position (spec M5 A2, D67; new role).
+pub const ROLE_POSITION: u8 = 0x0B;
+/// Request kinds (spec M5 A2, A3.2).
+pub const KIND_DEPOSIT: u8 = 0;
+pub const KIND_WITHDRAW: u8 = 1;
 /// Largest K (spec M2 A2); the marker stores 32 x K_MAX root bytes.
 pub const K_MAX: usize = 16;
 
@@ -454,7 +461,8 @@ impl DrawerState {
     }
 }
 
-/// House vault, role 0x06 (spec M3 A3.2, design 6, D40). Value total_assets + pend_dep + R.
+/// House vault, role 0x06 (spec M3 A3.2, design 6, D40; extended by spec M5 A3.1, D74).
+/// Value total_assets + pend_dep + R.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultState {
     /// The last drawn round (0 at genesis).
@@ -464,6 +472,11 @@ pub struct VaultState {
     pub pend_dep: i64,
     pub pend_wsh: i64,
     pub liability: i64,
+    /// Instance constants (D74): the record, request and position template hashes, set at
+    /// genesis and copied unchanged.
+    pub record_tpl: [u8; 32],
+    pub request_tpl: [u8; 32],
+    pub position_tpl: [u8; 32],
 }
 
 impl VaultState {
@@ -477,6 +490,9 @@ impl VaultState {
             ("pend_dep", Int(self.pend_dep)),
             ("pend_wsh", Int(self.pend_wsh)),
             ("liability", Int(self.liability)),
+            ("record_tpl", Bytes(self.record_tpl.to_vec())),
+            ("request_tpl", Bytes(self.request_tpl.to_vec())),
+            ("position_tpl", Bytes(self.position_tpl.to_vec())),
         ]
     }
 
@@ -554,6 +570,140 @@ impl PoolState {
     /// Constructor arguments: the drawer template hash (constant, D38), then the state.
     pub fn ctor(&self, drawer_hash: [u8; 32]) -> Vec<ArtifactValue> {
         let mut v = vec![ArtifactValue::Bytes(drawer_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
+    }
+}
+
+/// Vault request, role 0x07 (spec M5 A3.2, D67, D68). Value R + accrued (0 for deposits).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestState {
+    /// The target draw (the vault's round + 1 at creation).
+    pub round: i64,
+    /// KIND_DEPOSIT or KIND_WITHDRAW.
+    pub kind: u8,
+    /// Deposit sompi or withdrawal shares.
+    pub amount: i64,
+    pub owner_class: u8,
+    pub owner_key: [u8; 33],
+}
+
+impl RequestState {
+    pub fn new(round: i64, kind: u8, amount: i64, owner: &Payout) -> Self {
+        Self { round, kind, amount, owner_class: owner.class(), owner_key: owner.key33() }
+    }
+
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_REQUEST)),
+            ("round", Int(self.round)),
+            ("kind", Byte(self.kind)),
+            ("amount", Int(self.amount)),
+            ("owner_class", Byte(self.owner_class)),
+            ("owner_key", Bytes(self.owner_key.to_vec())),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the record and position template hashes (constants
+    /// RECORD_TPL, POSITION_TPL, D74), then the state.
+    pub fn ctor(&self, record_hash: [u8; 32], position_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(record_hash.to_vec()), ArtifactValue::Bytes(position_hash.to_vec())];
+        v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
+        v
+    }
+}
+
+/// Settlement record, role 0x08 (spec M5 A3.3, D65, D72). Value out_rem + refund x dep_rem
+/// + R.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordState {
+    /// The draw that created it.
+    pub round: i64,
+    /// The request template hash, copied by draw() from the vault state (D74).
+    pub request_tpl: [u8; 32],
+    /// 1 = refund mode (D70): every deposit settlement repays its deposit.
+    pub refund: u8,
+    pub dep_rem: i64,
+    pub mint_rem: i64,
+    pub wsh_rem: i64,
+    pub burn_rem: i64,
+    pub out_rem: i64,
+    pub funder_class: u8,
+    pub funder_key: [u8; 33],
+}
+
+impl RecordState {
+    pub fn set_funder(&mut self, p: &Payout) {
+        self.funder_class = p.class();
+        self.funder_key = p.key33();
+    }
+
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_RECORD)),
+            ("round", Int(self.round)),
+            ("request_tpl", Bytes(self.request_tpl.to_vec())),
+            ("refund", Byte(self.refund)),
+            ("dep_rem", Int(self.dep_rem)),
+            ("mint_rem", Int(self.mint_rem)),
+            ("wsh_rem", Int(self.wsh_rem)),
+            ("burn_rem", Int(self.burn_rem)),
+            ("out_rem", Int(self.out_rem)),
+            ("funder_class", Byte(self.funder_class)),
+            ("funder_key", Bytes(self.funder_key.to_vec())),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the state (the record has no constructor constant, D74).
+    pub fn ctor(&self) -> Vec<ArtifactValue> {
+        self.fields().into_iter().skip(1).map(|(_, v)| v).collect()
+    }
+}
+
+/// Share position, role 0x0B (spec M5 A3.4, D66, D67). Value R.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionState {
+    /// The round of the draw that minted it (0 at genesis); informational.
+    pub round: i64,
+    pub shares: i64,
+    pub owner_class: u8,
+    pub owner_key: [u8; 33],
+}
+
+impl PositionState {
+    pub fn new(round: i64, shares: i64, owner: &Payout) -> Self {
+        Self { round, shares, owner_class: owner.class(), owner_key: owner.key33() }
+    }
+
+    fn fields(&self) -> Vec<(&'static str, ArtifactValue)> {
+        use ArtifactValue::*;
+        vec![
+            ("role", Byte(ROLE_POSITION)),
+            ("round", Int(self.round)),
+            ("shares", Int(self.shares)),
+            ("owner_class", Byte(self.owner_class)),
+            ("owner_key", Bytes(self.owner_key.to_vec())),
+        ]
+    }
+
+    pub fn values(&self) -> BTreeMap<String, ArtifactValue> {
+        self.fields().into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    }
+
+    /// Constructor arguments: the vault template hash (constant VAULT_TPL, D74), then the
+    /// state.
+    pub fn ctor(&self, vault_hash: [u8; 32]) -> Vec<ArtifactValue> {
+        let mut v = vec![ArtifactValue::Bytes(vault_hash.to_vec())];
         v.extend(self.fields().into_iter().skip(1).map(|(_, v)| v));
         v
     }

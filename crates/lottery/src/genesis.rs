@@ -1,12 +1,12 @@
-//! Off-chain genesis builder (spec M2 D31, M3 D50): one transaction creates the round 1
-//! controller, the params, K shards, the vault (round 0) and the drawer (round 1) under a
-//! fresh KIP-20 covenant ID.
+//! Off-chain genesis builder (spec M2 D31, M3 D50, M5 D66): one transaction creates the
+//! round 1 controller, the params, K shards, the vault (round 0), the drawer (round 1) and
+//! the deployer's share position under a fresh KIP-20 covenant ID.
 //!
 //! Shape: inputs = deployer funding (P2PK, signed with `funding_sk`); outputs 0 controller,
-//! 1 params, 2 + i shard i, k + 2 vault, k + 3 drawer, then optional change. The vault and
-//! drawer are appended after the shards so the M2 indices are kept. One
-//! `GenesisCovenantGroup` authorized by funding input 0 covers outputs 0..=k+3, so the
-//! covenant ID is
+//! 1 params, 2 + i shard i, k + 2 vault, k + 3 drawer, k + 4 deployer position (spec M5
+//! A9), then optional change. The vault, drawer and position are appended after the shards
+//! so the M2 and M3 indices are kept. One `GenesisCovenantGroup` authorized by funding
+//! input 0 covers outputs 0..=k+4, so the covenant ID is
 //! H(outpoint of input 0, index/value/script of each of those outputs)
 //! (rusty-kaspa v2.1.0 `consensus/core/src/hashing/covenant_id.rs:16-31`,
 //! `consensus/core/src/tx.rs:335-385`). No covenant script runs at genesis: the deployer
@@ -28,8 +28,12 @@ use kaspa_consensus_core::tx::GenesisCovenantGroup;
 
 use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, spk_of};
 use crate::close::{CloseCase, z18};
-use crate::game::{BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, S_F_CAP, S_R_CAP, TOTAL_MAX, muldiv};
-use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, ShardState, VaultState};
+use crate::game::{
+    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, SHARE_UNIT, S_F_CAP, S_R_CAP,
+    TOTAL_MAX, muldiv,
+};
+use crate::params::xonly;
+use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, Payout, PositionState, ShardState, VaultState};
 
 /// Spec M2 A3 range bounds that have no named constant elsewhere (as in `controller.sil`).
 const PRICE_MAX: i64 = 100_000_000_000;
@@ -56,11 +60,16 @@ pub struct GenesisCase {
     pub pot: u64,
     pub params: ParamsState,
     pub shards: Vec<ShardState>,
-    /// The house vault (D50): round 0, total_assets = V0 = controller v_rec, total_shares = 0,
-    /// pending fields 0, liability = L(1). Value total_assets + pend_dep + R.
+    /// The house vault (D50, D66): round 0, total_assets = V0 = controller v_rec,
+    /// total_shares = S0 = floor(V0 / SHARE_UNIT), pending fields 0, liability = L(1), and
+    /// the record, request and position template hashes (D74). Value total_assets +
+    /// pend_dep + R.
     pub vault: VaultState,
     /// The drawer (D37, D49): round 1, value R.
     pub drawer: DrawerState,
+    /// The deployer's share position (D66, spec M5 A9): round 0, S0 shares, owned by a D11
+    /// payout script (the funding key's Schnorr P2PK by default). Value R.
+    pub position: PositionState,
     /// Target network; only testnet and devnet are accepted (D43).
     pub network: NetworkType,
     /// Funding inputs: outpoint (e.g. from a `Ledger`) and entry.
@@ -81,14 +90,19 @@ impl GenesisCase {
     pub fn new_with(k: usize, funding: Vec<(TransactionOutpoint, UtxoEntry)>, t: &Templates) -> Self {
         let c = CloseCase::new_with(k, t);
         let controller = ControllerState { j_boost: 0, ..c.controller };
+        let s0 = controller.v_rec / SHARE_UNIT;
         let vault = VaultState {
             round: controller.round - 1,
             total_assets: controller.v_rec,
-            total_shares: 0,
+            total_shares: s0,
             pend_dep: 0,
             pend_wsh: 0,
             liability: controller.liability,
+            record_tpl: t.record.hash,
+            request_tpl: t.request.hash,
+            position_tpl: t.position.hash,
         };
+        let position = PositionState::new(0, s0, &Payout::Schnorr(xonly(&FUNDING_SK)));
         let drawer = DrawerState {
             round: controller.round,
             pool_tpl: t.pool.hash,
@@ -106,6 +120,7 @@ impl GenesisCase {
             shards: c.shards.into_iter().map(|s| s.state).collect(),
             vault,
             drawer,
+            position,
             network: NetworkType::Testnet,
             funding,
             change: true,
@@ -130,11 +145,25 @@ impl GenesisCase {
     pub fn drawer_output(&self) -> usize {
         self.k() + 3
     }
+    /// The deployer position (spec M5 A9: after the drawer).
+    pub fn position_output(&self) -> usize {
+        self.k() + 4
+    }
 
-    /// Set the initial vault V0 (total_assets and the controller's v_rec, D50).
+    /// Set the initial vault V0 (total_assets and the controller's v_rec, D50), and the
+    /// genesis share count S0 = floor(V0 / SHARE_UNIT) in the vault and the deployer
+    /// position (D66).
     pub fn set_vault(&mut self, v0: i64) {
         self.vault.total_assets = v0;
         self.controller.v_rec = v0;
+        self.vault.total_shares = v0 / SHARE_UNIT;
+        self.position.shares = v0 / SHARE_UNIT;
+    }
+
+    /// Set the owner of the deployer position (D66, D67).
+    pub fn set_owner(&mut self, owner: &Payout) {
+        self.position.owner_class = owner.class();
+        self.position.owner_key = owner.key33();
     }
 
     /// Set J(1) with J_boost(1) = 0, G2(1) = muldiv(J, g) and L(1) = J + G2 (m - 1), in the
@@ -264,9 +293,28 @@ impl GenesisCase {
         if v.round != c.round - 1 {
             return Err(format!("vault round {} != controller round - 1", v.round));
         }
-        range("vault total_assets", v.total_assets, 0, TOTAL_MAX)?;
-        if v.total_shares != 0 || v.pend_dep != 0 || v.pend_wsh != 0 {
-            return Err("vault: total_shares and pending fields must be 0 at genesis".into());
+        // D66 (spec M5 A9): V0 <= ASSETS_MAX and S0 = floor(V0 / SHARE_UNIT) >= 1.
+        range("vault total_assets", v.total_assets, SHARE_UNIT, ASSETS_MAX)?;
+        let s0 = v.total_assets / SHARE_UNIT;
+        if v.total_shares != s0 {
+            return Err(format!("vault total_shares {} != S0 = floor(V0 / SHARE_UNIT) = {s0} (D66)", v.total_shares));
+        }
+        if v.pend_dep != 0 || v.pend_wsh != 0 {
+            return Err("vault: pending fields must be 0 at genesis".into());
+        }
+        // D74: the vault's instance constants are the compiled templates (draw() reads
+        // record_tpl and request_tpl; the request entries bind to request_tpl and
+        // position_tpl), so a wrong value would make every request or record unusable.
+        if v.record_tpl != t.record.hash || v.request_tpl != t.request.hash || v.position_tpl != t.position.hash {
+            return Err("vault record_tpl / request_tpl / position_tpl do not match the templates (D74)".into());
+        }
+        // D66: the deployer position holds every genesis share.
+        let ps = &self.position;
+        if ps.round != 0 || ps.shares != v.total_shares {
+            return Err(format!("deployer position {{round {}, shares {}}} != {{0, S0 = {}}} (D66)", ps.round, ps.shares, v.total_shares));
+        }
+        if ps.owner_class > 2 || (ps.owner_class != 1 && ps.owner_key[32] != 0) {
+            return Err("deployer position owner is not a D11 standard script".into());
         }
         if v.liability != c.liability {
             return Err("vault liability != controller liability L(1)".into());
@@ -360,6 +408,7 @@ impl GenesisCase {
         }
         outputs.push(TransactionOutput::new(self.vault_value(), t.vault_spk(&self.vault)));
         outputs.push(TransactionOutput::new(self.reserve(), drawer_spk(&t, &self.drawer)));
+        outputs.push(TransactionOutput::new(self.reserve(), t.position_spk(&self.position)));
         let total_in: u64 = inputs.iter().map(|i| i.entry.amount).sum();
         let total_out: u64 = outputs.iter().map(|o| o.value).sum();
         let change = total_in.checked_sub(total_out + self.fee).expect("funding covers genesis");
@@ -368,7 +417,7 @@ impl GenesisCase {
         } else {
             assert_eq!(change, 0, "no-change genesis needs exact funding");
         }
-        let group = GenesisCovenantGroup::new(0, (0..(self.k() + 4) as u32).collect());
+        let group = GenesisCovenantGroup::new(0, (0..(self.k() + 5) as u32).collect());
         Built {
             templates: t,
             args: vec![],
@@ -462,7 +511,9 @@ mod tests {
             ("m_max > M_DRAW", |g| g.controller.m_max = M_DRAW + 1),
             ("v_rec != V0", |g| g.controller.v_rec -= 1),
             ("vault round", |g| g.vault.round = 1),
-            ("vault shares", |g| g.vault.total_shares = 1),
+            // M5 (D66): total_shares must be S0 = floor(V0 / SHARE_UNIT), no longer 0.
+            ("vault shares 0", |g| g.vault.total_shares = 0),
+            ("vault shares S0 + 1", |g| g.vault.total_shares += 1),
             ("vault pending", |g| g.vault.pend_dep = 1),
             ("vault liability", |g| g.vault.liability += 1),
             ("L(1) formula", |g| g.controller.liability += 1),
@@ -545,7 +596,8 @@ mod tests {
             g.controller.g2 = g2;
             g.controller.liability = g.controller.jackpot - g.controller.j_boost + g2 * (g.controller.m - 1);
             g.vault.liability = g.controller.liability;
-            g.set_vault(TOTAL_MAX);
+            // M5 (D66): V0 <= ASSETS_MAX = TOTAL_MAX - 1 (was TOTAL_MAX).
+            g.set_vault(ASSETS_MAX);
             if ok {
                 assert_eq!(g.validate(), Ok(()), "G2 = G2_MAX");
             } else {

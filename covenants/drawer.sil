@@ -14,7 +14,12 @@ pragma silverscript ^0.1.0;
 // hold the ticket hash as a constructor constant (the ticket commits to POOL_TPL).
 //
 // draw_test_seed() implements spec M3 A4 checks 1-25 and the A5 witness checks, in spec
-// order. Each check starts at a "// ==== check N" line, in order (the attribution
+// order, with the spec M5 A5 changes: the extended vault ranges (check 5), V' <= ASSETS_MAX
+// (check 14, user decision U-2), the aggregate conversion of the vault's pending totals at
+// the post-settlement price (blocks C1-C3 after check 17, D65, D69, D70), the settlement
+// record at output 3 + np iff anything was pending (checks 13, 20, 26) and vault' and
+// controller' after the conversions (checks 23, 24, D71). Each check starts at a
+// "// ==== check N" line, in order (the attribution
 // instrument in tests/common/m2.rs truncates the entry at these lines and closes the open
 // braces, so a marker must not sit inside an if/for body). `// mut:<ID>` tags mark the
 // requires the mutation tests remove one at a time.
@@ -62,6 +67,14 @@ contract Drawer(
     // A6 (user decision 2026-10-10): G2 <= TOTAL_MAX / 254 before n2 x G2, only when a
     // second-prize pool is created. 2^62 / 254 = 18,156,244,167,036,960.
     int constant G2_MAX = 18156244167036960;
+    // Spec M5 A2 (game.rs): virtual offset (D66), the price is (A + VA) / (S + VS); the
+    // smallest deposit (D70); SHARES_MAX = TOTAL_MAX - VS and ASSETS_MAX = TOTAL_MAX - VA,
+    // so S + VS <= 2^62 and V' + VA <= 2^62 (mulfrac's domain).
+    int constant VS = 1000;
+    int constant VA = 1;
+    int constant MIN_DEPOSIT = 100000000;
+    int constant SHARES_MAX = 4611686018427386904;
+    int constant ASSETS_MAX = 4611686018427387903;
 
     byte role = 0x0a;
     int round = init_round;
@@ -141,7 +154,7 @@ contract Drawer(
         byte[33] funder_key;
     }
 
-    // Vault state layout (spec M3 A3.2).
+    // Vault state layout (spec M3 A3.2, extended by spec M5 A3.1, D74).
     struct VaultState {
         byte role;
         int round;
@@ -150,6 +163,9 @@ contract Drawer(
         int pend_dep;
         int pend_wsh;
         int liability;
+        byte[32] record_tpl;
+        byte[32] request_tpl;
+        byte[32] position_tpl;
     }
 
     // Pool state layout (spec M3 A3.3, with ticket_tpl and reserve from spec M4 A3.3).
@@ -169,10 +185,57 @@ contract Drawer(
         byte[33] funder_key;
     }
 
+    // Settlement record state layout (spec M5 A3.3), for validateOutputStateWithTemplate
+    // (check 26).
+    struct RecordState {
+        byte role;
+        int round;
+        byte[32] request_tpl;
+        byte refund;
+        int dep_rem;
+        int mint_rem;
+        int wsh_rem;
+        int burn_rem;
+        int out_rem;
+        byte funder_class;
+        byte[33] funder_key;
+    }
+
     // floor(x * s / 10^4) without a wide intermediate (spec M2 A6). Callers guarantee
     // 0 <= x <= TOTAL_MAX and 0 <= s <= 10^4, so every step fits in 64 bits.
     function muldiv(int x, int s): int {
         return x / BP * s + (x % BP) * s / BP;
+    }
+
+    // mulfrac(a, r, c) = floor(a * r / c) (spec M5 A8, D73), the algorithm of
+    // game::mulfrac_steps: keep (Q, X) with prefix * r = Q * c + X and 0 <= X < c over the
+    // bits of a from bit 62 down (63 steps; `rest` holds the bits of a not yet taken, p the
+    // current bit's value). Callers guarantee 0 <= a <= 2^62 and 0 <= r < c <= 2^62 (checks
+    // 5, 14 and C2). Then every step stays below 2^63: X + X < 2c <= 2^63 and X + r < 2c, and
+    // Q <= floor(prefix * r / c) <= prefix <= a; rest < 2p after the first step.
+    function mulfrac(int a, int r, int c): int {
+        int q = 0;
+        int x = 0;
+        int rest = a;
+        int p = TOTAL_MAX;
+        for(bi, 0, 63, 63) {
+            q = q + q;
+            x = x + x;
+            if (x >= c) {
+                x = x - c;
+                q = q + 1;
+            }
+            if (rest >= p) {
+                rest = rest - p;
+                x = x + r;
+                if (x >= c) {
+                    x = x - c;
+                    q = q + 1;
+                }
+            }
+            p = p / 2;
+        }
+        return q;
     }
 
     // pass(x, y) of spec M3 A5 (game::JackpotRule::pass), for x, y >= 0, 0 <= eL, wL,
@@ -208,8 +271,11 @@ contract Drawer(
 
     // Spec M3 A4. Inputs: 0 drawer r, 1 marker r, 2 vault (r - 1), 3 controller r + 1,
     // 4..3+a absorbed pools, then 1..F_MAX caller funding (zero ID). Outputs: 0 drawer',
-    // 1 vault', 2 controller', 3.. new pools in tier order, fee (if paid), marker refund,
-    // pool refunds, caller output (last, zero ID).
+    // 1 vault', 2 controller', 3.. new pools in tier order, the settlement record at 3 + np
+    // iff pend_dep > 0 or pend_wsh > 0 (spec M5 A5), fee (if paid), marker refund, pool
+    // refunds, caller output (last, zero ID). Spec M5 arguments: wc (the C2 witness),
+    // record_prefix and record_suffix (the record template bytes, check 26; ignored when no
+    // record is written).
     entry draw_test_seed(
         byte[32] test_only_seed,
         byte[5] win5,
@@ -230,6 +296,9 @@ contract Drawer(
         byte[] pool_suffix,
         byte funder_class,
         byte[33] funder_key,
+        int wc,
+        byte[] record_prefix,
+        byte[] record_suffix,
         // The maximum creation DAA score over all inputs (check 19).
         int own_daa
     ) {
@@ -373,18 +442,18 @@ contract Drawer(
             require(tx.inputs[1].value == mkHeld + mk.j_boost + ctrl.reserve); // mut:D4_value
         }
 
-        // ==== check 5: vault (r - 1) under vault_tpl; A3.2 ranges; value
+        // ==== check 5: vault (r - 1) under vault_tpl; spec M5 A3.1 ranges; value
         VaultState vt = readInputStateWithTemplate(2, vault_pl, vault_sl, vault_tpl);
         require(unsigned(vt.role) == 6); // mut:D5_role
         require(vt.round == round - 1); // mut:D5_round
         require(vt.total_assets >= 0);
-        require(vt.total_assets <= TOTAL_MAX);
+        require(vt.total_assets <= ASSETS_MAX); // mut:M5D5_assets
         require(vt.total_shares >= 0);
-        require(vt.total_shares <= TOTAL_MAX);
+        require(vt.total_shares <= SHARES_MAX); // mut:M5D5_shares
         require(vt.pend_dep >= 0);
         require(vt.pend_dep <= TOTAL_MAX);
         require(vt.pend_wsh >= 0);
-        require(vt.pend_wsh <= TOTAL_MAX);
+        require(vt.pend_wsh <= vt.total_shares); // mut:M5D5_wsh
         require(vt.liability >= 0);
         require(vt.liability <= TOTAL_MAX);
         require(vt.pend_dep <= TOTAL_MAX - vt.total_assets);
@@ -523,15 +592,20 @@ contract Drawer(
             }
         }
 
-        // ==== check 13: covenant outputs 0..2+np, all authorized by input 0 (R2)
+        // ==== check 13: covenant outputs 0..2+np+rec, all authorized by input 0 (R2); the
+        // record, iff rec = (pend_dep > 0 or pend_wsh > 0), at 3 + np (spec M5 A5)
+        if (vt.pend_dep > 0 || vt.pend_wsh > 0) {
+            nCov = nCov + 1; // mut:M5D13_rec
+        }
         require(OpAuthOutputCount(0) == nCov); // mut:D13
-        for(ai, 0, nCov, 10) {
+        for(ai, 0, nCov, 11) {
             require(OpAuthOutputIdx(0, ai) == ai); // mut:D13
         }
         require(OpCovOutputCount(cov) == nCov); // mut:D13
 
-        // ==== check 14: vault settlement (design 5.4): V' = V + H - J_house [jp] - n2 G2 [sp]
-        require(hAmt <= TOTAL_MAX - vt.total_assets);
+        // ==== check 14: vault settlement (design 5.4): V' = V + H - J_house [jp] - n2 G2 [sp];
+        // V + H <= ASSETS_MAX, so V' <= ASSETS_MAX (spec M5 A5 ranges, user decision U-2)
+        require(hAmt <= ASSETS_MAX - vt.total_assets); // mut:M5D14_assets
         int vP = vt.total_assets + hAmt;
         if (jp) {
             // J_house = J - J_boost >= 0 (check 4).
@@ -617,6 +691,84 @@ contract Drawer(
             lNext = x2 + g2Next * dm;
         }
 
+        // Spec M5 A5: N = S + VS, M = V' + VA (<= 2^62 by checks 5 and 14), D = pend_dep,
+        // W = pend_wsh (<= S, check 5), L' = lNext (check 17, from V' before any conversion).
+        // mintC, refund, outC and tA2 (vault' total_assets) live to checks 20-26.
+        int mintC = 0;
+        bool refund = false;
+        int outC = 0;
+        int tA2 = 0;
+
+        // ==== check C1: deposits at the post-settlement price (D70): q = N / M, r = N % M;
+        // ok = (q = 0 or D <= (SHARES_MAX - S) / q); mint = D q + mulfrac(D, r, M); ok and
+        // mint <= SHARES_MAX - S and mint >= ceil(D / MIN_DEPOSIT); else refund (D > 0). No
+        // require: deposits that cannot convert take the refund branch (A8).
+        {
+            int nS = vt.total_shares + VS;
+            int mA = vP + VA;
+            bool ok = false;
+            if (vt.pend_dep > 0) {
+                int q = nS / mA;
+                // room >= 0 (check 5); D * q <= room once D <= room / q.
+                int room = SHARES_MAX - vt.total_shares;
+                bool pre = true;
+                if (q > 0) {
+                    pre = vt.pend_dep <= room / q;
+                }
+                if (pre) {
+                    int whole = vt.pend_dep * q;
+                    // 0 <= D <= 2^62 (check 5), 0 <= r < M <= 2^62: mulfrac's domain; frac <= D.
+                    int frac = mulfrac(vt.pend_dep, nS % mA, mA);
+                    // whole + frac <= room is decided before the sum is formed.
+                    if (frac <= room - whole) {
+                        int mint = whole + frac;
+                        // D + MIN_DEPOSIT - 1 <= 2^62 + 10^8 (check 5).
+                        if (mint >= (vt.pend_dep + MIN_DEPOSIT - 1) / MIN_DEPOSIT) {
+                            ok = true;
+                            mintC = mint;
+                        }
+                    }
+                }
+            }
+            refund = vt.pend_dep > 0 && !ok;
+        }
+
+        // ==== check C2: withdrawals (D69): out(w) = mulfrac(M, w, N); slack = V' + D_c - L';
+        // 0 <= wc <= W, out(wc) <= slack, and wc = W or out(wc + 1) > slack
+        {
+            // V' + D <= TOTAL_MAX (was check 20's guard), so V' + D_c and every value sum
+            // below fit; L' <= V' + D_c before the subtraction (A8).
+            require(vt.pend_dep <= TOTAL_MAX - vP); // mut:M5C2_sum
+            int tot = vP;
+            if (!refund) {
+                tot = vP + vt.pend_dep;
+            }
+            require(lNext <= tot); // mut:M5C2_slack
+            int slack = tot - lNext;
+            int nS = vt.total_shares + VS;
+            int mA = vP + VA;
+            require(wc >= 0); // mut:M5C2_range
+            require(wc <= vt.pend_wsh); // mut:M5C2_range
+            // wc <= W <= S < N and M <= 2^62: mulfrac's domain; outC <= M.
+            outC = mulfrac(mA, wc, nS);
+            require(outC <= slack); // mut:M5C2_fits
+            if (wc < vt.pend_wsh) {
+                // wc + 1 <= S < N.
+                require(mulfrac(mA, wc + 1, nS) > slack); // mut:M5C2_max
+            }
+        }
+
+        // ==== check C3: results: total_assets' = V' + D_c - out_c (>= L' by C2), also v_rec
+        // (D71); total_shares' = S + mint_c - wc, pend_dep' = 0, pend_wsh' = W - wc (check
+        // 23); the record {refund, D, mint_c, W, wc, out_c} (checks 20, 26). No require.
+        {
+            tA2 = vP - outC;
+            if (!refund) {
+                // outC <= slack = V' + D - L' (C2): >= L' >= 0 and <= TOTAL_MAX.
+                tA2 = vP + vt.pend_dep - outC;
+            }
+        }
+
         // ==== check 18: absorbed pools: genuine, of an earlier round, past their deadline
         // The refund scripts (check 21) are kept as one fixed 32-byte hash per pool.
         byte[] refundHashes = leaves.slice(0, 0);
@@ -662,8 +814,8 @@ contract Drawer(
         int nOut = mRefund + 1 + a + 1;
         require(tx.outputs.length == nOut); // mut:D20_count
         require(tx.outputs[0].value == ctrl.reserve); // mut:D20_drawer
-        require(vP <= TOTAL_MAX - vt.pend_dep);
-        require(tx.outputs[1].value == vP + vt.pend_dep + ctrl.reserve); // mut:D20_vault
+        // Spec M5 A5: vault' holds total_assets' + R (pend_dep' = 0); tA2 <= TOTAL_MAX (C3).
+        require(tx.outputs[1].value == tA2 + ctrl.reserve); // mut:D20_vault
         require(aNext <= TOTAL_MAX - oP);
         require(tx.outputs[2].value == oP + aNext + ctrl.reserve); // mut:D20_ctrl
         // Pool amounts are <= TOTAL_MAX (J, n2 x G2 <= 49 x G2_MAX, B_t <= S) and R <=
@@ -684,6 +836,16 @@ contract Drawer(
                 vo = vo + 1;
             }
         }
+        }
+        // The record at 3 + np = nCov - 1 (check 13): out_c + (D - D_c) + R (spec M5 A5 C3).
+        // out_c + D <= V' + D <= TOTAL_MAX when refund (D_c = 0, C2).
+        if (vt.pend_dep > 0 || vt.pend_wsh > 0) {
+            int dRef = 0;
+            if (refund) {
+                dRef = vt.pend_dep;
+            }
+            require(dRef <= TOTAL_MAX - outC);
+            require(tx.outputs[nCov - 1].value == outC + dRef + ctrl.reserve); // mut:M5D20_record
         }
         if (paid) {
             require(tx.outputs[nCov].value == tF); // mut:D20_fee
@@ -727,18 +889,24 @@ contract Drawer(
             draw_window: draw_window
         });
 
-        // ==== check 23: vault' (round r, V', L'; shares and pending unchanged)
+        // ==== check 23: vault' (spec M5 A5 C3: round r, total_assets', S + mint_c - wc,
+        // pend_dep' = 0, W - wc, L'; templates unchanged). S + mint_c <= SHARES_MAX (C1) and
+        // wc <= W <= S (C2, check 5).
         validateOutputStateWithInputTemplate(1, VaultState {
             role: vt.role,
             round: round,
-            total_assets: vP,
-            total_shares: vt.total_shares,
-            pend_dep: vt.pend_dep,
-            pend_wsh: vt.pend_wsh,
-            liability: lNext
+            total_assets: tA2,
+            total_shares: vt.total_shares + mintC - wc,
+            pend_dep: 0,
+            pend_wsh: vt.pend_wsh - wc,
+            liability: lNext,
+            record_tpl: vt.record_tpl,
+            request_tpl: vt.request_tpl,
+            position_tpl: vt.position_tpl
         }, 2, vault_pl, vault_sl, vault_tpl);
 
-        // ==== check 24: controller' (J', J_boost', G2', L', V_rec = V', A', drawn = 1)
+        // ==== check 24: controller' (J', J_boost', G2', L' from V'; V_rec = total_assets'
+        // after the conversions, D71; A', drawn = 1)
         validateOutputStateWithInputTemplate(2, ControllerState {
             role: ctrl.role,
             round: ctrl.round,
@@ -755,7 +923,7 @@ contract Drawer(
             j_boost: y,
             g2: g2Next,
             liability: lNext,
-            v_rec: vP,
+            v_rec: tA2,
             acc: aNext,
             drawn: 0x01,
             shard_tpl: ctrl.shard_tpl,
@@ -846,6 +1014,29 @@ contract Drawer(
                 }, pool_prefix, pool_suffix, pool_tpl);
                 po = po + 1;
             }
+        }
+
+        // ==== check 26: the settlement record at po = 3 + np under vt.record_tpl iff anything
+        // was pending (spec M5 A5 C3, D65): {round r, request_tpl, refund, D, mint_c, W, wc,
+        // out_c, funder}; funder_class and the key padding are checked by check 25
+        if (vt.pend_dep > 0 || vt.pend_wsh > 0) {
+            int rf = 0;
+            if (refund) {
+                rf = 1;
+            }
+            validateOutputStateWithTemplate(po, RecordState {
+                role: 0x08,
+                round: round,
+                request_tpl: vt.request_tpl,
+                refund: rf as byte,
+                dep_rem: vt.pend_dep,
+                mint_rem: mintC,
+                wsh_rem: vt.pend_wsh,
+                burn_rem: wc,
+                out_rem: outC,
+                funder_class: funder_class,
+                funder_key: funder_key
+            }, record_prefix, record_suffix, vt.record_tpl);
         }
     }
 }

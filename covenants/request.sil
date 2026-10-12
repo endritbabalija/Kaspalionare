@@ -1,0 +1,460 @@
+pragma silverscript ^0.1.0;
+
+// Vault request (role 0x07), spec M5 A3.2 (design 5.4; D67, D68, D70, D72, D77). M5 Stage 5:
+// settle() (spec M5 A6.1) and refresh() (D76).
+//
+// Value: R + accrued (accrued = 0 for deposits). Created by Vault.request_deposit() or
+// Vault.request_withdraw() (spec M5 A4) with round = the vault's round + 1 (the target
+// draw), or as request' of a PAY or ACCRUE withdrawal settlement (round + 1). kind 0
+// deposit (amount = D sompi), 1 withdrawal (amount = shares).
+//
+// Route of trust (D74): RECORD_TPL (recordTemplateHash) and POSITION_TPL
+// (positionTemplateHash) are constructor constants, so the request is compiled after the
+// record and the position. settle() reads the record of its own draw under RECORD_TPL and
+// binds a minted position to POSITION_TPL; the record's request_leg() checks that this
+// request is the leader under the record's request_tpl (state written by draw()).
+//
+// Template bytes (handoff S2-1 / U-1): validateOutputStateWithTemplate takes the template
+// prefix and suffix (refs/silverscript/docs/TUTORIAL.md:1218-1229), so settle() takes the
+// position template bytes as arguments; the binding is by POSITION_TPL.
+//
+// Entries:
+//   settle(): spec M5 A6.1 (leader; the record at input 1 runs Record.request_leg());
+//   refresh(): byte-identical successor after D_IDLE idle (spec M5 A7, M4 A6, D59, D76).
+//
+// Each check of an entry starts at a "// ==== check <label>" line (labels S1..S13, A7.1..
+// A7.7, handoff S2-6), in spec order, outside any if/for body. `// mut:M5<ID>` tags mark the
+// requires the mutation tests remove one at a time (handoff S2-8).
+contract Request(
+    byte[32] recordTemplateHash,
+    byte[32] positionTemplateHash,
+    int init_round,
+    byte init_kind,
+    int init_amount,
+    byte init_owner_class,
+    byte[33] init_owner_key
+) {
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+    // Spec M5 A2: TOTAL_MAX = 2^62; SHARES_MAX = TOTAL_MAX - VS (VS = 1,000); funding inputs;
+    // reserve bound; minimum deposit (1 KAS); minimum partial payout (D70, as D57).
+    int constant TOTAL_MAX = 4611686018427387904;
+    int constant SHARES_MAX = 4611686018427386904;
+    int constant F_MAX = 8;
+    int constant RESERVE_MAX = 10000000000;
+    int constant MIN_DEPOSIT = 100000000;
+    int constant P_MIN = 5000000;
+    // Spec M4 A2/A6 (D59, D76): refresh idle time (24 h at 10 BPS), DAA bound
+    // (= LOCK_TIME_THRESHOLD, rusty-kaspa v2.1.0 crypto/txscript/src/lib.rs:84).
+    int constant D_IDLE = 864000;
+    int constant DAA_MAX = 500000000000;
+
+    // Settlement record state layout (spec M5 A3.3), for readInputStateWithTemplate and
+    // validateOutputStateWithInputTemplate.
+    struct RecordState {
+        byte role;
+        int round;
+        byte[32] request_tpl;
+        byte refund;
+        int dep_rem;
+        int mint_rem;
+        int wsh_rem;
+        int burn_rem;
+        int out_rem;
+        byte funder_class;
+        byte[33] funder_key;
+    }
+
+    // Share position state layout (spec M5 A3.4), for validateOutputStateWithTemplate.
+    struct PositionState {
+        byte role;
+        int round;
+        int shares;
+        byte owner_class;
+        byte[33] owner_key;
+    }
+
+    byte role = 0x07;
+    int round = init_round;
+    byte kind = init_kind;
+    int amount = init_amount;
+    byte owner_class = init_owner_class;
+    byte[33] owner_key = init_owner_key;
+
+    // Version-0 scriptPubKey bytes (2-byte version, then the script) of a D11 payout class
+    // and 33-byte key, as state::Payout::spk (rusty-kaspa v2.1.0
+    // crypto/txscript/src/standard.rs:19-37): 0 P2PK Schnorr, 1 P2PK ECDSA, 2 P2SH. The
+    // caller has checked c <= 2. Same code as Drawer.payoutSpk, Ticket.payoutSpk and
+    // Vault.payoutSpk.
+    function payoutSpk(int c, byte[33] key): byte[] {
+        byte[] s = byte[](0x0000aa20) + key.slice(0, 32) + byte[](0x87);
+        if (c == 0) {
+            s = byte[](0x000020) + key.slice(0, 32) + byte[](0xac);
+        }
+        if (c == 1) {
+            s = byte[](0x000021) + key + byte[](0xab);
+        }
+        return s;
+    }
+
+    // mulfrac(a, r, c) = floor(a * r / c) (spec M5 A8, D73): the same code as
+    // Drawer.mulfrac (game::mulfrac_steps). Keep (Q, X) with prefix * r = Q * c + X and
+    // 0 <= X < c over the bits of a from bit 62 down. Callers guarantee 0 <= a <= 2^62 and
+    // 0 <= r < c <= 2^62 (checks S3, S4). Then every step stays below 2^63: X + X < 2c <=
+    // 2^63 and X + r < 2c, and Q <= floor(prefix * r / c) <= prefix <= a.
+    function mulfrac(int a, int r, int c): int {
+        int q = 0;
+        int x = 0;
+        int rest = a;
+        int p = TOTAL_MAX;
+        for(bi, 0, 63, 63) {
+            q = q + q;
+            x = x + x;
+            if (x >= c) {
+                x = x - c;
+                q = q + 1;
+            }
+            if (rest >= p) {
+                rest = rest - p;
+                x = x + r;
+                if (x >= c) {
+                    x = x - c;
+                    q = q + 1;
+                }
+            }
+            p = p / 2;
+        }
+        return q;
+    }
+
+    // Spec M5 A6.1 (D72). Inputs: 0 this request, 1 the record of its draw
+    // (Record.request_leg), 2..1+n funding (zero ID, 1 <= n <= F_MAX). Outputs, in order:
+    // record' (unless drained); the position (deposit-convert) or request' (PAY, ACCRUE);
+    // the payout to the owner (refund, FINAL, PAY); the record's R to its funder (drained);
+    // then at most one change output. Anyone may settle (D77): every payment goes to the
+    // request's owner or the record's funder.
+    entry settle(int rec_pl, int rec_sl, byte[] pos_prefix, byte[] pos_suffix) {
+        // ==== check S1: leader at input 0; own A3.2 ranges and value (U-3); argument ranges
+        require(this.activeInputIndex == 0); // mut:M5S1_active
+        byte[32] cov = OpInputCovenantId(0);
+        require(unsigned(role) == 7); // mut:M5S1_role
+        require(round >= 1); // mut:M5S1_round
+        require(round < TOTAL_MAX); // mut:M5S1_round
+        int kd = unsigned(kind);
+        require(kd <= 1); // mut:M5S1_kind
+        int s = amount;
+        bool isDep = kd == 0;
+        int amin = 1;
+        int amax = SHARES_MAX;
+        if (isDep) {
+            amin = MIN_DEPOSIT;
+            amax = TOTAL_MAX;
+        }
+        require(s >= amin); // mut:M5S1_amount
+        require(s <= amax); // mut:M5S1_amount
+        int oc = unsigned(owner_class);
+        require(oc <= 2); // mut:M5S1_class
+        if (oc != 1) {
+            require(owner_key.slice(32, 33) == byte[](0x00)); // mut:M5S1_pad
+        }
+        int v0 = tx.inputs[0].value;
+        require(v0 >= 0); // mut:M5S1_value
+        require(v0 <= TOTAL_MAX); // mut:M5S1_value
+        require(rec_pl >= 0); // mut:M5S1_tpl
+        require(rec_pl <= SCRIPT_MAX); // mut:M5S1_tpl
+        require(rec_sl >= 0); // mut:M5S1_tpl
+        require(rec_sl <= SCRIPT_MAX); // mut:M5S1_tpl
+
+        // ==== check S2: inputs (R2): request and record under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 2); // mut:M5S2_count
+        require(OpInputCovenantId(1) == cov); // mut:M5S2_rec
+        require(tx.inputs.length >= 3); // mut:M5S2_fund
+        require(tx.inputs.length <= 2 + F_MAX); // mut:M5S2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 2, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:M5S2_zero
+            }
+        }
+
+        // ==== check S3: the record under RECORD_TPL; A3.3 ranges; value; the request's draw
+        RecordState rc = readInputStateWithTemplate(1, rec_pl, rec_sl, recordTemplateHash);
+        require(unsigned(rc.role) == 8); // mut:M5S3_role
+        require(rc.round >= 1); // mut:M5S3_round
+        require(rc.round < TOTAL_MAX); // mut:M5S3_round
+        int rf = unsigned(rc.refund);
+        require(rf <= 1); // mut:M5S3_refund
+        require(rc.dep_rem >= 0); // mut:M5S3_dep
+        require(rc.dep_rem <= TOTAL_MAX); // mut:M5S3_dep
+        require(rc.mint_rem >= 0); // mut:M5S3_mint
+        require(rc.mint_rem <= SHARES_MAX); // mut:M5S3_mint
+        require(rc.wsh_rem >= 0); // mut:M5S3_wsh
+        require(rc.wsh_rem <= TOTAL_MAX); // mut:M5S3_wsh
+        require(rc.burn_rem >= 0); // mut:M5S3_burn
+        require(rc.burn_rem <= rc.wsh_rem); // mut:M5S3_burn
+        require(rc.out_rem >= 0); // mut:M5S3_out
+        require(rc.out_rem <= TOTAL_MAX); // mut:M5S3_out
+        bool refundMode = rf == 1;
+        if (refundMode) {
+            require(rc.mint_rem == 0); // mut:M5S3_refmint
+        }
+        int fc = unsigned(rc.funder_class);
+        require(fc <= 2); // mut:M5S3_funder
+        // in1 = out_rem + refund x dep_rem + R_rc, each subtraction after its comparison
+        // (OpTxInputAmount pushes a value in [0, 2^63) or fails, rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1100-1107).
+        int held = 0;
+        if (refundMode) {
+            held = rc.dep_rem;
+        }
+        int v1 = tx.inputs[1].value;
+        require(v1 >= rc.out_rem); // mut:M5S3_value
+        require(v1 - rc.out_rem >= held); // mut:M5S3_value
+        int rrc = v1 - rc.out_rem - held;
+        require(rrc <= RESERVE_MAX); // mut:M5S3_value
+        require(rc.round == round); // mut:M5S3_draw
+
+        // ==== check S4: amounts (D72): this request's part of the remaining side, rounded down; the last settler takes the rest
+        // Side: deposits (mint_rem over dep_rem) or withdrawals (burn_rem over wsh_rem).
+        // s <= the side's remainder; part = the side's remainder of shares if s takes the
+        // whole side, else mulfrac(remainder, s, side) (s < side <= TOTAL_MAX, remainder <=
+        // TOTAL_MAX by S3). A refund-mode record has mint_rem = 0 (S3), so part = 0 there.
+        int a1 = rc.burn_rem;
+        int c1 = rc.wsh_rem;
+        if (isDep) {
+            a1 = rc.mint_rem;
+            c1 = rc.dep_rem;
+        }
+        require(s <= c1); // mut:M5S4_rem
+        int part = a1;
+        if (s < c1) {
+            part = mulfrac(a1, s, c1);
+        }
+        int sh = 0;
+        int conv = 0;
+        int pay = 0;
+        int left = 0;
+        if (isDep) {
+            if (!refundMode) {
+                sh = part;
+                require(sh >= 1); // mut:M5S4_sh
+            }
+        } else {
+            // conv <= burn_rem <= wsh_rem, and conv <= s (part <= a1 * s / c1, a1 <= c1).
+            // pay: 0 if burn_rem = 0, out_rem if conv = burn_rem, else mulfrac(out_rem,
+            // conv, burn_rem) with conv < burn_rem (S1-8 order).
+            conv = part;
+            if (rc.burn_rem > 0) {
+                pay = rc.out_rem;
+                if (conv < rc.burn_rem) {
+                    pay = mulfrac(rc.out_rem, conv, rc.burn_rem);
+                }
+            }
+            left = s - conv;
+        }
+
+        // ==== check S5: record' remainders (each part <= its remainder); drained = both sides empty
+        int depN = rc.dep_rem;
+        int mintN = rc.mint_rem;
+        int wshN = rc.wsh_rem;
+        int burnN = rc.burn_rem;
+        int outN = rc.out_rem;
+        if (isDep) {
+            depN = rc.dep_rem - s;
+            mintN = rc.mint_rem - sh;
+        } else {
+            wshN = rc.wsh_rem - s;
+            burnN = rc.burn_rem - conv;
+            outN = rc.out_rem - pay;
+        }
+        bool drained = depN == 0 && wshN == 0;
+
+        // ==== check S6: mode: deposit-convert, deposit-refund, FINAL, PAY or ACCRUE
+        bool isConvert = isDep && !refundMode;
+        bool isRefund = isDep && refundMode;
+        bool isFinal = !isDep && left == 0;
+        bool isPay = !isDep && left > 0 && pay >= P_MIN;
+        bool isAccrue = !isDep && left > 0 && pay < P_MIN;
+
+        // ==== check S7: covenant outputs (R2): record' unless drained, then the position or request', all authorized by input 0
+        bool cov2 = isConvert || isPay || isAccrue;
+        int nCov = 0;
+        if (!drained) {
+            nCov = 1;
+        }
+        if (cov2) {
+            nCov = nCov + 1;
+        }
+        require(OpAuthOutputCount(0) == nCov); // mut:M5S7_auth
+        for(ai, 0, nCov, 2) {
+            require(OpAuthOutputIdx(0, ai) == ai); // mut:M5S7_idx
+        }
+        require(OpCovOutputCount(cov) == nCov); // mut:M5S7_cov
+
+        // ==== check S8: output count (R7): nCov + payout + funder refund (drained) + at most one change; outputs >= nCov have the zero ID
+        bool hasPayout = isRefund || isFinal || isPay;
+        int base = nCov;
+        if (hasPayout) {
+            base = base + 1;
+        }
+        if (drained) {
+            base = base + 1;
+        }
+        require(tx.outputs.length >= base); // mut:M5S8_count
+        require(tx.outputs.length <= base + 1); // mut:M5S8_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, nCov, tx.outputs.length, 3) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:M5S8_zero
+            }
+        }
+
+        // ==== check S9: values: record' = out' + refund x dep' + R_rc; position/request' = in0 (+ pay, ACCRUE); payout; funder refund R_rc
+        // c2: the position or request' index; po: the payout; ro: the funder refund.
+        int c2 = 0;
+        if (!drained) {
+            c2 = 1;
+        }
+        int po = nCov;
+        int ro = nCov;
+        if (hasPayout) {
+            ro = nCov + 1;
+        }
+        if (!drained) {
+            // outN <= out_rem and heldN <= held, so the sum is <= v1 < 2^63.
+            int heldN = 0;
+            if (refundMode) {
+                heldN = depN;
+            }
+            require(tx.outputs[0].value == outN + heldN + rrc); // mut:M5S9_record
+        }
+        if (isConvert || isPay) {
+            require(tx.outputs[c2].value == v0); // mut:M5S9_cov2
+        }
+        if (isAccrue) {
+            require(pay <= TOTAL_MAX - v0); // mut:M5S9_accrue
+            require(tx.outputs[c2].value == v0 + pay); // mut:M5S9_accrue
+        }
+        if (isRefund) {
+            require(s <= TOTAL_MAX - v0); // mut:M5S9_refund
+            require(tx.outputs[po].value == s + v0); // mut:M5S9_refund
+        }
+        if (isFinal) {
+            require(pay <= TOTAL_MAX - v0); // mut:M5S9_final
+            require(tx.outputs[po].value == pay + v0); // mut:M5S9_final
+        }
+        if (isPay) {
+            require(tx.outputs[po].value == pay); // mut:M5S9_pay
+        }
+        if (drained) {
+            require(tx.outputs[ro].value == rrc); // mut:M5S9_funder
+        }
+
+        // ==== check S10: scripts (D11): the payout to the owner; the funder refund to the record's funder
+        if (hasPayout) {
+            require(tx.outputs[po].scriptPubKey == payoutSpk(oc, owner_key)); // mut:M5S10_owner
+        }
+        if (drained) {
+            require(tx.outputs[ro].scriptPubKey == payoutSpk(fc, rc.funder_key)); // mut:M5S10_funder
+        }
+
+        // ==== check S11: record' (not drained): the new remainders, every other field unchanged, under input 1's template
+        if (!drained) {
+            validateOutputStateWithInputTemplate(0, RecordState {
+                role: rc.role,
+                round: rc.round,
+                request_tpl: rc.request_tpl,
+                refund: rc.refund,
+                dep_rem: depN,
+                mint_rem: mintN,
+                wsh_rem: wshN,
+                burn_rem: burnN,
+                out_rem: outN,
+                funder_class: rc.funder_class,
+                funder_key: rc.funder_key
+            }, 1, rec_pl, rec_sl, recordTemplateHash);
+        }
+
+        // ==== check S12: deposit-convert: the position {record round, sh, owner} under POSITION_TPL
+        if (isConvert) {
+            validateOutputStateWithTemplate(c2, PositionState {
+                role: 0x0B,
+                round: rc.round,
+                shares: sh,
+                owner_class: owner_class,
+                owner_key: owner_key
+            }, pos_prefix, pos_suffix, positionTemplateHash);
+        }
+
+        // ==== check S13: PAY or ACCRUE: request' {round + 1, withdrawal, left, owner} under the own template
+        if (isPay || isAccrue) {
+            validateOutputState(c2, State {
+                role: role,
+                round: round + 1,
+                kind: kind,
+                amount: left,
+                owner_class: owner_class,
+                owner_key: owner_key
+            });
+        }
+    }
+
+    // Spec M5 A7 (= M4 A6, D59, D76). Inputs: 0 this request, 1..n funding (zero ID,
+    // 1 <= n <= F_MAX). Outputs: 0 the byte-identical successor (same value), then at most
+    // one change output.
+    entry refresh() {
+        // ==== check A7.1: leader at input 0
+        require(this.activeInputIndex == 0); // mut:M5RQ_RF1
+        byte[32] cov = OpInputCovenantId(0);
+
+        // ==== check A7.2: inputs (R2): this object alone under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 1); // mut:M5RQ_RF2_count
+        require(tx.inputs.length >= 2); // mut:M5RQ_RF2_fund
+        require(tx.inputs.length <= 1 + F_MAX); // mut:M5RQ_RF2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 1, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:M5RQ_RF2_zero
+            }
+        }
+
+        // ==== check A7.3: idle for D_IDLE since creation; creation >= 0 rejects an unaccepted parent
+        // OpTxInputDaaScore pushes the UTXO's block_daa_score as i64 (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1124-1130); an unaccepted parent has
+        // UNACCEPTED_DAA_SCORE = u64::MAX (consensus/core/src/constants.rs:51), pushed as -1
+        // (DECISIONS fact row O-S4-4). creation < DAA_MAX, so creation + D_IDLE cannot overflow.
+        int creation = OpTxInputDaaScore(0);
+        require(creation >= 0); // mut:M5RQ_RF3_creation
+        require(creation < DAA_MAX); // mut:M5RQ_RF3_creation
+        require(tx.daa >= creation + D_IDLE); // mut:M5RQ_RF3_idle
+
+        // ==== check A7.4: one covenant output (the successor) at 0, authorized by input 0
+        require(OpAuthOutputCount(0) == 1); // mut:M5RQ_RF4_auth
+        require(OpAuthOutputIdx(0, 0) == 0); // mut:M5RQ_RF4_idx
+        require(OpCovOutputCount(cov) == 1); // mut:M5RQ_RF4_cov
+
+        // ==== check A7.5: one or two outputs; output 1, if present, has the zero ID
+        require(tx.outputs.length >= 1); // mut:M5RQ_RF5_count
+        require(tx.outputs.length <= 2); // mut:M5RQ_RF5_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 1, tx.outputs.length, 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:M5RQ_RF5_zero
+            }
+        }
+
+        // ==== check A7.6: same value
+        require(tx.outputs[0].value == tx.inputs[0].value); // mut:M5RQ_RF6
+
+        // ==== check A7.7: byte-identical successor (same template, every field unchanged: round and amount do not move)
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            kind: kind,
+            amount: amount,
+            owner_class: owner_class,
+            owner_key: owner_key
+        });
+    }
+}

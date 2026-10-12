@@ -1,0 +1,130 @@
+pragma silverscript ^0.1.0;
+
+// Share position (role 0x0B), spec M5 A3.4 (design 5.4; D66, D67). Entries: vault_leg()
+// (delegate of Vault.request_withdraw() at input 1, M5 Stage 3) and refresh() (spec M5 A7,
+// D76, M5 Stage 5).
+//
+// Value: R. Created by genesis (the deployer's position, D66), by a deposit settlement
+// (Request.settle(), spec M5 A6.1 check 12) or as the remainder of a partial withdrawal
+// (Vault.request_withdraw(), spec M5 A4.2 check 11). round = the round of the draw that
+// minted it (0 at genesis); informational, never checked against anything.
+//
+// Route of trust (D74): VAULT_TPL (vaultTemplateHash) is a constructor constant, so the
+// position is compiled after the vault. The vault leads the withdrawal: it reads this
+// position under its own position_tpl, checks the owner input (D67), the shares and every
+// output; the leg only checks that input 0 is a genuine vault under VAULT_TPL.
+//
+// Each check of an entry starts at a "// ==== check <label>" line (labels PO1..PO4,
+// A7.1..A7.7, handoff S2-6), outside any if/for body. `// mut:<ID>` tags mark the requires
+// the mutation tests remove one at a time.
+contract Position(
+    byte[32] vaultTemplateHash,
+    int init_round,
+    int init_shares,
+    byte init_owner_class,
+    byte[33] init_owner_key
+) {
+    // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
+    // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
+    int constant SCRIPT_MAX = 1000000;
+    // Spec M4 A2/A6 (D59, D76): funding inputs, refresh idle time (24 h at 10 BPS), DAA
+    // bound (= LOCK_TIME_THRESHOLD, rusty-kaspa v2.1.0 crypto/txscript/src/lib.rs:84).
+    int constant F_MAX = 8;
+    int constant D_IDLE = 864000;
+    int constant DAA_MAX = 500000000000;
+
+    // Vault state layout (spec M5 A3.1), for readInputStateWithTemplate.
+    struct VaultState {
+        byte role;
+        int round;
+        int total_assets;
+        int total_shares;
+        int pend_dep;
+        int pend_wsh;
+        int liability;
+        byte[32] record_tpl;
+        byte[32] request_tpl;
+        byte[32] position_tpl;
+    }
+
+    byte role = 0x0B;
+    int round = init_round;
+    int shares = init_shares;
+    byte owner_class = init_owner_class;
+    byte[33] owner_key = init_owner_key;
+
+    // Delegate leg of Vault.request_withdraw() (spec M5 A4.2, PO1-PO4).
+    entry vault_leg(int vault_pl, int vault_sl) {
+        // ==== check PO1: the position slot of request_withdraw()
+        require(this.activeInputIndex == 1); // mut:PO1
+        // ==== check PO2: the leader carries this covenant ID
+        byte[32] cov = OpInputCovenantId(1);
+        require(OpInputCovenantId(0) == cov); // mut:PO2
+        // ==== check PO3: this input authorizes no output
+        require(OpAuthOutputCount(1) == 0); // mut:PO3
+        // ==== check PO4: the leader is a vault under VAULT_TPL
+        require(vault_pl >= 0); // mut:PO4_tpl
+        require(vault_pl <= SCRIPT_MAX); // mut:PO4_tpl
+        require(vault_sl >= 0); // mut:PO4_tpl
+        require(vault_sl <= SCRIPT_MAX); // mut:PO4_tpl
+        VaultState vt = readInputStateWithTemplate(0, vault_pl, vault_sl, vaultTemplateHash);
+        require(unsigned(vt.role) == 6); // mut:PO4_role
+    }
+
+    // Spec M5 A7 (= M4 A6, D59, D76). Inputs: 0 this position, 1..n funding (zero ID,
+    // 1 <= n <= F_MAX). Outputs: 0 the byte-identical successor (same value), then at most
+    // one change output.
+    entry refresh() {
+        // ==== check A7.1: leader at input 0
+        require(this.activeInputIndex == 0); // mut:M5PO_RF1
+        byte[32] cov = OpInputCovenantId(0);
+
+        // ==== check A7.2: inputs (R2): this object alone under cov, then 1..F_MAX funding with the zero ID
+        require(OpCovInputCount(cov) == 1); // mut:M5PO_RF2_count
+        require(tx.inputs.length >= 2); // mut:M5PO_RF2_fund
+        require(tx.inputs.length <= 1 + F_MAX); // mut:M5PO_RF2_fund
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(fi, 1, tx.inputs.length, F_MAX) {
+                require(OpInputCovenantId(fi) == zeroId); // mut:M5PO_RF2_zero
+            }
+        }
+
+        // ==== check A7.3: idle for D_IDLE since creation; creation >= 0 rejects an unaccepted parent
+        // OpTxInputDaaScore pushes the UTXO's block_daa_score as i64 (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1124-1130); an unaccepted parent has
+        // UNACCEPTED_DAA_SCORE = u64::MAX (consensus/core/src/constants.rs:51), pushed as -1
+        // (DECISIONS fact row O-S4-4). creation < DAA_MAX, so creation + D_IDLE cannot overflow.
+        int creation = OpTxInputDaaScore(0);
+        require(creation >= 0); // mut:M5PO_RF3_creation
+        require(creation < DAA_MAX); // mut:M5PO_RF3_creation
+        require(tx.daa >= creation + D_IDLE); // mut:M5PO_RF3_idle
+
+        // ==== check A7.4: one covenant output (the successor) at 0, authorized by input 0
+        require(OpAuthOutputCount(0) == 1); // mut:M5PO_RF4_auth
+        require(OpAuthOutputIdx(0, 0) == 0); // mut:M5PO_RF4_idx
+        require(OpCovOutputCount(cov) == 1); // mut:M5PO_RF4_cov
+
+        // ==== check A7.5: one or two outputs; output 1, if present, has the zero ID
+        require(tx.outputs.length >= 1); // mut:M5PO_RF5_count
+        require(tx.outputs.length <= 2); // mut:M5PO_RF5_count
+        {
+            byte[32] zeroId = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+            for(zo, 1, tx.outputs.length, 1) {
+                require(OpOutputCovenantId(zo) == zeroId); // mut:M5PO_RF5_zero
+            }
+        }
+
+        // ==== check A7.6: same value
+        require(tx.outputs[0].value == tx.inputs[0].value); // mut:M5PO_RF6
+
+        // ==== check A7.7: byte-identical successor (same template, every field unchanged: round and shares do not move)
+        validateOutputState(0, State {
+            role: role,
+            round: round,
+            shares: shares,
+            owner_class: owner_class,
+            owner_key: owner_key
+        });
+    }
+}

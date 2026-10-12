@@ -530,6 +530,7 @@ fn template_refresh_successor_is_own_template() {
             RefreshObj::Ticket(_) => Sil::Ticket,
             RefreshObj::Pool(_) => Sil::Pool,
             RefreshObj::Marker(_) => Sil::Marker,
+            _ => unreachable!("M4 refresh bases only"),
         };
         let fake = lookalike(which);
         let mut good: Case = base.clone().into();

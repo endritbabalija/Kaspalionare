@@ -250,6 +250,7 @@ pub async fn close_m2(ctx: &mut Ctx) -> Result<(), String> {
     let f = fund(ctx).await?;
     let mut g = GenesisCase::new_with(K, vec![(f.op, f.entry.clone())], &t);
     g.funding_sk = ctx.sk;
+    g.set_owner(&me);
     // M3 (D50): genesis also creates the vault holding V0 = v_rec. The fixture's
     // V0 = 10,000,000 KAS is not fundable on testnet, so scale J(1) and V0 down while keeping
     // L(1) = J + G2 (m - 1) <= floor(V0 x cap / 10^4): J = 10 KAS, L = 10.9 KAS, V0 = 60 KAS.
@@ -425,6 +426,18 @@ pub struct Drawn {
     pub ds: Sent,
     pub d_start: kaspa_rpc_core::RpcHash,
     pub rr: lottery::draw::RoundResult,
+    /// M5 (`vault-m5`): the deposit and withdrawal requests sent before the buy, each with
+    /// its sink start hash.
+    pub dep: Option<(lottery::vault::DepositCase, Sent, kaspa_rpc_core::RpcHash)>,
+    pub wdr: Option<(lottery::vault::WithdrawCase, Sent, kaspa_rpc_core::RpcHash)>,
+}
+
+/// M5 vault requests sent between genesis and the buy (`round1_drawn_with`): a deposit of
+/// `d` sompi and a partial withdrawal of `w` shares of the deployer position.
+#[derive(Clone, Copy)]
+pub struct VaultRequests {
+    pub d: i64,
+    pub w: i64,
 }
 
 pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
@@ -439,6 +452,13 @@ pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
 /// Genesis -> buy -> close -> draw_test_seed() of round 1 with the real scripts (the draw-m3
 /// sequence); `tag` names the probe in every report row and error.
 pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
+    round1_drawn_with(ctx, tag, None).await
+}
+
+/// `round1_drawn` with, if `vr` is set, a `request_deposit()` and a `request_withdraw()`
+/// (both with the real vault and position scripts) between genesis and the buy, so the draw
+/// converts both and writes a settlement record (spec M5-f).
+pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequests>) -> Result<Drawn, String> {
     use kaspa_consensus_core::tx::TransactionOutpoint as Op;
     use kaspa_rpc_core::api::rpc::RpcApi;
     use lottery::buy::{BuyCase, Templates, b_max};
@@ -462,6 +482,7 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     let f = fund(ctx).await?;
     let mut g = GenesisCase::new_with(K, vec![(f.op, f.entry.clone())], &t);
     g.funding_sk = ctx.sk;
+    g.set_owner(&me);
     g.set_jackpot(10 * KAS as i64);
     g.set_vault(60 * KAS as i64);
     g.controller.deadline = deadline;
@@ -484,6 +505,83 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     let gdaa = gchange.entry.block_daa_score;
     println!("genesis {gid} at DAA {gdaa}; covenant id {cov}");
 
+    // ---- M5: request_deposit() and request_withdraw() (vault-m5)
+    // The vault the draw spends (outpoint, state, creation DAA, start hash), and the plain
+    // UTXO that funds the buy.
+    let mut vault_in = (Op::new(gid, g.vault_output() as u32), g.vault.clone(), gdaa, g_start);
+    let mut buy_funding = gchange.clone();
+    let mut dep = None;
+    let mut wdr = None;
+    if let Some(vr) = vr {
+        use lottery::buy::OwnerKey;
+        use lottery::vault::{DepositCase, WithdrawCase};
+        // request_deposit: the vault and the genesis change.
+        let mut dc = DepositCase::new_with(&t);
+        dc.vault = g.vault.clone();
+        dc.reserve = g.reserve();
+        dc.vault_daa = gdaa;
+        dc.d = vr.d;
+        dc.owner = me;
+        dc.funding = vec![FundingIn { value: gchange.entry.amount, daa: gdaa }];
+        dc.cov = cov;
+        dc.funding_sk = ctx.sk;
+        let dops = vec![vault_in.0, gchange.op];
+        let dep_fin = |dc: &DepositCase| {
+            let mut b = dc.build_with(t.clone());
+            b.outpoints = dops.clone();
+            b.finish()
+        };
+        dc.fee = lottery_fee(&dep_fin(&dc));
+        let df = dep_fin(&dc);
+        df.run().map_err(|(i, e)| format!("local engine rejects {tag} request_deposit at input {i}: {e:?}"))?;
+        let ds = sent_of(&df);
+        let d_start = sink(ctx).await?;
+        if !ctx.submit(&format!("request_deposit() M5 real vault script: D = {:.2} KAS, request value R", vr.d as f64 / KAS as f64), &ds, true).await? {
+            return Err(format!("{tag} request_deposit rejected"));
+        }
+        let did = ds.tx.id();
+        let dn = ds.tx.outputs.len() - 1;
+        let dchange = merged(ctx, d_start, Op::new(did, dn as u32), &ds.tx.outputs[dn].script_public_key).await?;
+        let dx = dc.expected();
+        vault_in = (Op::new(did, 0), dx.vault.clone(), dchange.entry.block_daa_score, d_start);
+
+        // request_withdraw (partial) of the deployer position: the vault', the genesis
+        // position and the deposit change as the owner input (our Schnorr P2PK = the owner).
+        let mut wc = WithdrawCase::new_with(&t, OwnerKey::Schnorr(ctx.sk));
+        wc.vault = dx.vault.clone();
+        wc.reserve = g.reserve();
+        wc.vault_daa = vault_in.2;
+        wc.position = g.position.clone();
+        wc.position_daa = gdaa;
+        wc.w = vr.w;
+        wc.owner_value = dchange.entry.amount;
+        wc.owner_daa = dchange.entry.block_daa_score;
+        wc.funding = vec![];
+        wc.cov = cov;
+        wc.funding_sk = ctx.sk;
+        let wops = vec![vault_in.0, Op::new(gid, g.position_output() as u32), dchange.op];
+        let wd_fin = |wc: &WithdrawCase| {
+            let mut b = wc.build_with(t.clone());
+            b.outpoints = wops.clone();
+            b.finish()
+        };
+        wc.fee = lottery_fee(&wd_fin(&wc));
+        let wf = wd_fin(&wc);
+        wf.run().map_err(|(i, e)| format!("local engine rejects {tag} request_withdraw at input {i}: {e:?}"))?;
+        let ws = sent_of(&wf);
+        let w_start = sink(ctx).await?;
+        if !ctx.submit(&format!("request_withdraw() M5 real vault and position scripts: partial, w = {} of {} shares, P2PK Schnorr owner input", vr.w, g.position.shares), &ws, true).await? {
+            return Err(format!("{tag} request_withdraw rejected"));
+        }
+        let wid = ws.tx.id();
+        let wn = ws.tx.outputs.len() - 1;
+        let wchange = merged(ctx, w_start, Op::new(wid, wn as u32), &ws.tx.outputs[wn].script_public_key).await?;
+        vault_in = (Op::new(wid, 0), wc.expected().vault.clone(), wchange.entry.block_daa_score, w_start);
+        buy_funding = wchange;
+        dep = Some((dc, ds, d_start));
+        wdr = Some((wc, ws, w_start));
+    }
+
     // ---- buy(): the jackpot combination of round 1 on shard 0
     let m = g.controller.m;
     let sn = seed_numbers(&cov.as_bytes(), g.controller.round, &TEST_ONLY_SEED, m);
@@ -495,9 +593,9 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     bc.cov = cov;
     bc.bundle = vec![Combo::new(unrank(sn.rank), sn.bonus)];
     bc.payout = me;
-    bc.funding = vec![gchange.entry.amount];
+    bc.funding = vec![buy_funding.entry.amount];
     bc.funding_sk = ctx.sk;
-    let bops = vec![Op::new(gid, 2), gchange.op];
+    let bops = vec![Op::new(gid, 2), buy_funding.op];
     let buy_fin = |bc: &BuyCase| {
         let mut b = bc.build_with(t.clone());
         b.outpoints = bops.clone();
@@ -568,8 +666,8 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     d.drawer_daa = gdaa;
     d.marker = x.marker.clone();
     d.marker_daa = cdaa;
-    d.vault = g.vault.clone();
-    d.vault_daa = gdaa;
+    d.vault = vault_in.1.clone();
+    d.vault_daa = vault_in.2;
     d.controller = x.controller.clone();
     d.pot = x.values[0] - x.controller.acc as u64 - x.controller.reserve as u64;
     d.controller_daa = cdaa;
@@ -584,7 +682,7 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     d.funding = vec![FundingIn { value: caller.entry.amount, daa: cdaa }];
     d.absorbed = vec![];
     d.fix_lock_time();
-    let dops = vec![Op::new(gid, K as u32 + 3), Op::new(cid, K as u32 + 2), Op::new(gid, K as u32 + 2), Op::new(cid, 0), caller.op];
+    let dops = vec![Op::new(gid, K as u32 + 3), Op::new(cid, K as u32 + 2), vault_in.0, Op::new(cid, 0), caller.op];
     let draw_fin = |d: &DrawCase| {
         let mut b = d.build_with(t.clone());
         b.outpoints = dops.clone();
@@ -596,7 +694,7 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     // creating transaction a chain block has merged (`merged`), then re-read them just
     // before submission; if any entry changed (e.g. a reorganisation moved the merging
     // chain block), rebuild from the new entries instead of submitting.
-    let starts = [g_start, c_start, g_start, c_start, c_start];
+    let starts = [g_start, c_start, vault_in.3, c_start, c_start];
     let spks: Vec<_> = draw_fin(&d).entries.iter().map(|e| e.script_public_key.clone()).collect();
     let mut built = None;
     for attempt in 1..=3 {
@@ -646,13 +744,28 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
     let ok = ctx
         .submit(
             &format!(
-                "{}draw_test_seed() M3 real scripts, K = {K}, a = 0, np = {}, h_J = {}, n2 = {}, fee paid {}, R = {:.2} KAS",
-                if tag == "draw-m3" { "" } else { "setup: " },
+                "{}draw_test_seed() {} real scripts, K = {K}, a = 0, np = {}, h_J = {}, n2 = {}, fee paid {}, R = {:.2} KAS{}",
+                if tag == "draw-m3" || tag == "vault-m5" { "" } else { "setup: " },
+                if vr.is_some() { "M5" } else { "M3" },
                 dx.np(),
                 dx.h_j,
                 dx.n2,
                 dx.fee.paid,
-                d.reserve() as f64 / KAS as f64
+                d.reserve() as f64 / KAS as f64,
+                if dx.rec {
+                    format!(
+                        ", conversion: D = {:.2} KAS -> mint {} shares (refund {}), W = {} -> wc = {}, out_c = {:.4} KAS, record at output {}",
+                        dx.conv.d as f64 / KAS as f64,
+                        dx.conv.mint_c,
+                        dx.conv.refund,
+                        dx.conv.w,
+                        dx.conv.wc,
+                        dx.conv.out_c as f64 / KAS as f64,
+                        dx.record_output().unwrap()
+                    )
+                } else {
+                    String::new()
+                }
             ),
             &ds,
             true,
@@ -671,7 +784,7 @@ pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
         rr.d_claim,
         ds.tx.id()
     ));
-    Ok(Drawn { t, cov, bc, bs, b_start, d, ds, d_start, rr })
+    Ok(Drawn { t, cov, bc, bs, b_start, d, ds, d_start, rr, dep, wdr })
 }
 
 /// M4 (spec M4-i): genesis -> buy -> close -> draw (the draw-m3 sequence, K = 16, real
@@ -791,6 +904,139 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
             x.values[0] as f64 / KAS as f64
         ),
         &cs,
+        true,
+    )
+    .await?;
+    Ok(())
+}
+
+/// M5 (spec M5-f): genesis -> `request_deposit()` -> `request_withdraw()` (partial, of the
+/// deployer position) -> buy -> close -> `draw()` with the conversion and the settlement
+/// record -> the deposit's `settle()` (deposit-convert: a new position) -> the withdrawal's
+/// `settle()` (FINAL, the record drained: payout and the record's R refunded to the draw
+/// caller), every transaction with the real scripts, built by the `lottery` builders and
+/// checked in the local v2.1.0 engine before submission through the public mempool.
+/// - D = 2 KAS (>= MIN_DEPOSIT); w = 1 % of the deployer's S0 = V0 / SHARE_UNIT shares
+///   (0.6 KAS worth, within the draw's slack V' + D - L', so wc = W).
+/// - The record's state is rebuilt from the draw transaction bytes alone
+///   (`RoundResult::record`, R4); every input of every step is the node's own entry, read
+///   once a chain block merged the creating transaction (`merged`, O-S4-4).
+/// Locked on testnet afterwards: round 2's objects, the new pools, vault', the new position
+/// and position' (no further entry is exercised). Payouts and changes are ours.
+pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {
+    use kaspa_consensus_core::tx::TransactionOutpoint as Op;
+    use lottery::close::FundingIn;
+    use lottery::game::{SHARE_UNIT, SettleMode};
+    use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, RequestState};
+    use lottery::vault::SettleCase;
+
+    const TAG: &str = "vault-m5";
+    let s0 = 60 * KAS as i64 / SHARE_UNIT;
+    let vr = VaultRequests { d: 2 * KAS as i64, w: s0 / 100 };
+    let r = round1_drawn_with(ctx, TAG, Some(vr)).await?;
+    let t = r.t.clone();
+    let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
+    let rec = r.rr.record.clone().ok_or("vault-m5: the draw wrote no record")?;
+    let dx = r.d.expected();
+    let did = r.ds.tx.id();
+    assert_eq!(rec.outpoint, Op::new(did, dx.record_output().unwrap() as u32), "the record outpoint");
+    assert_eq!(r.ds.tx.outputs[rec.outpoint.index as usize].script_public_key, t.record_spk(&rec.state), "the record state rebuilt from the draw bytes");
+    let (_, ds, d_start) = r.dep.as_ref().unwrap();
+    let (_, ws, w_start) = r.wdr.as_ref().unwrap();
+    let (d_start, w_start) = (*d_start, *w_start);
+    let caller = dx.caller_output();
+
+    // ---- settle(1): the deposit request (deposit output 1) against the record; funding: the draw's caller output.
+    let dreq = RequestState::new(1, KIND_DEPOSIT, vr.d, &me);
+    assert_eq!(ds.tx.outputs[1].script_public_key, t.request_spk(&dreq), "deposit output 1 is the request");
+    let mut s1 = SettleCase::new_with(&t, rec.state.clone(), dreq);
+    s1.cov = r.cov;
+    s1.funding_sk = ctx.sk;
+    let ops1 = vec![Op::new(ds.tx.id(), 1), rec.outpoint, Op::new(did, caller as u32)];
+    let starts1 = [d_start, r.d_start, r.d_start];
+    let spks1 = [ds.tx.outputs[1].script_public_key.clone(), r.ds.tx.outputs[rec.outpoint.index as usize].script_public_key.clone(), r.ds.tx.outputs[caller].script_public_key.clone()];
+    let mut node = Vec::new();
+    for (i, op) in ops1.iter().enumerate() {
+        node.push(merged(ctx, starts1[i], *op, &spks1[i]).await?.entry);
+    }
+    s1.request_value = node[0].amount;
+    s1.request_daa = node[0].block_daa_score;
+    s1.record_reserve = node[1].amount - (rec.state.out_rem as u64 + rec.state.refund as u64 * rec.state.dep_rem as u64);
+    s1.record_daa = node[1].block_daa_score;
+    s1.funding = vec![FundingIn { value: node[2].amount, daa: node[2].block_daa_score }];
+    let x1 = s1.expected();
+    if x1.reference.is_none() || x1.mode != SettleMode::DepositConvert || x1.drained {
+        return Err(format!("{TAG}: expected a not-drained deposit-convert settlement, got {:?} drained {} (reference {:?})", x1.mode, x1.drained, x1.reference));
+    }
+    let fin1 = |c: &SettleCase| {
+        let mut b = c.build_with(t.clone());
+        b.outpoints = ops1.clone();
+        b.finish()
+    };
+    s1.fee = lottery_fee(&fin1(&s1));
+    let f1 = fin1(&s1);
+    if f1.entries != node {
+        return Err(format!("{TAG}: the deposit settlement's input entries do not match the node's"));
+    }
+    f1.run().map_err(|(i, e)| format!("local engine rejects {TAG} deposit settle at input {i}: {e:?}"))?;
+    let x1 = s1.expected();
+    let st1 = sent_of(&f1);
+    let st1_start = sink(ctx).await?;
+    if !ctx
+        .submit(
+            &format!("settle() M5 real request and record scripts: deposit-convert, s = {:.2} KAS -> position of {} shares; record' kept", vr.d as f64 / KAS as f64, x1.sh),
+            &st1,
+            true,
+        )
+        .await?
+    {
+        return Err(format!("{TAG} deposit settle rejected"));
+    }
+
+    // ---- settle(2): the withdrawal request (withdraw output 1) against record' (settle(1) output 0); funding: settle(1)'s change.
+    let wreq = RequestState::new(1, KIND_WITHDRAW, vr.w, &me);
+    assert_eq!(ws.tx.outputs[1].script_public_key, t.request_spk(&wreq), "withdraw output 1 is the request");
+    let s1id = st1.tx.id();
+    let ch1 = x1.change_output.unwrap();
+    let mut s2 = SettleCase::new_with(&t, x1.record.clone(), wreq);
+    s2.cov = r.cov;
+    s2.funding_sk = ctx.sk;
+    let ops2 = vec![Op::new(ws.tx.id(), 1), Op::new(s1id, 0), Op::new(s1id, ch1 as u32)];
+    let starts2 = [w_start, st1_start, st1_start];
+    let spks2 = [ws.tx.outputs[1].script_public_key.clone(), st1.tx.outputs[0].script_public_key.clone(), st1.tx.outputs[ch1].script_public_key.clone()];
+    let mut node = Vec::new();
+    for (i, op) in ops2.iter().enumerate() {
+        node.push(merged(ctx, starts2[i], *op, &spks2[i]).await?.entry);
+    }
+    s2.request_value = node[0].amount;
+    s2.request_daa = node[0].block_daa_score;
+    s2.record_reserve = s1.record_reserve;
+    s2.record_daa = node[1].block_daa_score;
+    s2.funding = vec![FundingIn { value: node[2].amount, daa: node[2].block_daa_score }];
+    let x2 = s2.expected();
+    if x2.reference.is_none() || x2.mode != SettleMode::Final || !x2.drained {
+        return Err(format!("{TAG}: expected a drained FINAL withdrawal settlement, got {:?} drained {} (reference {:?})", x2.mode, x2.drained, x2.reference));
+    }
+    let fin2 = |c: &SettleCase| {
+        let mut b = c.build_with(t.clone());
+        b.outpoints = ops2.clone();
+        b.finish()
+    };
+    s2.fee = lottery_fee(&fin2(&s2));
+    let f2 = fin2(&s2);
+    if f2.entries != node {
+        return Err(format!("{TAG}: the withdrawal settlement's input entries do not match the node's"));
+    }
+    f2.run().map_err(|(i, e)| format!("local engine rejects {TAG} withdrawal settle at input {i}: {e:?}"))?;
+    let x2 = s2.expected();
+    let st2 = sent_of(&f2);
+    ctx.submit(
+        &format!(
+            "settle() M5 real request and record scripts: withdrawal FINAL, w = {} shares, payout {:.4} KAS (pay + R), record drained, R refunded to the funder",
+            vr.w,
+            x2.values[x2.payout_output.unwrap()] as f64 / KAS as f64
+        ),
+        &st2,
         true,
     )
     .await?;

@@ -15,7 +15,9 @@ use lottery::genesis::{GenesisCase, covenant_id};
 use lottery::ledger::Ledger;
 use lottery::params::SetParamsCase;
 use lottery::smt::Tree;
-use lottery::state::{ControllerState, DrawerState, MarkerState, ParamsState, PoolState, ShardState, TicketState, VaultState};
+use lottery::state::{
+    ControllerState, DrawerState, MarkerState, ParamsState, PoolState, PositionState, RecordState, RequestState, ShardState, TicketState, VaultState,
+};
 
 use super::accept;
 
@@ -276,6 +278,12 @@ pub enum Sil {
     // M4 (stage 2b): the ticket compiles after the pool (ticket(pool), D54), so a ticket
     // mutant or look-alike changes the ticket and shard hashes only.
     Ticket,
+    // M5 (D74): the record has no dependency; position(vault); request(record, position).
+    // A record or position mutant also changes the request hash; a vault mutant changes
+    // the position and request hashes.
+    Record,
+    Position,
+    Request,
 }
 
 fn line_tags(line: &str) -> Vec<&str> {
@@ -303,6 +311,9 @@ fn source_mut(src: &mut Sources, which: Sil) -> &mut String {
         Sil::Pool => &mut src.pool,
         Sil::Drawer => &mut src.drawer,
         Sil::Ticket => &mut src.ticket,
+        Sil::Record => &mut src.record,
+        Sil::Position => &mut src.position,
+        Sil::Request => &mut src.request,
     }
 }
 
@@ -316,6 +327,9 @@ fn hash_of(t: &Templates, which: Sil) -> [u8; 32] {
         Sil::Pool => t.pool.hash,
         Sil::Drawer => t.drawer.hash,
         Sil::Ticket => t.ticket.hash,
+        Sil::Record => t.record.hash,
+        Sil::Position => t.position.hash,
+        Sil::Request => t.request.hash,
     }
 }
 
@@ -384,6 +398,13 @@ pub struct Chain {
     pub tickets: Vec<(TransactionOutpoint, TicketState, u64, u64)>,
     /// The shard trees of every drawn round, by round (claims prove counts against them).
     pub drawn_trees: std::collections::BTreeMap<i64, Vec<Tree>>,
+    /// M5: live share positions (outpoint, state, value = R, creation DAA); the deployer's
+    /// genesis position first (S1-10).
+    pub positions: Vec<(TransactionOutpoint, PositionState, u64, u64)>,
+    /// M5: live vault requests (outpoint, state, value = R + accrued, creation DAA).
+    pub requests: Vec<(TransactionOutpoint, RequestState, u64, u64)>,
+    /// M5: live settlement records (outpoint, state, value, creation DAA).
+    pub records: Vec<(TransactionOutpoint, RecordState, u64, u64)>,
 }
 
 impl Chain {
@@ -424,6 +445,9 @@ impl Chain {
             marker_daa: 0,
             tickets: vec![],
             drawn_trees: Default::default(),
+            positions: vec![(outs[g.position_output()], g.position.clone(), g.reserve(), daa)],
+            requests: vec![],
+            records: vec![],
         }
     }
 
@@ -566,7 +590,9 @@ impl Chain {
     pub fn draw(&mut self, c: &DrawCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
         let x = c.expected();
         let absorbed: Vec<TransactionOutpoint> = ops[4..4 + c.a()].to_vec();
-        let f = accept_draw(&self.draw_built(c, ops));
+        // M5: a draw that converts runs through `accept_draw5` (M5_PREFLIGHT, common::m5);
+        // one with nothing pending is the M4 draw, accepted as before.
+        let f = if x.rec { super::m5::accept_draw5("draw (conversion)", c, &self.draw_built(c, ops)) } else { accept_draw(&self.draw_built(c, ops)) };
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("draw applies");
         self.drawer = (outs[0], x.drawer.clone(), daa);
         self.vault = (outs[1], x.vault.clone(), daa);
@@ -577,6 +603,9 @@ impl Chain {
         for (p, s) in x.new_pools.iter().enumerate() {
             let o = x.pool_output(p);
             self.pools.push((outs[o], s.clone(), x.values[o] - r, daa));
+        }
+        if let (Some(i), Some(rc)) = (x.record_output(), &x.record) {
+            self.records.push((outs[i], rc.clone(), x.values[i], daa));
         }
         self.marker = None;
         self.drawn_trees.insert(c.marker.round, std::mem::take(&mut self.marker_trees));
@@ -759,6 +788,7 @@ impl Chain {
             RefreshObj::Marker(_) => "refresh (marker)",
             RefreshObj::Pool(_) => "refresh (pool)",
             RefreshObj::Ticket(_) => "refresh (ticket)",
+            _ => panic!("Chain::refresh is the M4 step; M5 objects use Chain::refresh5 (common::m5)"),
         };
         let f = accept_m4(step, &b);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("refresh applies");
@@ -777,6 +807,7 @@ impl Chain {
                 self.tickets[ti].0 = outs[0];
                 self.tickets[ti].3 = daa;
             }
+            _ => unreachable!(),
         }
         f
     }

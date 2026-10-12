@@ -1,12 +1,16 @@
-//! Rust reference for the arithmetic of `close()` (spec M2 A4 checks 11, 17-20, and A6) and
-//! of `draw()` (spec M3 A4 checks 8-20, A5, A6).
+//! Rust reference for the arithmetic of `close()` (spec M2 A4 checks 11, 17-20, and A6), of
+//! `draw()` (spec M3 A4 checks 8-20, A5, A6), of `claim()` (spec M4) and of the vault-share
+//! conversion and settlement (spec M5 A5, A6, A8: `mulfrac` in u128, `convert`, `settle`).
 //!
 //! Every function mirrors the script step for step in signed 64-bit integers. Overflow
 //! panics here (checked ops), so a test that drives a quantity past its A6 bound fails
 //! loudly instead of wrapping; in SilverScript overflow is undefined behaviour (R8), so
 //! the script range-checks inputs to stay inside the same bounds.
 
-use crate::state::{ControllerState, MarkerState, ParamsState, TIER_JACKPOT, TIER_LOWER0, TIER_SECOND, TierShares};
+use crate::state::{
+    ControllerState, KIND_DEPOSIT, KIND_WITHDRAW, MarkerState, ParamsState, Payout, RecordState, RequestState, TIER_JACKPOT, TIER_LOWER0, TIER_SECOND, TierShares,
+    VaultState,
+};
 
 /// Basis points per unit.
 pub const BP: i64 = 10_000;
@@ -725,6 +729,322 @@ pub fn claim_mode(claimed: u8, b: i64, idx: i64, prize: i64) -> Option<ClaimMode
     } else {
         Some(ClaimMode::Accrue)
     }
+}
+
+// ------------------------------------------------------------------ M5: vault shares
+
+/// Genesis share unit (spec M5 A2, D66): S0 = floor(V0 / SHARE_UNIT). Genesis builder only.
+pub const SHARE_UNIT: i64 = 1_000;
+/// Virtual offset (D66): the price is (A + VA) / (S + VS).
+pub const VS: i64 = 1_000;
+pub const VA: i64 = 1;
+/// Smallest deposit request (D70), 1 KAS.
+pub const MIN_DEPOSIT: i64 = 100_000_000;
+/// Largest total_shares (spec M5 A2), so S + VS <= 2^62.
+pub const SHARES_MAX: i64 = TOTAL_MAX - VS;
+/// Largest V' (spec M5 A2), so V' + VA <= 2^62. Cannot bind on chain (MAX_SOMPI < 2^62,
+/// DECISIONS fact S4-3).
+pub const ASSETS_MAX: i64 = TOTAL_MAX - VA;
+
+/// mulfrac(a, r, c) = floor(a x r / c) (D73, spec M5 A8) for 0 <= a <= 2^62 and
+/// 0 <= r < c <= 2^62, through u128; `None` outside that domain (the script's
+/// preconditions). The result is <= a.
+pub fn mulfrac(a: i64, r: i64, c: i64) -> Option<i64> {
+    if !(0..=TOTAL_MAX).contains(&a) || !(1..=TOTAL_MAX).contains(&c) || !(0..c).contains(&r) {
+        return None;
+    }
+    Some(((a as u128 * r as u128) / c as u128) as i64)
+}
+
+/// The script's mulfrac algorithm (spec M5 A8) in checked signed 64-bit steps: keep (Q, X)
+/// with prefix x r = Q x c + X, 0 <= X < c, over the bits of a from bit 62 down (63
+/// steps). Each step doubles both, subtracts c once if needed, adds r for a set bit and
+/// subtracts c once if needed. Every intermediate is checked to stay an i64 (it panics
+/// otherwise), so a run over the domain shows the script's bounds (X < 2c <= 2^63, Q <= a).
+/// `None` outside the domain, as `mulfrac`.
+pub fn mulfrac_steps(a: i64, r: i64, c: i64) -> Option<i64> {
+    if !(0..=TOTAL_MAX).contains(&a) || !(1..=TOTAL_MAX).contains(&c) || !(0..c).contains(&r) {
+        return None;
+    }
+    let (mut q, mut x): (i64, i64) = (0, 0);
+    for bit in (0..63).rev() {
+        q = q.checked_add(q).expect("mulfrac: Q doubling overflows");
+        x = x.checked_add(x).expect("mulfrac: X doubling overflows");
+        if x >= c {
+            x -= c;
+            q = q.checked_add(1).expect("mulfrac: Q overflows");
+        }
+        if (a >> bit) & 1 == 1 {
+            x = x.checked_add(r).expect("mulfrac: X + r overflows");
+            if x >= c {
+                x -= c;
+                q = q.checked_add(1).expect("mulfrac: Q overflows");
+            }
+        }
+        assert!((0..c).contains(&x), "mulfrac: invariant 0 <= X < c broken");
+    }
+    assert!(q <= a, "mulfrac: Q > a");
+    Some(q)
+}
+
+/// C2: a withdrawal of w shares pays out(w) = mulfrac(V' + VA, w, S + VS) (spec M5 A5);
+/// `None` outside the domain (w < 0, w >= S + VS, or V' and S outside their A3.1 ranges).
+pub fn withdraw_out(v_prime: i64, s: i64, w: i64) -> Option<i64> {
+    if !(0..=ASSETS_MAX).contains(&v_prime) || !(0..=SHARES_MAX).contains(&s) {
+        return None;
+    }
+    mulfrac(v_prime + VA, w, s + VS)
+}
+
+/// The aggregate conversion inside `draw()` (spec M5 A5 C1-C3, D65, D69, D70).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Conversion {
+    /// Inputs: V' (check 14), S = total_shares, D = pend_dep, W = pend_wsh, L' (check 17).
+    pub v_prime: i64,
+    pub s: i64,
+    pub d: i64,
+    pub w: i64,
+    pub l_next: i64,
+    /// C1: the aggregate mint D q + mulfrac(D, r, M) = floor(D (S + VS) / (V' + VA)) when D > 0
+    /// and the pre-guard passed (0 otherwise), and whether the deposits convert.
+    pub mint: i64,
+    pub ok: bool,
+    /// Converted: D_c = ok ? D : 0, mint_c = ok ? mint : 0, refund = D > 0 and not ok.
+    pub d_c: i64,
+    pub mint_c: i64,
+    pub refund: bool,
+    /// C2: slack = V' + D_c - L', the converted withdrawal shares wc and their payout.
+    pub slack: i64,
+    pub wc: i64,
+    pub out_c: i64,
+}
+
+impl Conversion {
+    /// C3: a record is written iff anything was pending.
+    pub fn rec(&self) -> bool {
+        self.d > 0 || self.w > 0
+    }
+
+    /// C3: vault' total_assets = V' + D_c - out_c (also the round r+1 controller's v_rec,
+    /// D71).
+    pub fn total_assets(&self) -> i64 {
+        self.v_prime + self.d_c - self.out_c
+    }
+
+    /// C3: vault' total_shares = S + mint_c - wc.
+    pub fn total_shares(&self) -> i64 {
+        self.s + self.mint_c - self.wc
+    }
+
+    /// C3: vault' of the draw of round `round`: total_assets', total_shares', pend_dep = 0,
+    /// pend_wsh = W - wc, liability = L'; the template fields are copied from `vt`.
+    pub fn vault_after(&self, vt: &VaultState, round: i64) -> VaultState {
+        VaultState {
+            round,
+            total_assets: self.total_assets(),
+            total_shares: self.total_shares(),
+            pend_dep: 0,
+            pend_wsh: self.w - self.wc,
+            liability: self.l_next,
+            ..vt.clone()
+        }
+    }
+
+    /// C3: the record of the draw of round `round` (`None` when nothing was pending).
+    pub fn record(&self, round: i64, request_tpl: [u8; 32], funder: &Payout) -> Option<RecordState> {
+        self.rec().then(|| RecordState {
+            round,
+            request_tpl,
+            refund: self.refund as u8,
+            dep_rem: self.d,
+            mint_rem: self.mint_c,
+            wsh_rem: self.w,
+            burn_rem: self.wc,
+            out_rem: self.out_c,
+            funder_class: funder.class(),
+            funder_key: funder.key33(),
+        })
+    }
+
+    /// The record's value out_c + (D - D_c) + R (C3).
+    pub fn record_value(&self, reserve: i64) -> i64 {
+        self.out_c + (self.d - self.d_c) + reserve
+    }
+}
+
+/// C2 witness check: 0 <= wc <= W, out(wc) <= slack, and wc = W or out(wc + 1) > slack.
+pub fn wc_witness_ok(v_prime: i64, s: i64, w: i64, slack: i64, wc: i64) -> bool {
+    if !(0..=w).contains(&wc) {
+        return false;
+    }
+    let fits = |x: i64| withdraw_out(v_prime, s, x).is_some_and(|o| o <= slack);
+    fits(wc) && (wc == w || !fits(wc + 1))
+}
+
+/// `draw()`'s aggregate conversion (spec M5 A5 C1-C3); `None` where the script rejects: a
+/// value outside the A3.1 ranges (V' <= ASSETS_MAX, S <= SHARES_MAX, 0 <= W <= S, D >= 0
+/// with V' + D <= TOTAL_MAX as check 20), or L' > V' + D_c. No state lineage produces those
+/// (A8). wc is computed in closed form here (the script takes it as a witness): the
+/// largest w with floor((V' + VA) w / (S + VS)) <= slack is
+/// floor(((slack + 1)(S + VS) - 1) / (V' + VA)), capped at W.
+pub fn convert(v_prime: i64, s: i64, d: i64, w: i64, l_next: i64) -> Option<Conversion> {
+    if !(0..=ASSETS_MAX).contains(&v_prime) || !(0..=SHARES_MAX).contains(&s) || !(0..=s).contains(&w) {
+        return None;
+    }
+    if d < 0 || d > TOTAL_MAX - v_prime || l_next < 0 {
+        return None;
+    }
+    let n = s + VS;
+    let m = v_prime + VA;
+    // C1.
+    let (mint, ok) = if d == 0 {
+        (0, false)
+    } else {
+        let (q, r) = (n / m, n % m);
+        if q == 0 || d <= (SHARES_MAX - s) / q {
+            let mint = d * q + mulfrac(d, r, m)?;
+            (mint, mint <= SHARES_MAX - s && mint >= (d + MIN_DEPOSIT - 1) / MIN_DEPOSIT)
+        } else {
+            (0, false)
+        }
+    };
+    let d_c = if ok { d } else { 0 };
+    let mint_c = if ok { mint } else { 0 };
+    let refund = d > 0 && !ok;
+    // C2.
+    let total = v_prime + d_c;
+    if l_next > total {
+        return None;
+    }
+    let slack = total - l_next;
+    let w_star = ((slack as u128 + 1) * n as u128 - 1) / m as u128;
+    let wc = (w as u128).min(w_star) as i64;
+    let out_c = withdraw_out(v_prime, s, wc)?;
+    Some(Conversion { v_prime, s, d, w, l_next, mint, ok, d_c, mint_c, refund, slack, wc, out_c })
+}
+
+/// The five settlement modes (spec M5 A6.1 check 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SettleMode {
+    /// Deposit, record not in refund mode: a position of sh shares is minted.
+    DepositConvert,
+    /// Deposit, record in refund mode: the deposit s + R is paid back.
+    DepositRefund,
+    /// Withdrawal, every share converted (left = 0): payout pay + value, request consumed.
+    Final,
+    /// Withdrawal, left > 0, pay >= P_MIN: payout pay, request' {round + 1, left}.
+    Pay,
+    /// Withdrawal, left > 0, pay < P_MIN: no payout, request' value + pay.
+    Accrue,
+}
+
+/// One settlement against a record (spec M5 A6.1 checks 3-6, D72).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settlement {
+    pub mode: SettleMode,
+    /// Deposit: shares minted (0 in refund mode).
+    pub sh: i64,
+    /// Withdrawal: shares converted, assets paid for them, and shares left pending.
+    pub conv: i64,
+    pub pay: i64,
+    pub left: i64,
+    /// record' (the new remainders, every other field unchanged).
+    pub record: RecordState,
+    /// Both sides drained: the record is consumed and its R refunded to its funder.
+    pub drained: bool,
+}
+
+impl Settlement {
+    /// The plain payout to the owner of a request of amount `s` and value `value` (A6.1
+    /// check 9): s + value (refund), pay + value (FINAL, guarded) or pay (PAY); `None` for
+    /// the modes without a payout.
+    pub fn payout(&self, s: i64, value: i64) -> Option<i64> {
+        match self.mode {
+            SettleMode::DepositRefund => guarded_add(s, value),
+            SettleMode::Final => guarded_add(self.pay, value),
+            SettleMode::Pay => Some(self.pay),
+            SettleMode::DepositConvert | SettleMode::Accrue => None,
+        }
+    }
+}
+
+/// The A3.3 ranges of a record (`false` = every reader rejects).
+pub fn record_in_range(rc: &RecordState) -> bool {
+    let rem = |v: i64| (0..=TOTAL_MAX).contains(&v);
+    (1..TOTAL_MAX).contains(&rc.round)
+        && rc.refund <= 1
+        && [rc.dep_rem, rc.mint_rem, rc.wsh_rem, rc.burn_rem, rc.out_rem].into_iter().all(rem)
+        && rc.mint_rem <= SHARES_MAX
+        && rc.burn_rem <= rc.wsh_rem
+        && (rc.refund == 0 || rc.mint_rem == 0)
+        && rc.funder_class <= 2
+}
+
+/// The A3.2 ranges of a request's state, with the D11 key padding (the value range
+/// R <= value <= TOTAL_MAX needs the UTXO value and is the caller's).
+pub fn request_in_range(rq: &RequestState) -> bool {
+    let amount_ok = match rq.kind {
+        KIND_DEPOSIT => (MIN_DEPOSIT..=TOTAL_MAX).contains(&rq.amount),
+        KIND_WITHDRAW => (1..=SHARES_MAX).contains(&rq.amount),
+        _ => false,
+    };
+    (1..TOTAL_MAX).contains(&rq.round) && amount_ok && rq.owner_class <= 2 && (rq.owner_class == 1 || rq.owner_key[32] == 0)
+}
+
+/// `Request.settle()` amounts and mode (spec M5 A6.1 checks 3-6, D72); `None` where the
+/// script rejects: a range violation, the wrong draw's record (rc.round != the request's
+/// round), s above the record's remaining side, or a converting deposit with sh = 0.
+pub fn settle(rc: &RecordState, rq: &RequestState) -> Option<Settlement> {
+    if !record_in_range(rc) || !request_in_range(rq) || rc.round != rq.round {
+        return None;
+    }
+    let s = rq.amount;
+    let mut next = rc.clone();
+    let (mode, sh, conv, pay, left);
+    if rq.kind == KIND_DEPOSIT {
+        if s > rc.dep_rem {
+            return None;
+        }
+        (conv, pay, left) = (0, 0, 0);
+        if rc.refund == 1 {
+            mode = SettleMode::DepositRefund;
+            sh = 0;
+        } else {
+            mode = SettleMode::DepositConvert;
+            sh = if s == rc.dep_rem { rc.mint_rem } else { mulfrac(rc.mint_rem, s, rc.dep_rem)? };
+            if sh < 1 {
+                return None;
+            }
+        }
+        next.dep_rem = rc.dep_rem - s;
+        next.mint_rem = rc.mint_rem - sh;
+    } else {
+        if s > rc.wsh_rem {
+            return None;
+        }
+        sh = 0;
+        conv = if s == rc.wsh_rem { rc.burn_rem } else { mulfrac(rc.burn_rem, s, rc.wsh_rem)? };
+        pay = if rc.burn_rem == 0 {
+            0
+        } else if conv == rc.burn_rem {
+            rc.out_rem
+        } else {
+            mulfrac(rc.out_rem, conv, rc.burn_rem)?
+        };
+        left = s - conv;
+        mode = if left == 0 {
+            SettleMode::Final
+        } else if pay >= P_MIN {
+            SettleMode::Pay
+        } else {
+            SettleMode::Accrue
+        };
+        next.wsh_rem = rc.wsh_rem - s;
+        next.burn_rem = rc.burn_rem - conv;
+        next.out_rem = rc.out_rem - pay;
+    }
+    let drained = next.dep_rem == 0 && next.wsh_rem == 0;
+    Some(Settlement { mode, sh, conv, pay, left, record: next, drained })
 }
 
 #[cfg(test)]

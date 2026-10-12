@@ -45,7 +45,7 @@ use crate::combo::{Combo, bundle_bytes};
 use crate::game::{ClaimMode, D_IDLE, D_RET, M_CLAIM, P_MIN, TICKET_B_MAX, claim_amount, claim_mode, tier_of};
 use crate::params::{TEST_RESERVE, xonly};
 use crate::smt::{PATH_BYTES, Tree, counts_bytes};
-use crate::state::{K_MAX, MarkerState, Payout, PoolState, TIER_LOWER0, TicketState};
+use crate::state::{K_MAX, MarkerState, Payout, PoolState, PositionState, RecordState, RequestState, TIER_LOWER0, TicketState};
 
 // ------------------------------------------------------------------------ entry contract
 
@@ -742,6 +742,10 @@ pub enum RefreshObj {
     Marker(MarkerState),
     Pool(PoolState),
     Ticket(TicketState),
+    /// Spec M5 A7 (D76): the share position, the vault request and the settlement record.
+    Position(PositionState),
+    Request(RequestState),
+    Record(RecordState),
 }
 
 impl RefreshObj {
@@ -750,6 +754,9 @@ impl RefreshObj {
             RefreshObj::Marker(_) => t.marker.clone(),
             RefreshObj::Pool(_) => t.pool.clone(),
             RefreshObj::Ticket(_) => t.ticket.clone(),
+            RefreshObj::Position(_) => t.position.clone(),
+            RefreshObj::Request(_) => t.request.clone(),
+            RefreshObj::Record(_) => t.record.clone(),
         }
     }
 
@@ -758,11 +765,26 @@ impl RefreshObj {
             RefreshObj::Marker(s) => t.marker_redeem(s),
             RefreshObj::Pool(s) => t.pool_redeem(s),
             RefreshObj::Ticket(s) => t.ticket.redeem(&s.values()),
+            RefreshObj::Position(s) => t.position_redeem(s),
+            RefreshObj::Request(s) => t.request_redeem(s),
+            RefreshObj::Record(s) => t.record_redeem(s),
         }
     }
 
     pub fn spk(&self, t: &Templates) -> ScriptPublicKey {
         harness::pay_to_script_hash_script(&self.redeem(t))
+    }
+
+    /// The object's name (`marker`, `pool`, `ticket`, `position`, `request`, `record`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            RefreshObj::Marker(_) => "marker",
+            RefreshObj::Pool(_) => "pool",
+            RefreshObj::Ticket(_) => "ticket",
+            RefreshObj::Position(_) => "position",
+            RefreshObj::Request(_) => "request",
+            RefreshObj::Record(_) => "record",
+        }
     }
 }
 

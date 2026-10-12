@@ -284,7 +284,10 @@ fn d14_sp() {
 
 #[test]
 fn d14_nonneg() {
-    killed(D, &["D14_nonneg"], vault_negative()); // DA3 (Stage 4)
+    // DA3 (Stage 4). Spec M5 C2 layers two more checks on V' >= 0 (M5 Stage 4, S4-6): with
+    // L' >= 0, `lNext <= V' + D_c` (M5C2_slack) and then `out_c <= slack` (M5C2_fits, out_c
+    // = 0 <= slack = V' - L') both reject V' = -1, so the mutant drops all three.
+    killed(D, &["D14_nonneg", "M5C2_slack", "M5C2_fits"], vault_negative());
 }
 
 #[test]
@@ -639,6 +642,11 @@ fn every_m3_tag_is_tested() {
         // pool.sil, marker.sil: the refresh() tags (RF*) are M4's (spec M4 A6, m4_mutants.rs).
         if f == "pool.sil" || f == "marker.sil" {
             tags.retain(|t| !t.starts_with("RF"));
+        }
+        // drawer.sil, vault.sil: the M5 tags (prefix "M5", spec M5 A10 mutants, Stage 6's
+        // m5_mutants.rs; M5 Stage 2 decision S2-8) are not M3's.
+        if f == "drawer.sil" || f == "vault.sil" {
+            tags.retain(|t| !t.starts_with("M5"));
         }
         tags.sort();
         tags.dedup();
