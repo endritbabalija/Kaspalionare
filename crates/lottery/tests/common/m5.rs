@@ -34,7 +34,7 @@ use lottery::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, OwnerKey, Sources,
 use lottery::claim::{RefreshCase, RefreshObj, SIG_REFRESH};
 use lottery::close::FundingIn;
 use lottery::draw::{DrawCase, drawer_is_m5};
-use lottery::game::{DAA_MAX, MIN_DEPOSIT, P_MIN, SHARE_UNIT, SHARES_MAX, SettleMode, TOTAL_MAX, convert};
+use lottery::game::{DAA_MAX, MIN_DEPOSIT, P_MIN, SHARE_UNIT, SHARES_MAX, SettleMode, TOTAL_MAX, VAULT_REQ_DELAY, convert};
 use lottery::params::xonly;
 use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, PositionState, RecordState, RequestState};
 use lottery::vault::*;
@@ -581,12 +581,21 @@ impl Chain {
         self.ledger.get(&self.vault.0).expect("vault UTXO").amount
     }
 
+    /// The DAA at which a vault request asked for at `daa` runs: no earlier than the
+    /// vault's creation + VAULT_REQ_DELAY (D10/W12, U-4), so chains wait out the age.
+    pub fn request_daa(&self, daa: u64) -> u64 {
+        daa.max(self.vault.2 + VAULT_REQ_DELAY as u64)
+    }
+
     /// A deposit request of `d` sompi for `owner`, funded by one input of d + 10 KAS created
-    /// at `daa` - FUND_LEAD; and the outpoints.
+    /// at the step's DAA - FUND_LEAD; lock_time = the step's DAA = max(`daa`, vault creation
+    /// + VAULT_REQ_DELAY) (`request_daa`); and the outpoints.
     pub fn deposit_case(&mut self, owner: &Payout, d: i64, daa: u64) -> (DepositCase, Vec<TransactionOutpoint>) {
+        let daa = self.request_daa(daa);
         let mut c = DepositCase::new_with(&self.t);
         c.vault = self.vault.1.clone();
-        c.vault_daa = self.vault.2;
+        c.at_age(self.vault.2);
+        c.lock_time = daa;
         c.reserve = self.reserve();
         c.d = d;
         c.owner = *owner;
@@ -598,7 +607,9 @@ impl Chain {
         (c, vec![self.vault.0, fop])
     }
 
+    /// Applied at max(`daa`, the case's lock_time).
     pub fn deposit(&mut self, c: &DepositCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
+        let daa = daa.max(c.lock_time);
         let x = c.expected();
         let mut b = c.build_with(self.t.clone());
         b.outpoints = ops;
@@ -618,12 +629,15 @@ impl Chain {
     }
 
     /// A withdrawal of `w` shares of position `pi`, the owner input (10 KAS, `key`'s script)
-    /// created at `daa` - FUND_LEAD; and the outpoints.
+    /// created at the step's DAA - FUND_LEAD; lock_time = the step's DAA (`request_daa`);
+    /// and the outpoints.
     pub fn withdraw_case(&mut self, pi: usize, w: i64, key: OwnerKey, daa: u64) -> (WithdrawCase, Vec<TransactionOutpoint>) {
+        let daa = self.request_daa(daa);
         let (pop, ps, pv, pdaa) = self.positions[pi].clone();
         let mut c = WithdrawCase::new_with(&self.t, key.clone());
         c.vault = self.vault.1.clone();
-        c.vault_daa = self.vault.2;
+        c.at_age(self.vault.2);
+        c.lock_time = daa;
         c.reserve = self.reserve();
         assert_eq!(pv, c.reserve, "position value = R");
         c.position = ps;
@@ -636,7 +650,9 @@ impl Chain {
         (c, vec![self.vault.0, pop, oop])
     }
 
+    /// Applied at max(`daa`, the case's lock_time).
     pub fn withdraw(&mut self, c: &WithdrawCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
+        let daa = daa.max(c.lock_time);
         let x = c.expected();
         let mut b = c.build_with(self.t.clone());
         b.outpoints = ops.clone();
@@ -2029,9 +2045,40 @@ pub fn d_big_dep() -> DrawCase {
 }
 
 /// Every attack of the library (VA1-VA14), for lookup by id.
+// ---------------------------------------------------------------- Stage 7 (review fixes)
+
+/// M5 Stage 7 (review fixes): the vault request age (U-4, checks D10 and W12) and the empty
+/// drained record (F4, settle check S9). Ids carry their spec group.
+pub fn stage7() -> Vec<Atk5> {
+    let aged = VAULT_REQ_DELAY as u64;
+    // A drained deposit-convert (the last depositor of a deposits-only record) and a drained
+    // ACCRUE (wc = 0: nothing burnt, the whole request carried) whose fabricated record
+    // keeps out_rem > 0 with burn_rem = 0 (D79): before F4 the out_rem sompi went to the fee.
+    let acc = st_case(record(0, 0, 0, 3_000_000, 0, 0), KIND_WITHDRAW, 3_000_000);
+    assert_mode(&acc, SettleMode::Accrue, true);
+    vec![
+        Atk5::new("VA9 request_deposit at vault age VAULT_REQ_DELAY - 1", VLT0, "vault:D10", dep()).dep(|c| c.lock_time -= 1),
+        Atk5::new("VA9 request_deposit at lock_time 0 (no age)", VLT0, "vault:D10", dep()).dep(|c| c.lock_time = 0),
+        Atk5::new("VA9 request_deposit: vault creation = -1 (unaccepted parent)", VLT0, "vault:D10", dep()).built(|b, _| set_input_daa(b, VLT0, u64::MAX)),
+        Atk5::new("VA9 request_deposit: vault creation = DAA_MAX", VLT0, "vault:D10", dep()).built(move |b, _| {
+            set_input_daa(b, VLT0, DAA_MAX as u64);
+            b.lock_time = DAA_MAX as u64 + aged;
+        }),
+        Atk5::new("VA10 request_withdraw (partial) at vault age VAULT_REQ_DELAY - 1", VLT0, "vault:W12", wd(owner())).wd(|c| c.lock_time -= 1),
+        Atk5::new("VA10 request_withdraw (whole) at vault age VAULT_REQ_DELAY - 1", VLT0, "vault:W12", wd_whole(owner())).wd(|c| c.lock_time -= 1),
+        Atk5::new("VA10 request_withdraw: vault creation = -1 (unaccepted parent)", VLT0, "vault:W12", wd(owner())).built(|b, _| set_input_daa(b, VLT0, u64::MAX)),
+        Atk5::new("VA10 request_withdraw: vault creation = DAA_MAX", VLT0, "vault:W12", wd(owner())).built(move |b, _| {
+            set_input_daa(b, VLT0, DAA_MAX as u64);
+            b.lock_time = DAA_MAX as u64 + aged;
+        }),
+        Atk5::new("VA11 drained deposit-convert: record out_rem > 0 with burn_rem = 0 (fabricated)", REQ, "request:S9", st_dep_last()).st(|c| c.record.out_rem = 5 * KAS as i64),
+        Atk5::new("VA11 drained ACCRUE: record out_rem > 0 with burn_rem = 0 (fabricated)", REQ, "request:S9", acc).st(|c| c.record.out_rem = 5 * KAS as i64),
+    ]
+}
+
 pub fn all_atks5() -> Vec<Atk5> {
     let mut v = vec![];
-    for f in [va1, va2, va3, va4, va5, va6, va7, va8, va9, va10, va11, va12, va13, va14, stage6] {
+    for f in [va1, va2, va3, va4, va5, va6, va7, va8, va9, va10, va11, va12, va13, va14, stage6, stage7] {
         v.extend(f());
     }
     v

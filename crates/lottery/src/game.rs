@@ -2,7 +2,9 @@
 //! `draw()` (spec M3 A4 checks 8-20, A5, A6), of `claim()` (spec M4) and of the vault-share
 //! conversion and settlement (spec M5 A5, A6, A8: `mulfrac` in u128, `convert`, `settle`).
 //!
-//! Every function mirrors the script step for step in signed 64-bit integers. Overflow
+//! Every function mirrors the script step for step in signed 64-bit integers, except the M5
+//! `mulfrac` (and what calls it), which uses u128 (spec M5 D73); `mulfrac_steps` is its
+//! step-for-step i64 mirror. Overflow
 //! panics here (checked ops), so a test that drives a quantity past its A6 bound fails
 //! loudly instead of wrapping; in SilverScript overflow is undefined behaviour (R8), so
 //! the script range-checks inputs to stay inside the same bounds.
@@ -745,6 +747,14 @@ pub const SHARES_MAX: i64 = TOTAL_MAX - VS;
 /// Largest V' (spec M5 A2), so V' + VA <= 2^62. Cannot bind on chain (MAX_SOMPI < 2^62,
 /// DECISIONS fact S4-3).
 pub const ASSETS_MAX: i64 = TOTAL_MAX - VA;
+/// Vault request age (M5 Stage 7, user decision U-4): `request_deposit()` and
+/// `request_withdraw()` require tx.daa >= OpTxInputDaaScore(0) + VAULT_REQ_DELAY (a
+/// lower-bound lock, R3). `draw()` has no age check, so after every vault spend it has a
+/// window of VAULT_REQ_DELAY DAA in which no request can spend the vault. 600 DAA = 60 s
+/// at 10 BPS (testnet-10 and mainnet: rusty-kaspa v2.1.0
+/// consensus/core/src/config/params.rs:643 and :699, `BlockrateParams::new::<10>()`), the
+/// same 10-BPS convention as D_IDLE and D_RET (no network split).
+pub const VAULT_REQ_DELAY: i64 = 600;
 
 /// mulfrac(a, r, c) = floor(a x r / c) (D73, spec M5 A8) for 0 <= a <= 2^62 and
 /// 0 <= r < c <= 2^62, through u128; `None` outside that domain (the script's

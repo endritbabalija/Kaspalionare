@@ -42,6 +42,22 @@ pub fn reject_at(b: &Built, input: usize) -> TxScriptError {
     }
 }
 
+/// An engine arithmetic error, not a failed `require`: OpDiv/OpMod by zero or out of range
+/// (`InvalidState("... division by zero")`, rusty-kaspa v2.1.0
+/// `crypto/txscript/src/opcodes/mod.rs:656-661`) or a checked 64-bit add, sub, mul, neg or abs
+/// overflow (`NumberTooBig("... exceeds 64-bit signed integer range")`, `:590-651`). M5 S7-1:
+/// such an error never counts as a guard, so a `redundant` mutant must not rely on one.
+/// `NumberTooBig` from OpTxInputAmount/OpTxOutputAmount (`:1100-1107`, `:1151-1161`; a value
+/// above i64::MAX cannot be pushed) is a consensus fact about the opcode, not an arithmetic
+/// overflow in the script, and is not matched (M4 S4-3, M5 `EQUIVALENT`).
+pub fn is_engine_arithmetic(e: &TxScriptError) -> bool {
+    match e {
+        TxScriptError::InvalidState(s) => s.contains("division by zero"),
+        TxScriptError::NumberTooBig(s) => s.contains("exceeds 64-bit signed integer range"),
+        _ => false,
+    }
+}
+
 /// M2 attack keyed on the input index: `mutate(base)` is rejected by input `input` with a
 /// script error, and `base` itself is accepted by every input. The attack half runs first,
 /// so until Stage 3 (stub bodies) these tests fail only at the base check

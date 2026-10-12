@@ -122,7 +122,7 @@ Done when:
 - if the ticket, controller or marker script changed, `close()` at K = 16 is re-measured; stop and ask if any mass exceeds 90 % (it was 86.5 % transient after M3).
 
 ## M5 — House vault shares
-Status: todo
+Status: done (2026-10-12, spec `docs/specs/5.md`; conversion inside `draw()` with one settlement record (D65), virtual offset VS = 1,000 / VA = 1 and a deployer position at genesis (D66), share positions with owner-input withdrawal (D67), withdrawal cap w_c by witness (D69), exact-drain settlement (D72), 63-step `mulfrac` (D73), vault request age window δ = 600 DAA against `draw()` front-running (U-4); `close()` K = 16 unchanged at 86.8 % transient, worst `draw()` 41.7 / 53.1 / 14.5 %; open for M6: S₀ floor (U-5), deposit price lock-out, request griefing (U-6) and request throughput; see `docs/DECISIONS.md` and `docs/costs.md`)
 
 Vault shares, deposit and withdrawal requests, conversion at each draw's share price, and the liability lock (5.4). The spec proposes the request and conversion transactions and keeps `draw()`'s shape fixed. Record the choice in `docs/DECISIONS.md`. Requirements (5.4):
 - internal accounting;
@@ -150,6 +150,13 @@ Done when:
 - `docs/costs.md` lists size and mass per transition, the minimum ticket deposit, M_ref and the minimum fee payout;
 - final R, d, K, b_max and m_max are recorded in `docs/DECISIONS.md`.
 - carried from M4: P_MIN and d against claim fees under load (a PAY claim near P_MIN pays about 5–8 × P_MIN at the priority floor, M4-h); the b = 1 referral `buy()` at 95.7 % of storage with d = 0.11 KAS (U2); `close()` K = 16 transient headroom is 32,284 grams (86.8 %, M4-f).
+- carried from M5 (vault shares, `docs/DECISIONS.md` 2026-10-12):
+  - S₀ floor (U-5): genesis accepts V₀ = SHARE_UNIT, so S₀ = 1 against VS = 1,000 virtual shares, which then own about 99.9 % of the vault; set a minimum S₀ (or V₀) relative to VS;
+  - deposit price lock-out: once the price passes MIN_DEPOSIT sompi per share (about 10⁵ × the genesis price, or more than about 1,000 KAS accrued with no real shares), D70's mint ≥ ceil(D / MIN_DEPOSIT) refunds every deposit; tune SHARE_UNIT, VS and MIN_DEPOSIT;
+  - request griefing (U-6): the age window gives one request per 600 DAA, won by the highest fee; a position holder sending `request_withdraw(w = 1)` every slot starves honest requests for about 70 KAS/day in fees plus about 2,400 KAS/day of reserves locked until the next draw and settlement (solvency and `draw()` unaffected); candidates: several requests per vault spend (batching), a minimum withdrawal size, a larger request reserve;
+  - request throughput: at most one request per VAULT_REQ_DELAY = 600 DAA (about 1,440 per day) by construction; revisit δ with the batching choice;
+  - drawer stack headroom: 4 free slots at check 24 (M5 S4-1); any drawer change that keeps a value live across check 24 must re-measure it;
+  - cleanup: the dead M4 draw branch in `crates/lottery/src/draw.rs` (`SIG_DRAW_M4`, `args_m4`, the 22-push path of `RoundResult::from_tx`; M5 S4-9).
 
 ## M7 — Testnet-10 end to end
 Status: todo

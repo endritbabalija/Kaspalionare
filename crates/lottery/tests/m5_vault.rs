@@ -22,8 +22,8 @@ use lottery::buy::{KAS, OwnerKey};
 use lottery::close::FundingIn;
 use lottery::combo::Combo;
 use lottery::draw::{DrawCase, RoundResult};
-use lottery::game::{MIN_DEPOSIT, P_MIN, SHARES_MAX, SettleMode, VS, convert, withdraw_out};
-use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, RequestState};
+use lottery::game::{ASSETS_MAX, MIN_DEPOSIT, P_MIN, SHARES_MAX, SettleMode, TOTAL_MAX, VA, VAULT_REQ_DELAY, VS, convert, withdraw_out};
+use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, RecordState, RequestState};
 use lottery::vault::*;
 
 fn key(n: u8) -> OwnerKey {
@@ -442,6 +442,93 @@ fn vp12_script_accepts_reference_grid() {
     }
     assert_eq!(branches, (true, true, true), "capped, converted and uncapped branches reached");
     draw5(&d_refund_price());
+}
+
+// ---------------------------------------------------------------- Stage 7 (review fixes)
+
+/// Stage 7 (U-4): both vault request entries accept a request at exactly the vault's age
+/// VAULT_REQ_DELAY (lock_time = OpTxInputDaaScore(0) + VAULT_REQ_DELAY; one less is VA9/VA10
+/// in m5_attacks.rs `stage7_review_fixes`), and so does a later one. On a chain, a request
+/// asked for "now" runs once the vault is VAULT_REQ_DELAY old, so two requests in a row are
+/// VAULT_REQ_DELAY apart.
+#[test]
+fn s7_request_at_vault_age() {
+    let delay = VAULT_REQ_DELAY as u64;
+    let c = dep();
+    assert_eq!(c.lock_time, c.vault_daa + delay, "the deposit base sits at exactly the age");
+    let f = accept5("request_deposit at age VAULT_REQ_DELAY", &c.clone().into(), &c.build());
+    check_deposit(&c, &f);
+    let mut late = dep();
+    late.lock_time += 1_000_000;
+    accept5("request_deposit at a later age", &late.clone().into(), &late.build());
+    for (name, k) in keys() {
+        for w in [wd(k.clone()), wd_whole(k.clone())] {
+            assert_eq!(w.lock_time, w.vault_daa + delay, "the withdrawal base sits at exactly the age");
+            let f = accept5(&format!("request_withdraw at age VAULT_REQ_DELAY ({name})"), &w.clone().into(), &w.build());
+            check_withdraw(&w, &f);
+        }
+    }
+    let mut ch = chain5();
+    let g = ch.vault.2;
+    ch.deposit_now(&key(1).payout(), 10 * KAS as i64, 0);
+    assert_eq!(ch.vault.2, g + delay, "the first request waits for the genesis vault's age");
+    ch.deposit_now(&key(2).payout(), MIN_DEPOSIT, 0);
+    assert_eq!(ch.vault.2, g + 2 * delay, "the next request waits for vault' age");
+    let (c, ops) = ch.withdraw_case(0, 1_000, deployer(), 0);
+    assert_eq!(c.lock_time, g + 3 * delay);
+    ch.withdraw(&c, ops, 0);
+    ch.assert_share_invariants("Stage 7 chain");
+}
+
+/// Stage 7 (F3, VP12 at the edge of mulfrac's domain, engine only: values above MAX_SOMPI as
+/// M4 S4-3): a converting, cap-binding draw with M = V' + VA and N = S + VS within 2 x 10^12
+/// of 2^62 (all three mulfrac calls: C1 with r = N % M near 2^62, C2's out(wc) and
+/// out(wc + 1) with a = M near 2^62), and settlements whose mulfrac operands are near 2^62.
+/// The script accepts each, and the reference it is checked against equals a direct u128
+/// floor.
+#[test]
+fn s7_mulfrac_domain_edge_accepted() {
+    let fl = |a: i64, r: i64, c: i64| ((a as u128 * r as u128) / c as u128) as i64;
+    // ---- draw: no sales (V' = V), N < M (q = 0, r = N), W = S: out(W) ~ V' - 1,000 exceeds
+    // the slack V' + D - L', so the cap binds.
+    let mut c = DrawCase::new(4);
+    c.vault.total_assets = ASSETS_MAX - 1_000_000_000_000;
+    c.vault.total_shares = SHARES_MAX - 2_000_000_000_000;
+    c.vault.liability = 0;
+    c.controller.v_rec = c.vault.total_assets;
+    c.vault.pend_dep = 100_000_000_000;
+    c.vault.pend_wsh = c.vault.total_shares;
+    let x = c.expected();
+    let (m, n) = (x.v_prime + VA, c.vault.total_shares + VS);
+    assert!(m > TOTAL_MAX - 2_000_000_000_000 && n > TOTAL_MAX - 3_000_000_000_000 && n < m, "M {m}, N {n}");
+    assert!(x.conv.ok && !x.conv.refund, "the deposits convert: {:?}", x.conv);
+    assert!(x.conv.wc < x.conv.w, "the cap binds: {:?}", x.conv);
+    assert_eq!(x.conv.mint, fl(c.vault.pend_dep, n, m), "mint = floor(D N / M) (q = 0)");
+    assert_eq!(x.conv.out_c, fl(m, x.conv.wc, n), "out(wc) = floor(M wc / N)");
+    assert!(fl(m, x.conv.wc + 1, n) > x.conv.slack, "out(wc + 1) > slack");
+    let y = draw5(&c);
+    assert_eq!(y.conv.wc, x.conv.wc);
+    println!("edge draw: V' {} S {} D {} W {} -> mint {} wc {} out_c {}", x.v_prime, c.vault.total_shares, c.vault.pend_dep, c.vault.pend_wsh, x.conv.mint, x.conv.wc, x.conv.out_c);
+    // ---- settle PAY: conv = mulfrac(burn_rem, s, wsh_rem), pay = mulfrac(out_rem, conv, burn_rem).
+    let rq = |kind: u8, amount: i64| RequestState::new(2, kind, amount, &owner().payout());
+    let (wsh, burn, out) = (SHARES_MAX, SHARES_MAX - 1_000_000, ASSETS_MAX - 5_000_000_000);
+    let s = (1i64 << 61) + 12_345;
+    let st = SettleCase::new(record(0, 0, 0, wsh, burn, out), rq(KIND_WITHDRAW, s));
+    let e = st.expected();
+    assert_eq!((e.mode, e.drained), (SettleMode::Pay, false), "PAY, not drained");
+    assert_eq!(e.conv, fl(burn, s, wsh));
+    assert_eq!(e.pay, fl(out, e.conv, burn));
+    let f = accept5("settle PAY at the mulfrac edge", &st.clone().into(), &st.build());
+    check_settle(&st, &f);
+    // ---- settle deposit-convert: sh = mulfrac(mint_rem, s, dep_rem).
+    let s = (1i64 << 61) + 777;
+    let rc: RecordState = record(0, TOTAL_MAX, SHARES_MAX, 0, 0, 0);
+    let sd = SettleCase::new(rc, rq(KIND_DEPOSIT, s));
+    let e = sd.expected();
+    assert_eq!((e.mode, e.drained), (SettleMode::DepositConvert, false));
+    assert_eq!(e.sh, fl(SHARES_MAX, s, TOTAL_MAX));
+    let f = accept5("settle deposit-convert at the mulfrac edge", &sd.clone().into(), &sd.build());
+    check_settle(&sd, &f);
 }
 
 // ---------------------------------------------------------------- VP14

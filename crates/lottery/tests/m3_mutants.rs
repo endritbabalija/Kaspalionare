@@ -66,13 +66,16 @@ fn killed_assign_under(t: Arc<Templates>, label: &str, atk: Atk) {
 }
 
 /// Redundant check: the mutant still rejects the attack at its input (another check of the
-/// same script implies the removed one).
+/// same script implies the removed one). The rejection must not be an engine arithmetic
+/// error (division by zero, 64-bit overflow): such an error is not a guard (M5 S7-1), and a
+/// mutant rejected only by one is a kill (`killed_engine`).
 fn redundant(which: Sil, ids: &[&str], atk: Atk) {
     atk.strike();
     let t = mutant(which, ids);
     let (g, b) = atk.pair(&t);
     accept_draw(&g);
-    reject_at(&b, atk.input);
+    let e = reject_at(&b, atk.input);
+    assert!(!is_engine_arithmetic(&e), "mutant {which:?} {ids:?}: input {} rejects only by an engine arithmetic error, not a require: {e:?}", atk.input);
 }
 
 /// The drawer with the line tagged `id` replaced by `line` (a weakened check).
@@ -284,10 +287,77 @@ fn d14_sp() {
 
 #[test]
 fn d14_nonneg() {
-    // DA3 (Stage 4). Spec M5 C2 layers two more checks on V' >= 0 (M5 Stage 4, S4-6): with
-    // L' >= 0, `lNext <= V' + D_c` (M5C2_slack) and then `out_c <= slack` (M5C2_fits, out_c
-    // = 0 <= slack = V' - L') both reject V' = -1, so the mutant drops all three.
+    // M5 Stage 7 (F1, reviewer should-fix #1): with deposits pending (D > 0), D14_nonneg is
+    // the only require between V' = -1 and C1's divisor M = V' + VA = 0. Removed alone, the
+    // attack is rejected only by OpDiv's division by zero (rusty-kaspa v2.1.0
+    // crypto/txscript/src/opcodes/mod.rs:656-661, InvalidState), an engine arithmetic error
+    // and not a check, so `killed_engine` counts it as killed: the require is the guard.
+    killed_engine(D, &["D14_nonneg"], vault_negative_pending(), "division by zero");
+}
+
+#[test]
+fn d14_nonneg_nothing_pending() {
+    // DA3 (Stage 4), D = 0. Spec M5 C2 layers two more requires on V' >= 0 here (M5 Stage 4,
+    // S4-6): with L' >= 0, `lNext <= V' + D_c` (M5C2_slack) and then `out_c <= slack`
+    // (M5C2_fits) both reject V' = -1, so with D = 0 the mutant drops all three. This test
+    // also backs m5_mutants.rs's EQUIVALENT entry for M5C2_slack. With D > 0 those two come
+    // after C1, so D14_nonneg alone guards C1 (`d14_nonneg`).
     killed(D, &["D14_nonneg", "M5C2_slack", "M5C2_fits"], vault_negative());
+}
+
+/// `vault_negative` with deposits pending (D = MIN_DEPOSIT): the good draw has V' = 0, so it
+/// writes a refund-mode settlement record at 3 + np and check 13 counts it; the bad draw
+/// claims V' = -1 (vault input one sompi lower, vault' and controller' as `vault_negative`).
+fn vault_negative_pending() -> Atk {
+    let mut good = base();
+    good.vault.pend_dep = lottery::game::MIN_DEPOSIT;
+    let x = good.expected();
+    good.vault.total_assets -= x.v_prime;
+    let x = good.expected();
+    assert_eq!(x.v_prime, 0);
+    assert!(x.rec && x.conv.refund, "a refund-mode record at V' = 0: {:?}", x.conv);
+    Atk::built(DRW, good, |b, c| {
+        let t = b.templates.clone();
+        let mut v = c.vault.clone();
+        v.total_assets -= 1;
+        set_redeem(b, VLT, t.vault_redeem(&v));
+        b.inputs[VLT].entry.amount -= 1;
+        let x = c.expected();
+        let mut vp = x.vault.clone();
+        vp.total_assets -= 1;
+        b.outputs[1].script_public_key = t.vault_spk(&vp);
+        b.shift_value(1, -1);
+        let mut cp = x.controller.clone();
+        cp.v_rec -= 1;
+        b.outputs[2].script_public_key = t.controller_spk(&cp);
+    })
+}
+
+/// A require whose removal leaves only an engine arithmetic error behind (M5 Stage 7, F1):
+/// with the committed templates the attack is rejected at its input by a failed require
+/// (VerifyError, first failing check `check`); under the mutant without `ids` the base is
+/// accepted and the attack is either accepted or rejected only by an engine error whose
+/// message contains `engine` (never by another require, which would make the line
+/// redundant). An engine error is not a check (the harness rule of `killed`, which needs
+/// acceptance, would call this a survivor), so the require is the guard.
+fn killed_engine(which: Sil, ids: &[&str], atk: Atk, engine: &str) {
+    atk.strike();
+    let (_, bad) = atk.pair(&tpl());
+    let e = reject_at(&bad, atk.input);
+    assert!(matches!(e, harness::TxScriptError::VerifyError), "committed: expected a failed require, got {e:?}");
+    let label = first_failing_check(&bad);
+    assert_eq!(label, "14", "committed: the first failing check is 14 (D14_nonneg)");
+    let t = mutant(which, ids);
+    let (g, b) = atk.pair(&t);
+    accept_draw(&g);
+    match b.finish().run_input(atk.input) {
+        Ok(_) => println!("mutant {which:?} {ids:?}: attack accepted at input {}", atk.input),
+        Err(harness::TxScriptError::VerifyError) => panic!("mutant {which:?} {ids:?}: a require still rejects at input {}: the line is redundant", atk.input),
+        Err(e) => {
+            assert!(format!("{e:?}").contains(engine), "mutant {which:?} {ids:?}: unexpected error {e:?}");
+            println!("mutant {which:?} {ids:?}: killed; only an engine error rejects at input {}: {e:?}", atk.input);
+        }
+    }
 }
 
 #[test]

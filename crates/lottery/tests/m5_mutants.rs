@@ -29,7 +29,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common::m2::{Sil, accept_m4, lookalike, reject_at, tpl};
+use common::m2::{Sil, accept_m4, is_engine_arithmetic, lookalike, reject_at, tpl};
 use common::m5::*;
 use harness::{ArtifactValue, TxScriptError};
 use lottery::buy::{Built, InKind, Sources, Template, Templates, b_max};
@@ -140,7 +140,8 @@ fn killed(tags: &[&str], id: &str) {
 }
 
 /// Redundant line: the mutant still rejects the attack at the named input (not on the
-/// budget), and still accepts the base.
+/// budget, and not only by an engine arithmetic error such as division by zero or a 64-bit
+/// overflow, which is no guard: Stage 7 S7-1), and still accepts the base.
 fn redundant(tags: &[&str], id: &str) {
     let a = atk5(id);
     a.strike();
@@ -151,6 +152,7 @@ fn redundant(tags: &[&str], id: &str) {
         Ok(_) => panic!("mutant {tags:?} accepts `{id}` at input {}: the line is not redundant", a.input),
         Err(e) => {
             assert!(!matches!(e, TxScriptError::ExceededCommittedScriptUnits { .. }), "budget error: {e:?}");
+            assert!(!is_engine_arithmetic(&e), "mutant {tags:?} `{id}`: input {} rejects only by an engine arithmetic error, not a require: {e:?}", a.input);
             println!("redundant {tags:?} `{id}`: still rejected at input {} by {e:?}", a.input);
         }
     }
@@ -183,7 +185,7 @@ const EQUIVALENT: &[(&str, &str)] = &[
     ),
     (
         "drawer:M5C2_slack",
-        "L' <= V' + D_c whenever check 17 passes: L' = x2 + G2' (m - 1) passes Cv = muldiv(V', cap) with cap <= 10^4, so L' <= V' for V' >= 0, and V' < 0 fails D14_nonneg first. The only states that reach it (V' < 0) are killed with D14_nonneg and M5C2_fits removed together (m3_mutants.rs d14_nonneg, M5 Stage 4 S4-6); run: c2_slack_redundant",
+        "L' <= V' + D_c whenever check 17 passes: L' = x2 + G2' (m - 1) passes Cv = muldiv(V', cap) with cap <= 10^4, so L' <= V' for V' >= 0, and V' < 0 fails D14_nonneg first. The only states that reach it (V' < 0, nothing pending) are killed with D14_nonneg and M5C2_fits removed together (m3_mutants.rs d14_nonneg_nothing_pending, M5 Stage 4 S4-6; with D > 0, D14_nonneg alone guards C1: m3_mutants.rs d14_nonneg, Stage 7 F1); run: c2_slack_redundant",
     ),
 ];
 
@@ -242,6 +244,14 @@ killed!(d6_class, ["vault:M5D6_class"], "VA9 owner class 3");
 killed!(d6_pad, ["vault:M5D6_pad"], "VA9 owner key padding byte set (class 0)");
 killed!(d7_plus, ["vault:M5D7"], "VA9 request value R + 1");
 killed!(d7_minus, ["vault:M5D7"], "VA9 request value R - 1");
+// Stage 7 (U-4): the vault request age, D10.
+killed!(d10_creation_0, ["vault:M5D10_creation#0"], "VA9 request_deposit: vault creation = -1 (unaccepted parent)");
+// creation < DAA_MAX: creation + VAULT_REQ_DELAY >= LOCK_TIME_THRESHOLD fails the compiled
+// range before CLTV (silverscript-lang/src/compiler/compile/statement.rs:375-388), as the
+// refresh RF3_creation#1. It stays as the guard that keeps the sum in range.
+redundant!(d10_creation_1_redundant, ["vault:M5D10_creation#1"], "VA9 request_deposit: vault creation = DAA_MAX");
+killed!(d10_age, ["vault:M5D10_age"], "VA9 request_deposit at vault age VAULT_REQ_DELAY - 1");
+killed!(d10_age_no_lock, ["vault:M5D10_age"], "VA9 request_deposit at lock_time 0 (no age)");
 
 // ================================================================ vault request_withdraw (A4.2)
 
@@ -314,6 +324,12 @@ killed!(w7_zero, ["vault:M5W7_zero"], "VA9 request_withdraw: the change under a 
 killed!(w8_vault, ["vault:M5W8_vault"], "VA9 request_withdraw: vault' value - 1");
 killed!(w8_request, ["vault:M5W8_request"], "VA9 request_withdraw: request value R + 1");
 killed!(w8_position, ["vault:M5W8_position"], "VA9 request_withdraw: position' value R - 1");
+// Stage 7 (U-4): the vault request age, W12.
+killed!(w12_creation_0, ["vault:M5W12_creation#0"], "VA10 request_withdraw: vault creation = -1 (unaccepted parent)");
+// As d10_creation_1_redundant.
+redundant!(w12_creation_1_redundant, ["vault:M5W12_creation#1"], "VA10 request_withdraw: vault creation = DAA_MAX");
+killed!(w12_age_partial, ["vault:M5W12_age"], "VA10 request_withdraw (partial) at vault age VAULT_REQ_DELAY - 1");
+killed!(w12_age_whole, ["vault:M5W12_age"], "VA10 request_withdraw (whole) at vault age VAULT_REQ_DELAY - 1");
 
 // ================================================================ position vault_leg (PO)
 
@@ -419,6 +435,9 @@ killed!(s9_final_0, ["request:M5S9_final#0"], "VA11 FINAL: request value TOTAL_M
 killed!(s9_final_1, ["request:M5S9_final#1"], "VA11 FINAL payout + 1");
 killed!(s9_pay, ["request:M5S9_pay"], "VA11 PAY payout + 1");
 killed!(s9_funder, ["request:M5S9_funder"], "VA11 the record's R refund - 1");
+// Stage 7 (F4): a drained record is empty.
+killed!(s9_empty_deposit, ["request:M5S9_empty"], "VA11 drained deposit-convert: record out_rem > 0 with burn_rem = 0 (fabricated)");
+killed!(s9_empty_accrue, ["request:M5S9_empty"], "VA11 drained ACCRUE: record out_rem > 0 with burn_rem = 0 (fabricated)");
 killed!(s10_owner_final, ["request:M5S10_owner"], "VA11 FINAL payout redirected");
 killed!(s10_owner_refund, ["request:M5S10_owner"], "VA11 refund payout redirected");
 killed!(s10_funder, ["request:M5S10_funder"], "VA11 the record's R refunded to another script");
@@ -728,5 +747,5 @@ fn every_m5_tag_is_tested() {
     assert_eq!((tags, lines), (EXPECTED_TAGS, EXPECTED_LINES), "M5 tag count changed: update this test and the handoff table");
 }
 
-const EXPECTED_TAGS: usize = 153;
-const EXPECTED_LINES: usize = 212;
+const EXPECTED_TAGS: usize = 158;
+const EXPECTED_LINES: usize = 219;

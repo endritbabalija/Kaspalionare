@@ -28,8 +28,10 @@
 //! M5 Stages 3 and 5 write them, the vault, position, request and record placeholders reject
 //! these transactions at dispatch.
 //!
-//! Builder policy (S5-5): requests, settlements and refreshes spend chain-merged inputs (no
-//! check here reads an input DAA score except refresh's idle check).
+//! Builder policy (S5-5): requests, settlements and refreshes spend chain-merged inputs. The
+//! input DAA scores read are refresh's idle check and, since M5 Stage 7 (U-4), the vault
+//! request age: a request's lock_time must be >= the vault's creation DAA + VAULT_REQ_DELAY
+//! (`DepositCase::at_age` / `WithdrawCase::at_age`; `new_with` sets exactly that).
 
 use std::sync::Arc;
 
@@ -39,7 +41,7 @@ use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, OwnerKey, Templates, b
 use crate::claim::payout_spk;
 use crate::close::FundingIn;
 use crate::game::{
-    MIN_DEPOSIT, P_MIN, SHARE_UNIT, SettleMode, TOTAL_MAX, VA, VS, convert, mulfrac,
+    MIN_DEPOSIT, P_MIN, SHARE_UNIT, SettleMode, TOTAL_MAX, VA, VAULT_REQ_DELAY, VS, convert, mulfrac,
 };
 use crate::params::TEST_RESERVE;
 use crate::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, PositionState, RecordState, RequestState, VaultState};
@@ -153,6 +155,7 @@ pub struct DepositCase {
     pub funding: Vec<FundingIn>,
     pub change: bool,
     pub fee: u64,
+    /// The transaction lock time; must be >= vault_daa + VAULT_REQ_DELAY (D10, U-4).
     pub lock_time: u64,
     pub cov: Hash,
     pub funding_sk: [u8; 32],
@@ -194,7 +197,7 @@ impl DepositCase {
             funding: vec![FundingIn { value: 20 * KAS, daa: 1_100_000 }],
             change: true,
             fee: KAS / 10,
-            lock_time: 0,
+            lock_time: 1_000_000 + VAULT_REQ_DELAY as u64,
             cov: COV,
             funding_sk: FUNDING_SK,
             budget_delta: 0,
@@ -203,6 +206,18 @@ impl DepositCase {
 
     pub fn vault_value(&self) -> u64 {
         val(self.vault.total_assets as i128 + self.vault.pend_dep as i128 + self.reserve as i128)
+    }
+
+    /// The earliest lock time the vault accepts: its creation DAA + VAULT_REQ_DELAY (D10).
+    pub fn earliest(&self) -> u64 {
+        self.vault_daa + VAULT_REQ_DELAY as u64
+    }
+
+    /// Set the vault's creation DAA to `daa` and the lock time to the earliest accepted one.
+    pub fn at_age(&mut self, daa: u64) -> &mut Self {
+        self.vault_daa = daa;
+        self.lock_time = self.earliest();
+        self
     }
 
     pub fn expected(&self) -> DepositExpected {
@@ -274,6 +289,7 @@ pub struct WithdrawCase {
     pub funding: Vec<FundingIn>,
     pub change: bool,
     pub fee: u64,
+    /// The transaction lock time; must be >= vault_daa + VAULT_REQ_DELAY (W12, U-4).
     pub lock_time: u64,
     pub cov: Hash,
     pub funding_sk: [u8; 32],
@@ -327,7 +343,7 @@ impl WithdrawCase {
             funding: vec![],
             change: true,
             fee: KAS / 10,
-            lock_time: 0,
+            lock_time: 1_000_000 + VAULT_REQ_DELAY as u64,
             cov: COV,
             funding_sk: FUNDING_SK,
             budget_delta: 0,
@@ -342,6 +358,18 @@ impl WithdrawCase {
 
     pub fn vault_value(&self) -> u64 {
         val(self.vault.total_assets as i128 + self.vault.pend_dep as i128 + self.reserve as i128)
+    }
+
+    /// The earliest lock time the vault accepts: its creation DAA + VAULT_REQ_DELAY (W12).
+    pub fn earliest(&self) -> u64 {
+        self.vault_daa + VAULT_REQ_DELAY as u64
+    }
+
+    /// Set the vault's creation DAA to `daa` and the lock time to the earliest accepted one.
+    pub fn at_age(&mut self, daa: u64) -> &mut Self {
+        self.vault_daa = daa;
+        self.lock_time = self.earliest();
+        self
     }
 
     pub fn owner_input(&self) -> usize {

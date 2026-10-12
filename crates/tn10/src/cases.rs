@@ -476,7 +476,9 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     let daa = ctx.client.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
     let t = Templates::get(b_max());
     let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
-    let deadline = daa as i64 + 600;
+    // vault-m5 waits VAULT_REQ_DELAY before each of its two requests (U-4), so T is set that
+    // much later; draw-m3 and claim-m4 are unchanged.
+    let deadline = daa as i64 + 600 + if vr.is_some() { 3 * lottery::game::VAULT_REQ_DELAY } else { 0 };
 
     // ---- genesis (as close_m2, T ahead)
     let f = fund(ctx).await?;
@@ -519,7 +521,10 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         let mut dc = DepositCase::new_with(&t);
         dc.vault = g.vault.clone();
         dc.reserve = g.reserve();
-        dc.vault_daa = gdaa;
+        // M5 Stage 7 (U-4): lock_time = the vault's creation + VAULT_REQ_DELAY (check D10);
+        // the transaction is final once the virtual DAA score passes it.
+        dc.at_age(gdaa);
+        wait_daa(ctx, dc.lock_time + 20, "vault age (request_deposit)").await?;
         dc.d = vr.d;
         dc.owner = me;
         dc.funding = vec![FundingIn { value: gchange.entry.amount, daa: gdaa }];
@@ -532,6 +537,28 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
             b.finish()
         };
         dc.fee = lottery_fee(&dep_fin(&dc));
+        // Negative case (M5 re-review should-fix #2): the same request one DAA too early,
+        // lock_time = vault creation + VAULT_REQ_DELAY - 1. The lock time is final (the
+        // virtual DAA is past it), so only the script's age check D10 can refuse it. The local
+        // engine must reject it at input 0, and so must the node; if the node accepted it,
+        // it would spend the vault and the probe stops (a finding).
+        {
+            let mut early = dc.clone();
+            early.lock_time = dc.lock_time - 1;
+            let ef = dep_fin(&early);
+            match ef.run() {
+                Err((0, e)) => println!("local engine rejects the early request_deposit at input 0, as expected: {e:?}"),
+                other => return Err(format!("{tag}: local engine did not reject the early request_deposit at input 0: {other:?}")),
+            }
+            let es = sent_of(&ef);
+            let case = format!(
+                "negative: request_deposit() at vault age VAULT_REQ_DELAY - 1 (lock_time = creation {} + 599 = {}); expected REJECTED by check D10",
+                gdaa, early.lock_time
+            );
+            if ctx.submit(&case, &es, false).await? {
+                return Err(format!("{tag}: FINDING: the node ACCEPTED request_deposit at lock_time = vault creation + VAULT_REQ_DELAY - 1"));
+            }
+        }
         let df = dep_fin(&dc);
         df.run().map_err(|(i, e)| format!("local engine rejects {tag} request_deposit at input {i}: {e:?}"))?;
         let ds = sent_of(&df);
@@ -550,7 +577,9 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         let mut wc = WithdrawCase::new_with(&t, OwnerKey::Schnorr(ctx.sk));
         wc.vault = dx.vault.clone();
         wc.reserve = g.reserve();
-        wc.vault_daa = vault_in.2;
+        // U-4: vault' (created by the deposit request) must be VAULT_REQ_DELAY old (W12).
+        wc.at_age(vault_in.2);
+        wait_daa(ctx, wc.lock_time + 20, "vault age (request_withdraw)").await?;
         wc.position = g.position.clone();
         wc.position_daa = gdaa;
         wc.w = vr.w;
@@ -921,6 +950,9 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
 /// - The record's state is rebuilt from the draw transaction bytes alone
 ///   (`RoundResult::record`, R4); every input of every step is the node's own entry, read
 ///   once a chain block merged the creating transaction (`merged`, O-S4-4).
+/// - Negative case (U-4 age window): before the valid `request_deposit()`, the same
+///   transaction with lock_time = vault creation + VAULT_REQ_DELAY - 1 is submitted and must
+///   be rejected by the node (vault check D10); acceptance is a finding and stops the probe.
 /// Locked on testnet afterwards: round 2's objects, the new pools, vault', the new position
 /// and position' (no further entry is exercised). Payouts and changes are ours.
 pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {

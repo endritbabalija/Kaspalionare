@@ -125,6 +125,14 @@ fn stage6_boundaries_and_shapes() {
     run5(stage6());
 }
 
+/// Stage 7 (review fixes): the vault request age (U-4: D10, W12; age VAULT_REQ_DELAY - 1,
+/// no lock time, an unaccepted or out-of-range vault creation) and a drained record that is
+/// not empty (F4: S9).
+#[test]
+fn stage7_review_fixes() {
+    run5(stage7());
+}
+
 /// VA15: each new entry's leader one budget unit short fails on the budget, after the base
 /// is accepted.
 #[test]

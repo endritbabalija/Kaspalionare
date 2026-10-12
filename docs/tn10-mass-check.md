@@ -216,3 +216,38 @@ The masses match the local measurements:
 **Earlier run, superseded.** A first `claim-m4` run on 2026-10-11 used the A_MAX = 5 drawer (before review fix U5). It was also accepted end to end; claim `e0787782f4d2f9cc3ebd4bd16f3009b84f7a6e3b22291516206428d3eaee4fe0` had the same claim masses (47,503 / 152,052 / 24,633), and its draw measured 110,779 / 344,436 / 130,534. The run above replaces it (DECISIONS U7).
 
 **Note on the M3 rows above.** The `draw-m3` runs (M3 section) predate the M4 layout (drawer `ticket_tpl`, pool `reserve`, the larger pool and marker) and A_MAX = 7. Their figures describe the M3 scripts; the `draw()` row in this section is the current one.
+
+## M5: vault requests, a converting `draw()` and settlements (spec M5-f, 2026-10-12)
+
+`cargo run --release -p tn10 -- probe vault-m5`. It runs the `draw-m3` sequence (shared code, `round1_drawn_with`) with the final M5 scripts, adds two vault requests before the buy, and settles both after the draw. Every transaction is built by the `lottery` builders and checked in the local v2.1.0 engine before submission; every input is the node's chain-merged entry (M3 S5-5).
+- **Genesis** as in M4 (K = 16, J(1) = 10 KAS, V0 = 60 KAS), with the M5 templates: vault template fields, S0 = V0 / SHARE_UNIT = 6,000,000 shares in the deployer position (owner: the probe key, Schnorr P2PK). T is set 3δ later than in M4 to leave room for the two requests.
+- **Negative case (U-4 age window):** the `request_deposit()` below, with lock_time = vault creation + VAULT_REQ_DELAY − 1, submitted once the virtual DAA had passed that lock time (so the transaction is final and only the script decides). The local engine and the node both rejected it at input 0 (vault check D10).
+- **`request_deposit()`** of D = 2 KAS at exactly lock_time = vault creation + δ; **`request_withdraw()`** (partial, w = 1 % of S0) of the deployer position at vault' creation + δ, with the deposit's change as the P2PK Schnorr owner input.
+- **`buy()`**, **`close()`** and **`draw_test_seed()`** as in M4. The draw converts both sides (mint 236,539 shares for D; wc = W = 60,000, out_c = 0.5073 KAS) and writes the settlement record at output 7 (3 + np); the record state was rebuilt from the draw bytes alone (`RoundResult::record`) and matched the output script.
+- **`settle()`** of the deposit (deposit-convert, a new position, record' kept), then of the withdrawal (FINAL, the record drained, its R refunded to the draw caller).
+- Node: `vector-10.kaspa.green`, version 2.1.0, network `testnet-10`, DAA ≈ 595,068,833. Covenant ID `403d8bc8ef49d2d9fd6f1cff6fa55e9b0ab21d32d2e6239f547b540da27e3abd`.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: vault-m5 genesis, K = 16, real templates, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted; visible after 1.4 s | `71f7ad9abd324c1899ec5d8e6535306a1dc372f470e173053c819f1e4d8f1ae6` |
+| **negative: `request_deposit()` at vault age δ − 1 (lock_time = creation 595,068,865 + 599 = 595,069,464)** | 41,443 | 77,372 | 24,288 | 41,443 | 2 | 0.0388 | **REJECTED: "failed to verify the signature script: Unsatisfied lock time: locktime requirement not satisfied -- locktime is greater than the transaction locktime: 595069465 > 595069464"** | `79be31e709d89c71e504c120defa46b46d1fdeba4e1a3832fa83690e95057ed4` |
+| **`request_deposit()`, real vault script: D = 2.00 KAS, request value R** | **23,143** | **77,372** | 24,288 | 38,686 | 2 | 0.0388 | **accepted; visible after 0.5 s** | `85db3c8270451a99b7f59d78c3f2202977f4d8f01722517bab803ef3e25ec24a` |
+| **`request_withdraw()`, real vault and position scripts: partial, w = 60,000 of 6,000,000 shares, P2PK Schnorr owner input** | **25,233** | **82,652** | 47,935 | 47,935 | 3 | 0.0480 | **accepted; visible after 0.5 s** | `bd8321bb70cb61e03a8ad4c5073c89d430204685b5445b6f32d60968de4324f5` |
+| setup: `buy()` of the jackpot combination [1, 9, 13, 15, 29] + 8 on shard 0 | 43,472 | 151,488 | 378,497 | 378,497 | 2 | 0.3786 | accepted; visible after 0.5 s | `621e5b71c4cb4b860ce47144221102835cd37abfdd4fd243106cf1809e89d666` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 294,619 | 867,716 | 426,392 | 433,858 | 19 | 0.4340 | accepted; visible after 1.4 s | `2891e0572e763e698ce19730c3af78134b60b4c7dc2f4fd395167a100be51281` |
+| **`draw_test_seed()`, real scripts, K = 16, a = 0, np = 4, h_J = 1, n2 = 0, fee paid; conversion D = 2.00 KAS → mint 236,539 shares, W = 60,000 → wc = 60,000, out_c = 0.5073 KAS; record at output 7** | **142,504** | **449,056** | **148,708** | 224,528 | 5 | 0.2246 | **accepted; visible after 1.4 s** | `4d473f90983d98f3ffbac769e14496d566a16d613fcbc0fa360682b13c510a85` |
+| **`settle()`, real request and record scripts: deposit-convert, s = 2.00 KAS → position of 236,539 shares; record' kept** | **22,147** | **73,388** | 41,843 | 41,843 | 3 | 0.0419 | **accepted; visible after 0.5 s** | `1ffa5328e57a0fff3107beab8bd2d54cc559079b7d15bc8cfec7170d5f26c0f4` |
+| **`settle()`: withdrawal FINAL, w = 60,000 shares, payout 2.1973 KAS (pay + R), record drained, R refunded to the funder** | **21,857** | **73,108** | 10,439 | 36,554 | 3 | 0.0367 | **accepted; visible after 0.5 s** | `2dec3958a0efb894d210379b133a290e097e178c74e2e3eadcb26ae8f497ab3d` |
+
+Round result from the draw transaction bytes (`RoundResult::from_tx`): round 1, win [1, 9, 13, 15, 29, 8], D_claim 601,550,813, pools (tier, slice, value) [(0, 1000000000, 1169000000), (2, 32000, 173000000), (3, 2666, 172000000), (4, 1000, 172000000)], plus the record.
+
+The masses match the local measurements:
+- requests and settlements = M5-e (request_deposit 23,143 / 77,372; request_withdraw partial 25,233 / 82,652; settle deposit-convert 22,147 / 73,388; settle FINAL drained 21,857 / 73,108; storage differs with the output values);
+- `close()` = M5-d (294,619 / 867,716, 86.8 % of transient), unchanged from M4;
+- the converting draw is 28.5 % of compute and 44.9 % of transient (M4-i's draw without conversion: 113,931 / 354,644); the larger drawer (65 kB) and vault (3.4 kB) redeems account for most of the difference.
+
+The rejection message is the node's CLTV error: the script's required lock time, creation + 600 = 595,069,465, is greater than the transaction's 595,069,464 (rusty-kaspa v2.1.0 `crypto/txscript/src/opcodes/mod.rs:874-923`). That is exactly check D10. The masses in that row belong to a transaction the builder sized for a script that fails (its compute, 41,443, differs from the valid request's 23,143); they are not a measurement of any accepted shape. The valid request one DAA later was accepted.
+
+**Earlier runs, superseded.** Two earlier `vault-m5` runs on 2026-10-12 were also accepted end to end. The first, before the age window (U-4), measured request_deposit transient 77,092, request_withdraw 82,372 and draw 448,800 (the vault redeem was 64 B smaller); its first attempt in a debug build had overflowed the 1 MB Windows main-thread stack before submitting anything (fixed: the probe runs on a 64 MB thread). The second, on the final scripts without the negative case (node `vector-10.kaspa.green`, DAA ≈ 595,059,437), had the same masses as the table above (draw `2691a0f00f8873859800b57d2894283fab288386bf58bbd345fbb2ffa13f4448`). The run above replaces both.
+
+Locked on testnet (no further entry exercised): the round 2 objects, drawer', vault', the four pools, the ticket, the new position (236,539 shares) and position' (5,940,000 shares). Payouts, the record's refunded R and changes are ours.

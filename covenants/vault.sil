@@ -21,7 +21,8 @@ pragma silverscript ^0.1.0;
 // take the request template bytes as arguments; the binding is by request_tpl (own state).
 //
 // Each check of a request entry starts at a "// ==== check <label>" line (labels D1..D9,
-// W1..W11, handoff S2-6), in spec order, outside any if/for body. `// mut:M5<ID>` tags mark
+// W1..W11, handoff S2-6, then the Stage 7 age checks D10 and W12), in spec order, outside
+// any if/for body. `// mut:M5<ID>` tags mark
 // the requires the mutation tests remove one at a time (handoff S2-8).
 contract Vault(
     byte[32] drawerTemplateHash,
@@ -46,6 +47,12 @@ contract Vault(
     int constant F_MAX = 8;
     int constant RESERVE_MAX = 10000000000;
     int constant MIN_DEPOSIT = 100000000;
+    // M5 Stage 7 (user decision U-4): a request may spend the vault only once the vault UTXO
+    // is VAULT_REQ_DELAY DAA old (600 DAA = 60 s at 10 BPS, = game::VAULT_REQ_DELAY), so
+    // after every vault spend draw() (which has no age check) has that long to spend it
+    // before any request can. DAA_MAX = SilverScript's LOCK_TIME_THRESHOLD (the M4 bound).
+    int constant VAULT_REQ_DELAY = 600;
+    int constant DAA_MAX = 500000000000;
 
     // Drawer state layout (spec M3 A3.1; ticket_tpl added by spec M4 A3.2, D54), for
     // readInputStateWithTemplate.
@@ -223,6 +230,19 @@ contract Vault(
             owner_class: owner_class_arg,
             owner_key: owner_key_arg
         }, req_prefix, req_suffix, request_tpl);
+
+        // ==== check D10: the vault's age (M5 Stage 7, U-4; lower bound only, R3): tx.daa >= creation + VAULT_REQ_DELAY
+        // OpTxInputDaaScore pushes the UTXO's block_daa_score as i64 (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1124-1130); an unaccepted parent has
+        // UNACCEPTED_DAA_SCORE = u64::MAX (consensus/core/src/constants.rs:51), pushed as -1,
+        // so creation >= 0 refuses a request chained on an unaccepted vault. creation <
+        // DAA_MAX before the addition, so creation + VAULT_REQ_DELAY cannot overflow;
+        // `require(tx.daa >= x)` is OpCheckLockTimeVerify (silverscript-lang
+        // src/compiler/compile/statement.rs:375-388; mod.rs:874-923).
+        int creation = OpTxInputDaaScore(0);
+        require(creation >= 0); // mut:M5D10_creation
+        require(creation < DAA_MAX); // mut:M5D10_creation
+        require(tx.daa >= creation + VAULT_REQ_DELAY); // mut:M5D10_age
     }
 
     // Spec M5 A4.2. Inputs: 0 this vault, 1 a position (Position.vault_leg), 2..1+n plain
@@ -353,5 +373,18 @@ contract Vault(
                 owner_key: ps.owner_key
             }, 1, pos_pl, pos_sl, position_tpl);
         }
+
+        // ==== check W12: the vault's age (M5 Stage 7, U-4; lower bound only, R3): tx.daa >= creation + VAULT_REQ_DELAY
+        // OpTxInputDaaScore pushes the UTXO's block_daa_score as i64 (rusty-kaspa v2.1.0
+        // crypto/txscript/src/opcodes/mod.rs:1124-1130); an unaccepted parent has
+        // UNACCEPTED_DAA_SCORE = u64::MAX (consensus/core/src/constants.rs:51), pushed as -1,
+        // so creation >= 0 refuses a request chained on an unaccepted vault. creation <
+        // DAA_MAX before the addition, so creation + VAULT_REQ_DELAY cannot overflow;
+        // `require(tx.daa >= x)` is OpCheckLockTimeVerify (silverscript-lang
+        // src/compiler/compile/statement.rs:375-388; mod.rs:874-923).
+        int creation = OpTxInputDaaScore(0);
+        require(creation >= 0); // mut:M5W12_creation
+        require(creation < DAA_MAX); // mut:M5W12_creation
+        require(tx.daa >= creation + VAULT_REQ_DELAY); // mut:M5W12_age
     }
 }

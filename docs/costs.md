@@ -374,6 +374,83 @@ Transient rose by 3,112 from M3-f (864,604) and stays within 90 % (D32, D64). **
 
 At the worst PAY storage at P = P_MIN (405,486, M4-c) the fee for priority is about 0.405 KAS (8 × P_MIN). So under load (full blocks), a PAY claim of a small prize costs several times the prize, because storage mass (C / payout, C / ticket') dominates. The relay floor ignores storage mass, so the fee is far lower when blocks are not full. Open for M6 (P_MIN, d, batching claims; DECISIONS "OPEN for M6" row).
 
+## M5: house vault shares (requests, conversion in `draw()`, settlement; real scripts)
+
+Source: `crates/lottery/tests/m5_measure.rs` (`cargo test -p lottery --release --test m5_measure -- --nocapture --test-threads=1`), scripts `covenants/vault.sil` (`draw_leg`, `request_deposit`, `request_withdraw`), `request.sil` (`settle`, `refresh`), `record.sil` (`request_leg`, `refresh`), `position.sil` (`vault_leg`, `refresh`) and `drawer.sil` (conversion C1–C3, check 26), 2026-10-12, after the M5 review fixes (vault age window D10/W12, drained-record check). B_MAX = 4, R = 1.69 KAS, MIN_DEPOSIT = 1 KAS, P_MIN = 0.05 KAS. Percentages are of compute 500,000 / transient 1,000,000 / storage 500,000. Every D78 stop rule holds (all ≤ 90 %).
+
+**M5-a: redeem sizes** (B_MAX = 4).
+
+| Object | Prefix B | Suffix B | State B | Redeem B |
+|---|---|---|---|---|
+| vault (`draw_leg`, `request_deposit`, `request_withdraw`; M4: 667) | 1 | 3,224 | 155 | 3,380 |
+| request (`settle`, `refresh`; 2 mulfrac copies) | 1 | 15,420 | 58 | 15,479 |
+| record (`request_leg`, `refresh`) | 1 | 1,026 | 127 | 1,154 |
+| position (`vault_leg`, `refresh`) | 1 | 1,137 | 56 | 1,194 |
+| drawer (`draw_test_seed`, 3 mulfrac copies; M4: 45,466) | 1 | 65,096 | 137 | 65,234 |
+| marker (`draw_leg`, `refresh`; size unchanged, DRAWER_TPL value changed) | 1 | 1,388 | 715 | 2,104 |
+
+**One inlined `mulfrac` call costs 6,117 B (drawer) / 6,118 B (request)**, measured as the code-size difference to a variant with one call replaced by a plain expression. The drawer's +19,768 B over M4 are mostly its three calls.
+
+**M5-b: DP21 with the conversion and the record (D78a)** (K = 16, m = 50, a = A_MAX = 7, worst proofs; accepted, value conserved). Drawer sigscript 79,043–79,049 B; vault leg 463,829 units.
+
+| Pending | np | Funding inputs | Drawer units | Outputs | Compute | Transient | Storage | % c / t / s |
+|---|---|---|---|---|---|---|---|---|
+| nothing | 5 | 1 | 1,731,668 | 18 | 198,601 | 526,964 | 71,007 | 39.7 / 52.7 / 14.2 |
+| nothing | 7 | 8 | 1,785,377 | 20 | 207,855 | 531,020 | 71,009 | 41.6 / 53.1 / 14.2 |
+| both sides converted (2 mulfrac runs) | 5 | 1 | 1,748,509 | 19 | 199,161 | 527,324 | 72,358 | 39.8 / 52.7 / 14.5 |
+| both sides converted | 7 | 8 | 1,802,341 | 21 | 208,515 | 531,380 | 72,366 | 41.7 / 53.1 / 14.5 |
+| cap binding, wc < W (3 runs) | 5 | 1 | 1,755,191 | 19 | 199,264 | 527,336 | 71,007 | 39.9 / 52.7 / 14.2 |
+| **cap binding** | **7** | **8** | **1,808,641** | **21** | **208,518** | **531,392** | 71,009 | **41.7 / 53.1** / 14.2 |
+| refund by price + cap binding (3 runs) | 5 | 1 | 1,751,449 | 19 | 199,261 | 527,324 | 71,007 | 39.9 / 52.7 / 14.2 |
+| refund by price + cap binding | 7 | 8 | 1,805,238 | 21 | 208,515 | 531,380 | 71,009 | 41.7 / 53.1 / 14.2 |
+
+Worst: compute 208,518 (41.7 %), transient 531,392 (53.1 %), storage 72,366 (14.5 %). Against M4-e (34.0 / 43.7 / 14.2 %) almost all of the increase is the larger drawer and vault redeems pushed by every draw; the conversion's run time adds at most about 24,000 drawer units (about 700 compute grams), the record arguments 3–6 sigscript bytes. A refund before the mint guard skips mulfrac and is cheaper than the refund by price measured here.
+
+**M5-c: `draw()` storage with the record at R** (D78a; W = 1 share at the smallest V', so wc = 1 and out_c = 0; method as M3-d). Supremum = 11 × 4C/R + (1 + a) × C/R + C/f_min + C/caller_min:
+
+| f_min | Measured worst (a = 7) | Supremum | M4 (no record) |
+|---|---|---|---|
+| F_MIN = 1 KAS | 317,481 (63.5 %) | **327,684 (65.5 %)** | 304,016 (60.8 %) |
+| F_MIN_FLOOR = 0.1 KAS | 407,481 (81.5 %) | **417,684 (83.5 %)** | 394,016 (78.8 %) |
+
+R = 1.69 KAS still covers `draw()`; `close()` (M2-c) still sets R.
+
+**M5-d: K = 16 `close()` with the M5 marker** (D78b; same shape as M4-f):
+
+| K | Controller units | Compute | Transient | Storage | % c / t / s |
+|---|---|---|---|---|---|
+| 4 | 1,037,088 | 103,411 | 315,044 | 118,411 | 20.7 / 31.5 / 23.7 |
+| 16 | 3,379,799 | 294,619 | **867,716** | 402,301 | 58.9 / **86.8** / 80.5 |
+
+Identical to M4-f: only the marker's DRAWER_TPL bytes changed, not its size. Headroom below 90 % is still 32,284 grams, the tightest of any shape.
+
+**M5-e: request entries, `settle()` and `refresh()`** (one funding input, change; covenant outputs at R):
+
+| Transaction | Leader units / sigscript B | Leg units | Outputs | Compute | Transient | Storage | % c / t / s |
+|---|---|---|---|---|---|---|---|
+| `request_deposit` | 177,858 / 18,849 | — | 3 | 23,143 | 77,372 | 24,886 | 4.6 / 7.7 / 5.0 |
+| `request_withdraw` whole (Schnorr owner) | 187,066 / 18,822 | 26,392 | 3 | 24,676 | 82,304 | 24,678 | 4.9 / 8.2 / 4.9 |
+| `request_withdraw` partial (Schnorr owner) | 199,389 / 18,822 | 26,392 | 4 | 25,233 | 82,652 | 48,554 | 5.0 / 8.3 / 9.7 |
+| `request_withdraw` partial (ECDSA owner) | 199,326 / 18,822 | 26,392 | 4 | 25,233 | 82,652 | 48,554 | 5.0 / 8.3 / 9.7 |
+| `request_withdraw` partial (P2SH owner) | 199,255 / 18,822 | 26,392 | 4 | 25,268 | 82,792 | 48,554 | 5.1 / 8.3 / 9.7 |
+| `settle` deposit-convert | 67,258 / 16,633 | 111,202 | 3 | 22,147 | 73,388 | 20,180 | 4.4 / 7.3 / 4.0 |
+| `settle` deposit-convert, drained | 52,984 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 11,915 | 4.4 / 7.3 / 2.4 |
+| `settle` deposit-refund | 56,138 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 0 | 4.4 / 7.3 / 0.0 |
+| `settle` deposit-refund, drained | 42,418 / 16,633 | 111,202 | 3 | 21,857 | 73,108 | 0 | 4.4 / 7.3 / 0.0 |
+| `settle` withdrawal FINAL | 59,817 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 0 | 4.4 / 7.3 / 0.0 |
+| `settle` withdrawal FINAL, drained | 42,443 / 16,633 | 111,202 | 3 | 21,857 | 73,108 | 0 | 4.4 / 7.3 / 0.0 |
+| `settle` withdrawal PAY | 121,822 / 16,633 | 111,202 | 4 | 23,159 | 73,596 | 21,294 | 4.6 / 7.4 / 4.3 |
+| `settle` withdrawal PAY, drained | 104,957 / 16,633 | 111,202 | 4 | 22,914 | 73,456 | 22,456 | 4.6 / 7.3 / 4.5 |
+| `settle` withdrawal ACCRUE | 121,314 / 16,633 | 111,202 | 3 | 22,747 | 73,388 | 27,869 | 4.5 / 7.3 / 5.6 |
+| `settle` withdrawal ACCRUE, drained | 104,470 / 16,633 | 111,202 | 3 | 22,502 | 73,248 | 11,300 | 4.5 / 7.3 / 2.3 |
+| `refresh` position | 8,044 / 1,202 | — | 2 | 3,339 | 6,436 | 16,980 | 0.7 / 0.6 / 3.4 |
+| `refresh` request | 93,809 / 15,487 | — | 2 | 18,524 | 63,576 | 16,980 | 3.7 / 6.4 / 3.4 |
+| `refresh` record | 8,651 / 1,162 | — | 2 | 3,299 | 6,276 | 115 | 0.7 / 0.6 / 0.0 |
+
+Leg units are the position's `vault_leg` (withdrawals) and the record's `request_leg` (settlements; it reads the request, the largest share of a settle's compute). The age-window checks cost +465 leader units per request and +64 B of vault redeem; the drained-record check +6 B of request redeem and 11–37 units per settle. The position and record refreshes stay under the free per-input allowance of 9,999 units, so their committed compute budget is 0 (spec 5 Corrections, VA15). Every transaction is ≤ 9.7 % of every mass. The priority fee at 100 sompi per gram is about 0.039–0.048 KAS for a request and 0.037–0.042 KAS for a settlement (transient / 2 dominates; testnet-10 below).
+
+**M5-f: testnet-10** (`docs/tn10-mass-check.md` M5): `probe vault-m5` with the real scripts was accepted end to end; its masses equal M5-e (request_deposit 23,143 / 77,372; request_withdraw partial 25,233 / 82,652; settle deposit-convert 22,147 / 73,388; settle FINAL drained 21,857 / 73,108) and the converting `draw()` (K = 16, a = 0, np = 4, record) measured 142,504 / 449,056 / 148,708.
+
 ## Scripts (M0 probes)
 
 | Script | Redeem B | Sigscript B | Script units | Compute budget | Source test |

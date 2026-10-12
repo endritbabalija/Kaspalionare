@@ -8,8 +8,9 @@
 //! Modelled entries and their check labels (each label is `<file>:<check>`; Stages 3-5 put a
 //! `// ==== check <check>: ...` marker before each check, in this order, so `M5_ATTRIB`
 //! can name the same labels from the scripts):
-//! - vault.sil `request_deposit` D1..D9 (spec A4.1 checks 1-9);
-//! - vault.sil `request_withdraw` W1..W11 (A4.2 checks 1-11);
+//! - vault.sil `request_deposit` D1..D9 (spec A4.1 checks 1-9), then D10 (the vault age,
+//!   M5 Stage 7, user decision U-4: tx.daa >= OpTxInputDaaScore(0) + VAULT_REQ_DELAY);
+//! - vault.sil `request_withdraw` W1..W11 (A4.2 checks 1-11), then W12 (the vault age, U-4);
 //! - position.sil `vault_leg` PO1..PO4; record.sil `request_leg` RL1..RL4;
 //! - request.sil `settle` S1..S13 (A6.1 checks 1-13);
 //! - position.sil, request.sil, record.sil `refresh` A7.1..A7.7 (M4 A6 checks 1-7, D76);
@@ -33,7 +34,8 @@ use lottery::buy::{Built, Final, InKind, Template, Templates};
 use lottery::claim::{SIG_REFRESH, payout_spk};
 use lottery::draw::{ARG_RECORD_PREFIX, ARG_RECORD_SUFFIX, ARG_WC, ARG_X1, ARG_X2, ARG_Y, DrawCase, Lie, SIG_DRAW_M5};
 use lottery::game::{
-    ASSETS_MAX, D_IDLE, DAA_MAX, MIN_DEPOSIT, P_MIN, SHARES_MAX, TOTAL_MAX, guarded_add, record_in_range, request_in_range, wc_witness_ok, witness_ok,
+    ASSETS_MAX, D_IDLE, DAA_MAX, MIN_DEPOSIT, P_MIN, SHARES_MAX, TOTAL_MAX, VAULT_REQ_DELAY, guarded_add, record_in_range, request_in_range, wc_witness_ok,
+    witness_ok,
 };
 use lottery::state::{KIND_DEPOSIT, PositionState, RecordState, RequestState, VaultState};
 use lottery::vault::*;
@@ -350,7 +352,16 @@ fn deposit(tx: &Tx, i: usize) -> Verdict {
     // D9: the request under request_tpl.
     let rq = RequestState { round: vt.round + 1, kind: KIND_DEPOSIT, amount: d, owner_class: class[0], owner_key: key };
     let (pre, suf) = (need(tx.arg_bytes(0, DEP_ARG_REQ_PREFIX), &l(9))?, need(tx.arg_bytes(0, DEP_ARG_REQ_SUFFIX), &l(9))?);
-    check(tx.output_with_template(1, &tx.t().request, &rq.values(), &pre, &suf, vt.request_tpl), &l(9))
+    check(tx.output_with_template(1, &tx.t().request, &rq.values(), &pre, &suf, vt.request_tpl), &l(9))?;
+    // D10 (U-4): the vault's age.
+    check(vault_aged(tx), &l(10))
+}
+
+/// D10 / W12 (M5 Stage 7, U-4): 0 <= creation = OpTxInputDaaScore(0) < DAA_MAX and tx.daa
+/// >= creation + VAULT_REQ_DELAY (as the refresh idle check, A7.3).
+fn vault_aged(tx: &Tx) -> bool {
+    let creation = tx.daa(0);
+    (0..DAA_MAX).contains(&creation) && tx.tx_daa() >= creation + VAULT_REQ_DELAY
 }
 
 fn withdraw(tx: &Tx, i: usize) -> Verdict {
@@ -395,7 +406,8 @@ fn withdraw(tx: &Tx, i: usize) -> Verdict {
         let pn = PositionState { shares: ps.shares - w, ..ps.clone() };
         check(tx.output_with_template(2, &tx.t().position, &pn.values(), &pre, &suf, vt.position_tpl), &l(11))?;
     }
-    Ok(())
+    // W12 (U-4): the vault's age.
+    check(vault_aged(tx), &l(12))
 }
 
 fn vault_leg(tx: &Tx, i: usize) -> Verdict {
@@ -465,6 +477,9 @@ fn settle(tx: &Tx, i: usize) -> Verdict {
     }
     let ro = n_cov + payout as usize;
     if drained {
+        // M5 Stage 7 (F4): a drained record is empty (out' = 0; held' = refund x dep' = 0 and
+        // mint' = burn' = 0 follow from the exact drain), so nothing is left for the fee.
+        check(nx.out_rem == 0, &l(9))?;
         check(tx.out_value(ro) == Some(r_rc), &l(9))?;
     }
     // S10: scripts (D11).
@@ -547,7 +562,10 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     // Check 17: the witness with the rules of V' (J fixed before any conversion, D71).
     let (x1, y, x2) = (need(tx.arg_int(0, ARG_X1), &l("17"))?, need(tx.arg_int(0, ARG_Y), &l("17"))?, need(tx.arg_int(0, ARG_X2), &l("17"))?);
     check(witness_ok(&x.rule, x.v_prime, x.o_prime, tc.controller.j, x1, y, x2) && x1 <= TOTAL_MAX && x2 <= TOTAL_MAX, &l("17"))?;
-    // C2: the wc witness (M5 arguments; the builder's wc for an M4-signature build).
+    // C2: the sum guard V' + D <= TOTAL_MAX (drawer `M5C2_sum`, Stage 4 S4-2; added to the
+    // model in Stage 7: Stage 6's "VA6 V' + D > TOTAL_MAX" otherwise reached check 20 here),
+    // then the wc witness (M5 arguments; the builder's wc for an M4-signature build).
+    check(vt.pend_dep as i128 <= TOTAL_MAX as i128 - x.v_prime as i128, &l("C2"))?;
     let m5_args = tx.entry(0).map(|e| e.1 == SIG_DRAW_M5).unwrap_or(false);
     let wc = if m5_args { need(tx.arg_int(0, ARG_WC), &l("C2"))? } else { case.expected().conv.wc };
     check(wc_witness_ok(x.v_prime, vt.total_shares, vt.pend_wsh, x.conv.slack, wc), &l("C2"))?;

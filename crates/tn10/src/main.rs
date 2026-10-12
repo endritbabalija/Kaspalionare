@@ -135,8 +135,27 @@ async fn run_probes(which: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// Stack size of the thread that runs the probes and of the runtime's worker threads (M5
+/// Stage 7). A debug build of `probe vault-m5` overflowed the 1 MB Windows main-thread
+/// stack (large builder and engine frames in unoptimised code); `--release` fit. The probes
+/// now run on a spawned thread with this stack, under a runtime whose workers get the same.
+const PROBE_STACK: usize = 64 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    let probes = std::thread::Builder::new().name("tn10".into()).stack_size(PROBE_STACK).spawn(|| {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(PROBE_STACK).build().expect("tokio runtime");
+        rt.block_on(run())
+    });
+    match probes.expect("spawn the probe thread").join() {
+        Ok(code) => code,
+        Err(_) => {
+            eprintln!("error: the probe thread panicked");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let res = match args.first().map(String::as_str) {
         Some("keygen") => keygen(),

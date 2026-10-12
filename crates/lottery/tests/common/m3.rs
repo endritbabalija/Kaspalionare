@@ -143,7 +143,7 @@ fn with_role(mut v: BTreeMap<String, ArtifactValue>, role: u8) -> BTreeMap<Strin
 pub const BAD_ROLE: u8 = 0x07;
 
 /// The value-preserving redeem of input `i` replaced by `redeem`.
-fn set_redeem(b: &mut Built, i: usize, redeem: Vec<u8>) {
+pub fn set_redeem(b: &mut Built, i: usize, redeem: Vec<u8>) {
     b.set_entry_redeem(i, redeem);
 }
 

@@ -348,6 +348,11 @@ contract Request(
             require(tx.outputs[po].value == pay); // mut:M5S9_pay
         }
         if (drained) {
+            // M5 Stage 7 (F4): a drained record is empty. dep' = wsh' = 0 give held' = 0, and
+            // the exact drain gives mint' = burn' = 0; out' = 0 holds by lineage (out_rem > 0
+            // implies burn_rem > 0), so this rejects only a fabricated record (D79) whose
+            // out_rem would otherwise be left to the fee.
+            require(outN == 0); // mut:M5S9_empty
             require(tx.outputs[ro].value == rrc); // mut:M5S9_funder
         }
 
