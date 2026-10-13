@@ -40,6 +40,6 @@ Read `docs/design.md`, the relevant spec in `docs/specs/`, `docs/DECISIONS.md` a
    - **Deadlines:** a shard created at or after the round deadline accepts only `close()`; no "before T" relies on lock time.
    - **Admin:** signature covers domain tag, covenant ID, target round, parameters and nonce; nonce is monotonic; no spend path on pools, vault or tickets.
    - **Tests:** run with production engine flags and real compute budgets; worst-case K and proofs against mass limits.
-8. Anything that needs off-chain lottery logic, a keeper, or a real randomness source. Randomness must stay a test-only seed.
+8. Anything that needs off-chain lottery logic or a keeper. Since M7 the seed is the hash of the anchor block X (the first selected-chain block with DAA score >= D = the marker's creation DAA + seed_offset), authenticated in `draw()` with `OpChainblockSeqCommit` and the KIP-21 preimage (spec M7 D93-D96). Flag any path that lets a caller, closer or miner choose among anchors, re-roll a result, or draw outside the window. The anchor miner's withholding bias is accepted and OPEN on the release gate (D100); do not report it again unless the code makes it worse.
 
 Report only correctness and requirement gaps. For each: file and line, what is wrong, a concrete failing scenario, and severity (must-fix / should-fix). Skip style. If nothing is wrong, say so.

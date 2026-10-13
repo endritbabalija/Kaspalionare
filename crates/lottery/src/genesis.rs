@@ -262,9 +262,12 @@ impl GenesisCase {
             range(name, v, 0, TOTAL_MAX)?;
         }
         range("reserve", c.reserve, R_MIN as i64, RESERVE_MAX)?;
-        for (name, v) in [("deadline", c.deadline), ("round_len", c.round_len), ("d_min", c.d_min), ("seed_offset", c.seed_offset)] {
+        for (name, v) in [("deadline", c.deadline), ("round_len", c.round_len), ("d_min", c.d_min)] {
             range(name, v, 0, DAA_MAX - 1)?;
         }
+        // M7 S2-5: the anchor must lie strictly after the chain block that accepted close()
+        // (spec M7 D93, D97); controller close() requires the same.
+        range("seed_offset", c.seed_offset, 1, DAA_MAX - 1)?;
         if c.fee_class > 2 || (c.fee_class != 1 && c.fee_key[32] != 0) {
             return Err("fee address is not a D11 standard script".into());
         }
@@ -741,6 +744,8 @@ mod tests {
             ("sum = D_RET + 1 (claim_window)", |g| g.drawer.claim_window = D_RET - g.controller.seed_offset - g.drawer.draw_window + 1, "D_RET"),
             ("sum = D_RET + 1 (seed_offset)", |g| g.controller.seed_offset = D_RET - g.drawer.draw_window - g.drawer.claim_window + 1, "D_RET"),
             ("seed_offset = D_RET", |g| g.controller.seed_offset = D_RET, "D_RET"),
+            // M7 S2-5: the anchor must lie strictly after the block that accepted close().
+            ("seed_offset = 0", |g| g.controller.seed_offset = 0, "seed_offset"),
         ] {
             let mut g = good.clone();
             f(&mut g);

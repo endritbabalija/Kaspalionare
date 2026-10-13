@@ -257,7 +257,10 @@ contract Controller(
         require(round_len < DAA_MAX);
         require(d_min >= 0);
         require(d_min < DAA_MAX);
-        require(seed_offset >= 0);
+        // M7 S2-5: seed_offset >= 1, so the anchor (first chain block with DAA >= D = the
+        // marker's creation DAA + seed_offset) lies strictly after the chain block that
+        // accepted close() (spec M7 D93, D97).
+        require(seed_offset >= 1);
         require(seed_offset < DAA_MAX);
         // Template length arguments (used in offset arithmetic).
         require(shard_pl >= 0);

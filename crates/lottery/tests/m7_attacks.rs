@@ -329,6 +329,22 @@ fn sa10_close_marker_output() {
     attack_at(&b0, 0, |b| b.outputs[mo].script_public_key = spk);
 }
 
+/// SA11 (close, controller state range check; review item S2-5): an instance deployed with
+/// seed_offset = 0 (through the TEST-ONLY unchecked genesis; `validate()` refuses it) never
+/// closes, so D = the marker's creation DAA can never equal the DAA score of the chain block
+/// that accepted `close()` (spec M7 D93, D97: the anchor lies strictly after it). Positive
+/// control: seed_offset = 1 closes.
+#[test]
+fn sa11_seed_offset_zero_never_closes() {
+    let mut ch = Chain::genesis_with(4, |g| g.controller.seed_offset = 0, false);
+    let (c, ops) = ch.close_case(900_000);
+    let first = ch.close_built(&c, ops);
+    reject_at(&first, lottery::close::CloseCase::CONTROLLER);
+    let mut ok = Chain::genesis_with(4, |g| g.controller.seed_offset = 1, true);
+    let (c, ops) = ok.close_case(900_000);
+    ok.close(&c, ops, lottery::close::TEST_DEADLINE as u64 + 10);
+}
+
 // ---------------------------------------------------------------- structure (no scripts)
 
 /// Every modelled attack is rejected by the spec model (`common::m5_spec`, the `M5_PREFLIGHT`
