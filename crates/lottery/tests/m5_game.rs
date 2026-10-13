@@ -16,7 +16,7 @@ use lottery::game::{
     ASSETS_MAX, Conversion, MIN_DEPOSIT, P_MIN, SHARE_UNIT, SHARES_MAX, SettleMode, TOTAL_MAX, VA, VS, convert, mulfrac, mulfrac_steps, settle,
     wc_witness_ok, withdraw_out,
 };
-use lottery::genesis::{GENESIS_FUNDING, GenesisCase, covenant_id};
+use lottery::genesis::{GENESIS_FUNDING, GenesisCase, V0_MIN, covenant_id};
 use lottery::ledger::Ledger;
 use lottery::params::xonly;
 use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, PositionState, RecordState, RequestState, VaultState};
@@ -204,12 +204,14 @@ fn vp12_convert_matches_reference() {
 /// deposits raise wc (D69); out-of-range states are rejected.
 #[test]
 fn vp12_convert_boundaries() {
-    // Price 10^9 sompi per share (S = 0, V' + 1 = 10^12): 1 KAS mints 0 < 1 share: refund.
-    let x = convert(1_000_000_000_000 - 1, 0, MIN_DEPOSIT, 0, 0).unwrap();
+    // Price 10^10 sompi per share (S = 0, V' + 1 = 10^13): MIN_DEPOSIT = 10 KAS mints 0 < 1
+    // share: refund. M6 (D85): was price 10^9 and 1 KAS (10 x MIN_DEPOSIT per share, kept).
+    let x = convert(10_000_000_000_000 - 1, 0, MIN_DEPOSIT, 0, 0).unwrap();
     assert!(x.refund && !x.ok && x.mint == 0 && x.d_c == 0 && x.mint_c == 0);
     check_conversion(&x);
-    // At price exactly MIN_DEPOSIT per share (V' + 1 = 10^8 (S + VS)), D mints D / 10^8 shares
-    // = ceil(D / 10^8) for D a multiple of 10^8: converts. One sompi more costly: refund.
+    // At price exactly MIN_DEPOSIT per share (V' + 1 = MIN_DEPOSIT (S + VS)), D mints D /
+    // MIN_DEPOSIT shares = ceil(D / MIN_DEPOSIT) for D a multiple of MIN_DEPOSIT: converts.
+    // One sompi more costly: refund.
     let s = 4_000;
     let v = MIN_DEPOSIT * (s + VS) - VA;
     let x = convert(v, s, 3 * MIN_DEPOSIT, 0, 0).unwrap();
@@ -577,17 +579,20 @@ fn vp1_genesis_shares_position_templates() {
         let outs = l.apply(&f.tx, &f.entries, 200).expect("genesis applies");
         assert_eq!(l.get(&outs[k + 4]).unwrap().covenant_id, Some(cov));
     }
-    // S0 rounds down: V0 = 10^6 + 999 sompi gives S0 = 1,000.
+    // S0 = V0 (SHARE_UNIT = 1, M6 D84; at SHARE_UNIT = 1,000 this checked that S0 rounds
+    // down, V0 = 10^6 + 999 -> 1,000): V0 = V0_MIN + 999 sompi gives S0 = V0_MIN + 999.
     let (_, mut g) = genesis_case();
     g.set_jackpot(0);
-    g.set_vault(1_000_000 + 999);
-    assert_eq!((g.vault.total_shares, g.position.shares), (1_000, 1_000));
+    g.set_vault(V0_MIN + 999);
+    assert_eq!((g.vault.total_shares, g.position.shares), (V0_MIN + 999, V0_MIN + 999));
     assert_eq!(g.validate(), Ok(()));
 }
 
-/// VP1: `validate` refuses V0 < SHARE_UNIT (S0 = 0) and V0 > ASSETS_MAX, a wrong template
-/// field, a position with the wrong share count, round or owner, and the builder panics
-/// on each; the boundaries V0 = SHARE_UNIT and V0 = ASSETS_MAX are accepted.
+/// VP1: `validate` refuses V0 < V0_MIN (M6 D84; was V0 < SHARE_UNIT, S0 = 0) and V0 >
+/// ASSETS_MAX, a wrong template field, a position with the wrong share count, round or
+/// owner, and the builder panics on each; the boundaries V0 = V0_MIN and V0 = SHARES_MAX
+/// are accepted (M6 D84: with S0 = V0, S0 <= SHARES_MAX binds below ASSETS_MAX; was
+/// V0 = ASSETS_MAX; V0 = SHARES_MAX + 1 is LP1 in m6_limits.rs).
 #[test]
 fn vp1_genesis_refusals() {
     let (_, good) = genesis_case();
@@ -601,7 +606,7 @@ fn vp1_genesis_refusals() {
         f(&mut g);
         cases.push((name, g, needle));
     };
-    add("V0 = SHARE_UNIT - 1", &zero, &|g| g.set_vault(SHARE_UNIT - 1), "total_assets");
+    add("V0 = V0_MIN - 1", &zero, &|g| g.set_vault(V0_MIN - 1), "total_assets");
     add("V0 = 0", &zero, &|g| g.set_vault(0), "total_assets");
     add("V0 = ASSETS_MAX + 1", &zero, &|g| g.set_vault(ASSETS_MAX + 1), "total_assets");
     add("total_shares = S0 - 1", &good, &|g| g.vault.total_shares -= 1, "S0");
@@ -625,7 +630,7 @@ fn vp1_genesis_refusals() {
         assert!(r.is_err(), "{name}: builder accepted the instance");
     }
     // Accepted boundaries.
-    for v0 in [SHARE_UNIT, ASSETS_MAX] {
+    for v0 in [V0_MIN, SHARES_MAX] {
         let mut g = zero.clone();
         g.set_vault(v0);
         assert_eq!(g.validate(), Ok(()), "V0 = {v0}");

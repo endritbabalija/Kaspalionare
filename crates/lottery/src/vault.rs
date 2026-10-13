@@ -32,6 +32,11 @@
 //! input DAA scores read are refresh's idle check and, since M5 Stage 7 (U-4), the vault
 //! request age: a request's lock_time must be >= the vault's creation DAA + VAULT_REQ_DELAY
 //! (`DepositCase::at_age` / `WithdrawCase::at_age`; `new_with` sets exactly that).
+//!
+//! Withdrawal minimum (spec M6 A7, D86): a partial withdrawal needs w >= `game::w_min` of
+//! the vault state (the script's check W4b). `build_with` does not refuse a smaller w, so
+//! the tests can still force one; a real caller uses `WithdrawCase::checked()` (or
+//! `policy_ok()`) before building.
 
 use std::sync::Arc;
 
@@ -41,7 +46,7 @@ use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, OwnerKey, Templates, b
 use crate::claim::payout_spk;
 use crate::close::FundingIn;
 use crate::game::{
-    MIN_DEPOSIT, P_MIN, SHARE_UNIT, SettleMode, TOTAL_MAX, VA, VAULT_REQ_DELAY, VS, convert, mulfrac,
+    MIN_DEPOSIT, P_MIN, SHARE_UNIT, SettleMode, TOTAL_MAX, VA, VAULT_REQ_DELAY, VS, convert, mulfrac, w_min,
 };
 use crate::params::TEST_RESERVE;
 use crate::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, PositionState, RecordState, RequestState, VaultState};
@@ -320,8 +325,10 @@ impl WithdrawCase {
     pub const VAULT: usize = 0;
     pub const POSITION: usize = 1;
 
-    /// A valid partial withdrawal of 1,000,000 of a 5,000,000-share position of the
-    /// fixture backer (Schnorr owner input of 10 KAS, no other funding, change).
+    /// A valid partial withdrawal of 10^10 of a 5 x 10^10-share position of the fixture
+    /// backer (Schnorr owner input of 10 KAS, no other funding, change). M6 (D84, D86): w is
+    /// above wmin = 10^9 at the fixture vault (V = S = 10^15, SHARE_UNIT = 1); it was
+    /// 1,000,000 of 5,000,000 at SHARE_UNIT = 1,000 (10 KAS of 50; now 100 KAS of 500).
     pub fn new() -> Self {
         Self::new_with(&Templates::get(b_max()), owner())
     }
@@ -333,9 +340,9 @@ impl WithdrawCase {
             vault: fixture_vault(t),
             reserve: TEST_RESERVE,
             vault_daa: 1_000_000,
-            position: PositionState::new(1, 5_000_000, &key.payout()),
+            position: PositionState::new(1, 50_000_000_000, &key.payout()),
             position_daa: 900_000,
-            w: 1_000_000,
+            w: 10_000_000_000,
             owner: key,
             owner_value: 10 * KAS,
             owner_daa: 1_100_000,
@@ -354,6 +361,33 @@ impl WithdrawCase {
     pub fn whole(mut self) -> Self {
         self.w = self.position.shares;
         self
+    }
+
+    /// The withdrawal minimum of the vault state (spec M6 A4, W4b): `game::w_min(total_assets,
+    /// total_shares)`.
+    pub fn w_min(&self) -> i64 {
+        w_min(self.vault.total_assets, self.vault.total_shares)
+    }
+
+    /// Builder policy (spec M6 A7, D86, the mirror of W4b): w >= `w_min` or w is the whole
+    /// position. It does not check the other W4 bounds.
+    pub fn policy_ok(&self) -> bool {
+        self.w >= self.w_min() || self.w == self.position.shares
+    }
+
+    /// `self` if `policy_ok()`, else an error naming D86 (a partial withdrawal below wmin,
+    /// which the vault rejects at W4b).
+    pub fn checked(self) -> Result<Self, String> {
+        if self.policy_ok() {
+            Ok(self)
+        } else {
+            Err(format!(
+                "partial withdrawal w = {} < wmin = {} of a {}-share position (D86, vault W4b)",
+                self.w,
+                self.w_min(),
+                self.position.shares
+            ))
+        }
     }
 
     pub fn vault_value(&self) -> u64 {
@@ -527,11 +561,15 @@ fn mf(a: i64, r: i64, c: i64) -> i64 {
     mulfrac(a, r, c).unwrap_or_else(|| if c == 0 { 0 } else { ((a as i128 * r as i128) / c as i128) as i64 })
 }
 
-/// The fixture record of the draw of round 2 (D79): the conversion of the fixture vault at
-/// V' = FIXTURE_VAULT with 3 x 10 KAS deposited and 3,000,000 shares to withdraw, L' =
-/// the fixture liability (nothing capped); funder = the funding key.
+/// The fixture record of the draw of round 2 (D79): the conversion of a vault at V' =
+/// FIXTURE_VAULT and S = FIXTURE_VAULT / 1,000 (price about 1,000 sompi per share) with 3 x
+/// 10 KAS deposited and 3,000,000 shares (about 30 KAS) to withdraw, L' = the fixture
+/// liability (nothing capped); funder = the funding key. M6 (D84): S was FIXTURE_VAULT /
+/// SHARE_UNIT; with SHARE_UNIT = 1 that price is about 1 and mint_rem = dep_rem, so the
+/// record keeps the M5 price (a vault grown 1,000x since genesis) and every M5 settlement
+/// value (mint_rem 3,000,000 < dep_rem, as VA11 S4 needs).
 pub fn fixture_record(t: &Templates) -> RecordState {
-    let c = convert(FIXTURE_VAULT, FIXTURE_VAULT / SHARE_UNIT, 30 * KAS as i64, 3_000_000, FIXTURE_LIABILITY).expect("fixture conversion");
+    let c = convert(FIXTURE_VAULT, FIXTURE_VAULT / 1_000, 30 * KAS as i64, 3_000_000, FIXTURE_LIABILITY).expect("fixture conversion");
     c.record(2, t.request.hash, &Payout::Schnorr(crate::params::xonly(&FUNDING_SK))).unwrap()
 }
 
@@ -786,5 +824,36 @@ mod tests {
         for k in [OwnerKey::Schnorr(OWNER_SK), OwnerKey::Ecdsa(OWNER_SK), OwnerKey::P2sh(OWNER_SK)] {
             assert_eq!(k.payout().spk(), k.spk());
         }
+    }
+
+    /// Spec M6 A7 (D86): the builder policy mirrors W4b. The fixture's partial w is above
+    /// wmin; wmin itself passes, wmin - 1 is refused (naming D86) unless it is the whole
+    /// position; a whole position below wmin passes.
+    #[test]
+    fn withdraw_policy_mirrors_w4b() {
+        let base = WithdrawCase::new();
+        let wm = base.w_min();
+        assert_eq!(wm, w_min(base.vault.total_assets, base.vault.total_shares));
+        assert!(wm > 1 && wm < base.position.shares, "fixture: 1 < wmin = {wm} < shares");
+        assert!(base.policy_ok() && base.clone().checked().is_ok());
+        let with_w = |w: i64| WithdrawCase { w, ..base.clone() };
+        assert!(with_w(wm).policy_ok());
+        assert!(with_w(base.position.shares).policy_ok(), "whole position");
+        let below = with_w(wm - 1);
+        assert!(!below.policy_ok());
+        let e = below.checked().err().expect("w = wmin - 1 refused");
+        assert!(e.contains("D86") && e.contains("W4b"), "{e}");
+        // A whole position below wmin passes; one share less does not.
+        let mut small = base.clone();
+        small.position.shares = wm - 1;
+        assert!(small.clone().whole().policy_ok());
+        small.w = wm - 2;
+        assert!(!small.policy_ok());
+        // q = 0 (total_assets + VA < W_MIN_VALUE): wmin = 1, any w >= 1 passes.
+        let mut poor = base.clone();
+        poor.vault.total_assets = crate::game::W_MIN_VALUE - 2;
+        assert_eq!(poor.w_min(), 1);
+        poor.w = 1;
+        assert!(poor.policy_ok());
     }
 }

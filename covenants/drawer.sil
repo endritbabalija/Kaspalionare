@@ -68,11 +68,11 @@ contract Drawer(
     // second-prize pool is created. 2^62 / 254 = 18,156,244,167,036,960.
     int constant G2_MAX = 18156244167036960;
     // Spec M5 A2 (game.rs): virtual offset (D66), the price is (A + VA) / (S + VS); the
-    // smallest deposit (D70); SHARES_MAX = TOTAL_MAX - VS and ASSETS_MAX = TOTAL_MAX - VA,
-    // so S + VS <= 2^62 and V' + VA <= 2^62 (mulfrac's domain).
+    // smallest deposit (D70; 10 KAS since spec M6 D85); SHARES_MAX = TOTAL_MAX - VS and
+    // ASSETS_MAX = TOTAL_MAX - VA, so S + VS <= 2^62 and V' + VA <= 2^62 (mulfrac's domain).
     int constant VS = 1000;
     int constant VA = 1;
-    int constant MIN_DEPOSIT = 100000000;
+    int constant MIN_DEPOSIT = 1000000000;
     int constant SHARES_MAX = 4611686018427386904;
     int constant ASSETS_MAX = 4611686018427387903;
 
@@ -722,7 +722,7 @@ contract Drawer(
                     // whole + frac <= room is decided before the sum is formed.
                     if (frac <= room - whole) {
                         int mint = whole + frac;
-                        // D + MIN_DEPOSIT - 1 <= 2^62 + 10^8 (check 5).
+                        // D + MIN_DEPOSIT - 1 <= 2^62 + 10^9 < 2^63 (check 5; M6 D85).
                         if (mint >= (vt.pend_dep + MIN_DEPOSIT - 1) / MIN_DEPOSIT) {
                             ok = true;
                             mintC = mint;

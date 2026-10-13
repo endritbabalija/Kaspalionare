@@ -33,7 +33,7 @@ use harness::{ArtifactValue, CovenantBinding, TransactionOutpoint, TransactionOu
 use lottery::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, OwnerKey, Sources, Template, Templates, b_max, funding_spk};
 use lottery::claim::{RefreshCase, RefreshObj, SIG_REFRESH};
 use lottery::close::FundingIn;
-use lottery::draw::{DrawCase, drawer_is_m5};
+use lottery::draw::DrawCase;
 use lottery::game::{DAA_MAX, MIN_DEPOSIT, P_MIN, SHARE_UNIT, SHARES_MAX, SettleMode, TOTAL_MAX, VAULT_REQ_DELAY, convert};
 use lottery::params::xonly;
 use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, PositionState, RecordState, RequestState};
@@ -264,10 +264,11 @@ fn test_name() -> String {
 }
 
 /// A rejection that only says the M5 script is not written yet: the placeholder's dispatch
-/// (`EarlyReturn`), or any rejection by an M4-signature drawer of a draw (input 0).
+/// (`EarlyReturn`) of a non-drawer input. The drawer has only the M5 entry since M6 (D89:
+/// the M4-signature case was removed), so a drawer rejection always counts.
 fn not_yet_written(e: &TxScriptError, b: &Built, i: usize) -> bool {
     let drawer = matches!(&b.inputs[i].kind, InKind::Entry { template, .. } if template.name() == "Drawer");
-    if drawer { !drawer_is_m5(&b.templates) } else { matches!(e, TxScriptError::EarlyReturn) }
+    !drawer && matches!(e, TxScriptError::EarlyReturn)
 }
 
 // ---------------------------------------------------------------- acceptance
@@ -397,11 +398,13 @@ fn parse5(check: &str) -> Option<(Option<Obj5>, String)> {
 }
 
 /// A label's group: through the first '.' ("A7.3" -> "A7."), else the leading letters
-/// ("D3" -> "D", "PO2" -> "PO", "S12" -> "S", "13" -> "").
+/// ("D3" -> "D", "PO2" -> "PO", "S12" -> "S", "13" -> ""). A trailing lowercase suffix is
+/// stripped first, so an inserted check sorts into its letter group ("W4b" -> "W", spec M6
+/// W4b between W4 and W5).
 pub fn group5(label: &str) -> String {
     match label.find('.') {
         Some(p) => label[..=p].to_string(),
-        None => label.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(),
+        None => label.trim_end_matches(|c: char| c.is_ascii_lowercase()).trim_end_matches(|c: char| c.is_ascii_digit()).to_string(),
     }
 }
 
@@ -1087,15 +1090,17 @@ pub fn d_cap() -> DrawCase {
     c
 }
 
-/// Refund mode by price (VP9 a): V' small against S, so mint < ceil(D / MIN_DEPOSIT).
+/// Refund mode by price (VP9 a): V' large against S, so mint < ceil(D / MIN_DEPOSIT).
 pub fn d_refund_price() -> DrawCase {
     let mut c = DrawCase::new(4);
-    // V' = V (no sales, no holders); price (V' + 1) / (S + 1000) = 10^9 sompi per share.
-    c.vault.total_assets = 2_000 * KAS as i64;
+    // V' = V (no sales, no holders); price (V' + 1) / (S + 1000) = 2 x 10^12 / 1,199, about
+    // 1.67 x 10^9 sompi per share. D = 3 MIN_DEPOSIT = 30 KAS mints floor(1.80) = 1 < 3.
+    // M6 (D85): V was 2,000 KAS and D 3 KAS (at MIN_DEPOSIT = 1 KAS); both scale by 10.
+    c.vault.total_assets = 20_000 * KAS as i64;
     c.vault.total_shares = 199;
     c.vault.liability = 0;
     c.controller.v_rec = c.vault.total_assets;
-    c.vault.pend_dep = 3 * KAS as i64;
+    c.vault.pend_dep = 3 * MIN_DEPOSIT;
     let x = c.expected();
     assert!(x.conv.refund, "price refund base: {:?}", x.conv);
     c
@@ -2029,8 +2034,10 @@ pub fn va14() -> Vec<Atk5> {
 }
 
 /// VA14 base: a small vault (V = 100,000 KAS, so x_b = muldiv(V', j) passes and J follows
-/// V') with 100,000 KAS deposited and 10^11 shares (about 10,000 KAS) to withdraw, so V',
-/// V' + D and total_assets' all differ, and so do the J fixes from them.
+/// V') with 100,000 KAS deposited and 10^11 shares to withdraw, so V', V' + D and
+/// total_assets' all differ, and so do the J fixes from them. M6 (D84): with S = 10^15
+/// (SHARE_UNIT = 1) the 10^11 shares are worth about 10 KAS (about 10,000 KAS at
+/// SHARE_UNIT = 1,000); the three values still differ (asserted below).
 pub fn d_big_dep() -> DrawCase {
     let mut c = d_no_pools(100_000 * KAS as i64, 100_000_000_000);
     c.vault.total_assets = 100_000 * KAS as i64;

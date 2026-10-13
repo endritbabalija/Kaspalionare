@@ -11,6 +11,7 @@
 //! - vault.sil `request_deposit` D1..D9 (spec A4.1 checks 1-9), then D10 (the vault age,
 //!   M5 Stage 7, user decision U-4: tx.daa >= OpTxInputDaaScore(0) + VAULT_REQ_DELAY);
 //! - vault.sil `request_withdraw` W1..W11 (A4.2 checks 1-11), then W12 (the vault age, U-4);
+//!   spec M6 (D86) adds W4b (the withdrawal minimum) between W4 and W5;
 //! - position.sil `vault_leg` PO1..PO4; record.sil `request_leg` RL1..RL4;
 //! - request.sil `settle` S1..S13 (A6.1 checks 1-13);
 //! - position.sil, request.sil, record.sil `refresh` A7.1..A7.7 (M4 A6 checks 1-7, D76);
@@ -303,7 +304,7 @@ pub fn check_input(tx: &Tx, i: usize, draw: Option<&DrawCase>) -> Option<Verdict
         e if e == SIG_REFRESH && (is(&ts.position) || is(&ts.request) || is(&ts.record) || ["Position", "Request", "Record"].contains(&name.as_str())) => {
             refresh(tx, i, &name.to_lowercase())
         }
-        e if e == SIG_DRAW_M5 || e == "draw_test_seed" => drawer(tx, i, draw?),
+        e if e == SIG_DRAW_M5 => drawer(tx, i, draw?),
         _ => return None,
     })
 }
@@ -382,6 +383,8 @@ fn withdraw(tx: &Tx, i: usize) -> Verdict {
     check(position_ranges(prole, &ps) && tx.in_value(1) == Some(r), &l(3))?;
     // W4
     check(w >= 1 && w <= ps.shares && w <= vt.total_shares - vt.pend_wsh, &l(4))?;
+    // W4b (spec M6 A4, D86): w >= wmin of the own state, or the whole position.
+    check(w >= lottery::game::w_min(vt.total_assets, vt.total_shares) || w == ps.shares, "vault:W4b")?;
     // W5: the owner input (D67).
     check(owner_idx >= 2 && (owner_idx as usize) < tx.n_in() && *tx.in_spk(owner_idx as usize) == payout_spk(ps.owner_class, &ps.owner_key), &l(5))?;
     // W6
@@ -564,10 +567,9 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     check(witness_ok(&x.rule, x.v_prime, x.o_prime, tc.controller.j, x1, y, x2) && x1 <= TOTAL_MAX && x2 <= TOTAL_MAX, &l("17"))?;
     // C2: the sum guard V' + D <= TOTAL_MAX (drawer `M5C2_sum`, Stage 4 S4-2; added to the
     // model in Stage 7: Stage 6's "VA6 V' + D > TOTAL_MAX" otherwise reached check 20 here),
-    // then the wc witness (M5 arguments; the builder's wc for an M4-signature build).
+    // then the wc witness (the M5 argument; the M4-signature fallback was removed in M6, D89).
     check(vt.pend_dep as i128 <= TOTAL_MAX as i128 - x.v_prime as i128, &l("C2"))?;
-    let m5_args = tx.entry(0).map(|e| e.1 == SIG_DRAW_M5).unwrap_or(false);
-    let wc = if m5_args { need(tx.arg_int(0, ARG_WC), &l("C2"))? } else { case.expected().conv.wc };
+    let wc = need(tx.arg_int(0, ARG_WC), &l("C2"))?;
     check(wc_witness_ok(x.v_prime, vt.total_shares, vt.pend_wsh, x.conv.slack, wc), &l("C2"))?;
     // The true transaction.
     let good = tc.build_with(t.clone()).finish();
@@ -592,11 +594,7 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     }
     // Check 26: the record under vt.record_tpl (record_prefix, record_suffix).
     if let (Some(o), Some(rc)) = (x.record_output(), &x.record) {
-        let (pre, suf) = if m5_args {
-            (need(tx.arg_bytes(0, ARG_RECORD_PREFIX), &l("26"))?, need(tx.arg_bytes(0, ARG_RECORD_SUFFIX), &l("26"))?)
-        } else {
-            (t.record.prefix.clone(), t.record.suffix.clone())
-        };
+        let (pre, suf) = (need(tx.arg_bytes(0, ARG_RECORD_PREFIX), &l("26"))?, need(tx.arg_bytes(0, ARG_RECORD_SUFFIX), &l("26"))?);
         check(tx.output_with_template(o, &t.record, &rc.values(), &pre, &suf, vt.record_tpl), &l("26"))?;
     }
     Ok(())

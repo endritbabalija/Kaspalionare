@@ -368,9 +368,15 @@ pub struct MarkerState {
 impl MarkerState {
     /// Root bytes for the given shard roots: concatenated, zero-padded to 32 x K_MAX.
     pub fn roots_bytes(roots: &[[u8; 32]]) -> Vec<u8> {
-        assert!(roots.len() <= K_MAX, "at most K_MAX roots");
+        Self::roots_bytes_k(roots, K_MAX)
+    }
+
+    /// As `roots_bytes` for templates compiled with another K_MAX (spec M6 A5 M6-b: the
+    /// in-memory K_MAX variants, whose marker and pool hold `byte[32 x k_max]` roots).
+    pub fn roots_bytes_k(roots: &[[u8; 32]], k_max: usize) -> Vec<u8> {
+        assert!(roots.len() <= k_max, "at most K_MAX roots");
         let mut b: Vec<u8> = roots.concat();
-        b.resize(32 * K_MAX, 0);
+        b.resize(32 * k_max, 0);
         b
     }
 

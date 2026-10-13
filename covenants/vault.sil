@@ -21,9 +21,10 @@ pragma silverscript ^0.1.0;
 // take the request template bytes as arguments; the binding is by request_tpl (own state).
 //
 // Each check of a request entry starts at a "// ==== check <label>" line (labels D1..D9,
-// W1..W11, handoff S2-6, then the Stage 7 age checks D10 and W12), in spec order, outside
-// any if/for body. `// mut:M5<ID>` tags mark
-// the requires the mutation tests remove one at a time (handoff S2-8).
+// W1..W11, handoff S2-6, then the Stage 7 age checks D10 and W12, then the M6 withdrawal
+// minimum W4b between W4 and W5, spec M6 A4, D86), in spec order, outside any if/for body.
+// `// mut:M5<ID>` and `// mut:M6<ID>` tags mark the requires the mutation tests remove one
+// at a time (handoff S2-8).
 contract Vault(
     byte[32] drawerTemplateHash,
     int init_round,
@@ -40,13 +41,19 @@ contract Vault(
     // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
     int constant SCRIPT_MAX = 1000000;
     // Spec M5 A2: TOTAL_MAX = 2^62; ASSETS_MAX = TOTAL_MAX - VA (VA = 1); SHARES_MAX =
-    // TOTAL_MAX - VS (VS = 1,000); funding inputs; reserve bound; minimum deposit (1 KAS).
+    // TOTAL_MAX - VS (VS = 1,000); funding inputs; reserve bound; minimum deposit (10 KAS,
+    // spec M6 D85, = game::MIN_DEPOSIT).
     int constant TOTAL_MAX = 4611686018427387904;
     int constant ASSETS_MAX = 4611686018427387903;
     int constant SHARES_MAX = 4611686018427386904;
     int constant F_MAX = 8;
     int constant RESERVE_MAX = 10000000000;
-    int constant MIN_DEPOSIT = 100000000;
+    int constant MIN_DEPOSIT = 1000000000;
+    // Spec M6 A2 (D86): the virtual offsets (D66, as in the drawer; game::VS, game::VA) and
+    // the withdrawal minimum by value, 10 KAS (game::W_MIN_VALUE), used by check W4b.
+    int constant VS = 1000;
+    int constant VA = 1;
+    int constant W_MIN_VALUE = 1000000000;
     // M5 Stage 7 (user decision U-4): a request may spend the vault only once the vault UTXO
     // is VAULT_REQ_DELAY DAA old (600 DAA = 60 s at 10 BPS, = game::VAULT_REQ_DELAY), so
     // after every vault spend draw() (which has no age check) has that long to spend it
@@ -304,6 +311,23 @@ contract Vault(
         require(w >= 1); // mut:M5W4_min
         require(w <= ps.shares); // mut:M5W4_shares
         require(w <= total_shares - pend_wsh); // mut:M5W4_total
+
+        // ==== check W4b: w >= wmin or the whole position (M6, D86)
+        // q = (A + VA) / W_MIN_VALUE, wmin = (S + VS) / q if q >= 1, else 1 (own state, no
+        // argument; = game::w_min). At the request-time price pi = (A + 1) / (S + VS), any
+        // w >= wmin is worth w x pi >= W_MIN_VALUE - pi (spec M6 A4). `||` evaluates both
+        // operands (OpBoolOr, no short-circuit: SilverScript v1.0.0 silverscript-lang
+        // src/compiler/compile/expression.rs:408-410); both are plain comparisons.
+        {
+            // total_assets <= ASSETS_MAX (W1): A + VA <= 2^62.
+            int q = (total_assets + VA) / W_MIN_VALUE;
+            int wmin = 1;
+            if (q >= 1) {
+                // total_shares <= SHARES_MAX (W1): S + VS <= 2^62; divisor q >= 1.
+                wmin = (total_shares + VS) / q;
+            }
+            require(w >= wmin || w == ps.shares); // mut:M6W4b_min
+        }
 
         // ==== check W5: the owner input (D67): 2 <= owner_idx < inputs, with the owner's script
         require(owner_idx >= 2); // mut:M5W5_idx

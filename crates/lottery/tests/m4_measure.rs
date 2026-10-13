@@ -12,9 +12,10 @@
 //!
 //! Stop rules (D64, user decision U2): `close()` K = 16, `draw()` DP21 and `buy()` compute
 //! and transient must each be <= 90 % of every limit (the tests assert it). `buy()` storage
-//! (95.7 % at b = 1, d = 0.11 KAS, 0.1 KAS referral) is pre-existing (D15) and accepted
-//! until M6 (U2): reported, asserted <= 100 % only. P_MIN (M4-c) is reported; the constant
-//! is not changed here (a user decision if it differs).
+//! was 95.7 % at b = 1, d = 0.11 KAS, 0.1 KAS referral (D15, U2); M6 (D80, D81) raises d to
+//! D_FLOOR = 0.13 KAS, and every `buy()` shape, the b = 1 referral ones included, is now
+//! asserted <= 90 % of storage. P_MIN (M4-c) is reported; the constant is not changed here
+//! (a user decision if it differs).
 
 mod common;
 
@@ -22,6 +23,7 @@ use std::sync::Arc;
 
 use common::m2::*;
 use common::m4::{refresh_marker, refresh_pool, refresh_ticket};
+use common::measure::{pay_storage, worst_claim};
 use harness::{Masses, masses, priority_fee};
 use lottery::buy::{BuyCase, Built, Final, KAS, Sources, TEST_DEPOSIT, Templates, b_max};
 use lottery::claim::*;
@@ -30,7 +32,7 @@ use lottery::draw::DrawCase;
 use lottery::game::{A_MAX, ClaimMode, M_CLAIM, M_DRAW, P_MIN};
 use lottery::params::TEST_RESERVE;
 use lottery::smt::Tree;
-use lottery::state::{K_MAX, TIER_LOWER0};
+use lottery::state::K_MAX;
 
 const COMPUTE_LIMIT: u64 = 500_000;
 const TRANSIENT_LIMIT: u64 = 1_000_000;
@@ -108,30 +110,6 @@ fn m4a_redeem_sizes() {
 
 // ---------------------------------------------------------------- M4-b
 
-/// The worst claim shape: K shards, bonus range m, every shard's leaf at the rank non-empty
-/// (each holds the combination once, h = K), in `mode`, with `nf` funding inputs.
-fn worst_claim(k: usize, m: i64, mode: ClaimMode, nf: usize) -> ClaimCase {
-    let holders = vec![1u16; k];
-    // PAY: prize = slice / K >= P_MIN; ACCRUE: prize = 1 sompi; FINAL: as PAY, index 1 claimed.
-    let slice = match mode {
-        ClaimMode::Accrue => k as i64,
-        _ => 2 * P_MIN * k as i64,
-    };
-    let mut c = ClaimCase::fabricated(k, m, TIER_LOWER0, slice, &holders);
-    if mode == ClaimMode::Final {
-        c.make_final();
-    }
-    if nf > 1 {
-        let daa = c.funding[0].daa;
-        c.funding = (0..nf).map(|_| FundingIn { value: KAS, daa }).collect();
-    }
-    let x = c.expected();
-    assert!(x.rejects.is_empty(), "{:?}", x.rejects);
-    assert_eq!((x.mode, x.h), (mode, k as i64));
-    assert_eq!(x.leaves.len() + x.siblings.len(), k * (576 + 2 * m as usize), "proof bytes k (576 + 2m)");
-    c
-}
-
 #[test]
 fn m4b_claim_units_and_masses() {
     println!("\nM4-b: claim() per-input script units and masses (worst proofs: h = K, every leaf non-empty; one funding input)");
@@ -167,23 +145,6 @@ fn m4b_claim_units_and_masses() {
 }
 
 // ---------------------------------------------------------------- M4-c
-
-/// The worst PAY-mode storage case (D57): b = 2 ticket at d = D_CLAIM_FLOOR (ticket' = 0.22
-/// KAS), pool' at R (the prize empties the pool's remaining), one funding input, change of
-/// `change` sompi, payout `p` sompi (h = 1, slice = p). Storage depends only on values and
-/// scripts (no script run).
-fn pay_storage(p: u64, change: u64) -> u64 {
-    let mut c = ClaimCase::fabricated(4, 10, TIER_LOWER0, p as i64, &[1]);
-    assert_eq!(c.ticket_value, 2 * lottery::genesis::D_CLAIM_FLOOR as u64);
-    assert_eq!(c.ticket.b, 2);
-    c.pool_value = c.pool.reserve as u64 + p;
-    c.funding[0].value = c.fee + change;
-    let x = c.expected();
-    assert!(x.rejects.is_empty(), "{:?}", x.rejects);
-    assert_eq!(x.values[0], TEST_RESERVE, "pool' at R");
-    c.lie.mode = Some(ClaimMode::Pay); // the PAY shape at any p (the script requires p >= P_MIN)
-    c.build().storage_mass()
-}
 
 #[test]
 fn m4c_p_min() {
@@ -226,7 +187,7 @@ fn buy_report(name: &str, c: &BuyCase, storage_capped: bool) {
     let (pc, pt, ps) = pct(&m);
     println!("| {name} | {} | {} | {} | {} | {} | {pc:.1} / {pt:.1} / {ps:.1} |", f.units[0], f.tx.inputs[0].signature_script.len(), m.compute, m.transient, m.storage);
     // D64 for buy(): the masses M4 changes (compute, transient) <= 90 %; storage <= 90 %
-    // except the pre-existing b = 1 referral shapes (U2), which must still fit the limit.
+    // (M6 D80: every shape at d = D_FLOOR; `storage_capped = false` keeps only the limit).
     let [c_ok, t_ok, s_ok] = within(&m, MARGIN_PCT);
     assert!(c_ok && t_ok, "M4-d (D64 stop): {name}: buy() compute or transient above 90 %: {m:?}");
     if storage_capped {
@@ -254,8 +215,9 @@ fn m4d_buy_with_the_m4_ticket() {
             c.funding = vec![c.gross() + c.b() * c.shard.d as u64 + c.fee + KAS];
         }
         let name = format!("b = {b}, referral {}, change {}", if with_ref { "0.1 x b KAS" } else { "none" }, if small_change { "1 KAS" } else { "large" });
-        // U2: the b = 1 referral shapes' storage is the pre-existing D15 figure.
-        buy_report(&name, &c, !(b == 1 && with_ref));
+        // U2 closed by M6 (D80): at d = 0.13 KAS the b = 1 referral shapes are <= 90 % too
+        // (was asserted <= 100 % only at d = 0.11 KAS).
+        buy_report(&name, &c, true);
     }
 }
 

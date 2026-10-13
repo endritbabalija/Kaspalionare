@@ -25,7 +25,7 @@ use lottery::claim::*;
 use lottery::close::{FundingIn, TEST_DEADLINE};
 use lottery::combo::Combo;
 use lottery::game::{ClaimMode, D_IDLE, D_RET, M_CLAIM, P_MIN};
-use lottery::genesis::{D_CLAIM_FLOOR, GenesisCase};
+use lottery::genesis::{D_FLOOR, GenesisCase};
 use lottery::smt::{PATH_BYTES, empty_hashes, leaf_hash};
 use lottery::state::{K_MAX, Payout, TIER_JACKPOT, TIER_LOWER0, TIER_SECOND};
 
@@ -598,7 +598,8 @@ fn kp18_script_accepts_reference_grid() {
 
 /// KP19 (integration variant; the unit test is `genesis::tests::kp19_genesis_ticket_tpl_and_claim_floor`):
 /// the deployed drawer carries ticket_tpl = the compiled ticket hash, and the first draw
-/// writes it into every pool; d < D_CLAIM_FLOOR and a wrong ticket_tpl are refused.
+/// writes it into every pool; d < D_FLOOR (M6 D81, was D_CLAIM_FLOOR) and a wrong
+/// ticket_tpl are refused.
 #[test]
 fn kp19_genesis_ticket_tpl() {
     let t = tpl();
@@ -610,11 +611,11 @@ fn kp19_genesis_ticket_tpl() {
         assert_eq!(p.1.reserve, ch.controller.1.reserve, "and reserve = R");
     }
     let mut g = GenesisCase::new(4, vec![]);
-    g.controller.d = D_CLAIM_FLOOR - 1;
+    g.controller.d = D_FLOOR - 1;
     for s in &mut g.shards {
-        s.d = D_CLAIM_FLOOR - 1;
+        s.d = D_FLOOR - 1;
     }
-    assert!(g.validate().unwrap_err().contains("D_CLAIM_FLOOR"));
+    assert!(g.validate().unwrap_err().contains("D_FLOOR"));
     let mut g = GenesisCase::new(4, vec![]);
     g.drawer.ticket_tpl = t.pool.hash;
     assert!(g.validate().unwrap_err().contains("ticket_tpl"));

@@ -165,7 +165,17 @@ pub async fn close(ctx: &mut Ctx, k: usize) -> Result<(), String> {
 /// with a referral output, built by the `lottery` builder and checked locally first. The shard
 /// successor and the ticket have no spend path in M1 and stay on testnet; the referral and
 /// change outputs are swept back.
+/// M6 (spec A6): run for b = B_MAX and for b = 1 (each with a referral at s_R = 10 %, so the
+/// b = 1 referral is 0.1 KAS = M_REF and the shape is D80's worst `buy()`, 84.5 % of storage
+/// at d = 0.13 with a large change), each on its own genesis shard.
 pub async fn buy_m1(ctx: &mut Ctx) -> Result<(), String> {
+    for b in [lottery::buy::b_max(), 1] {
+        buy_m1_b(ctx, b).await?;
+    }
+    Ok(())
+}
+
+async fn buy_m1_b(ctx: &mut Ctx, b: usize) -> Result<(), String> {
     use lottery::buy::{BuyCase, Templates, b_max};
     use lottery::combo::{Combo, unrank};
     use lottery::state::Payout;
@@ -176,7 +186,7 @@ pub async fn buy_m1(ctx: &mut Ctx) -> Result<(), String> {
     let mut c = BuyCase::new(bm);
     c.shard.deadline = (daa + 10_000_000) as i64;
     c.shard_daa = daa;
-    c.bundle = (0..bm as u32).map(|i| Combo::new(unrank(7 + i * 13_001), 1 + i as u8)).collect();
+    c.bundle = (0..b as u32).map(|i| Combo::new(unrank(7 + i * 13_001), 1 + i as u8)).collect();
     c.with_ref = true;
     let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
     c.referrer = me;
@@ -188,7 +198,7 @@ pub async fn buy_m1(ctx: &mut Ctx) -> Result<(), String> {
     let shard_out = plain(c.shard_value(), &t.shard_spk(&c.shard));
     let f = fund(ctx).await?;
     let s = ctx.build(&[p2pk_in(&f)], &[shard_out], &[GenesisCovenantGroup::new(0, vec![0])])?;
-    if !ctx.submit("setup: buy-m1 genesis shard", &s, true).await? {
+    if !ctx.submit(&format!("setup: buy-m1 genesis shard (b = {b})"), &s, true).await? {
         return Err("buy-m1 setup rejected".into());
     }
     let so = outs_of(&s);
@@ -196,16 +206,25 @@ pub async fn buy_m1(ctx: &mut Ctx) -> Result<(), String> {
     c.cov = so[0].entry.covenant_id.ok_or("no genesis covenant id")?;
     c.funding = vec![funding.entry.amount];
 
-    let mut b = c.build();
-    b.outpoints = vec![so[0].op, funding.op];
-    let fin = b.finish();
-    fin.run().map_err(|(i, e)| format!("local engine rejects buy-m1 at input {i}: {e:?}"))?;
+    let mut bl = c.build();
+    bl.outpoints = vec![so[0].op, funding.op];
+    let fin = bl.finish();
+    fin.run().map_err(|(i, e)| format!("local engine rejects buy-m1 (b = {b}) at input {i}: {e:?}"))?;
     let mut tx = fin.tx.clone();
     tx.finalize();
     let m = harness::masses(&tx, &fin.entries);
     let sent = Sent { fee: fin.fee(), tx, m };
     let ok = ctx
-        .submit(&format!("buy() M1 real shard script, b = {bm}, referral, d = 0.11 KAS, R = {:.2} KAS", c.reserve as f64 / KAS as f64), &sent, true)
+        .submit(
+            &format!(
+                "buy() M1 real shard script, b = {b} (B_MAX = {bm}), referral {:.2} KAS, d = {} KAS, R = {:.2} KAS",
+                c.referral() as f64 / KAS as f64,
+                c.shard.d as f64 / KAS as f64,
+                c.reserve as f64 / KAS as f64
+            ),
+            &sent,
+            true,
+        )
         .await?;
     if ok {
         let outs = outs_of(&sent);
@@ -359,7 +378,19 @@ async fn sink(ctx: &Ctx) -> Result<kaspa_rpc_core::RpcHash, String> {
 ///
 /// The accepting chain block comes from `GetVirtualChainFromBlock(start, accepted ids)`,
 /// its DAA score from `GetBlock`; the loop waits until the UTXO index entry equals it.
-async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_core::tx::TransactionOutpoint, spk: &kaspa_consensus_core::tx::ScriptPublicKey) -> Result<Utxo, String> {
+async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_core::tx::TransactionOutpoint, spk: &kaspa_consensus_core::tx::ScriptPublicKey) -> Result<(Utxo, f64), String> {
+    merged_poll(ctx, start, op, spk, std::time::Duration::from_secs(1)).await
+}
+
+/// `merged` with a chosen poll interval (M6 `conflict-m6` polls every 200 ms for τ_merge).
+/// Returns the entry and the seconds from the call until it was found.
+async fn merged_poll(
+    ctx: &Ctx,
+    start: kaspa_rpc_core::RpcHash,
+    op: kaspa_consensus_core::tx::TransactionOutpoint,
+    spk: &kaspa_consensus_core::tx::ScriptPublicKey,
+    poll: std::time::Duration,
+) -> Result<(Utxo, f64), String> {
     use kaspa_rpc_core::api::rpc::RpcApi;
     let addr = kaspa_txscript::extract_script_pub_key_address(spk, kaspa_addresses::Prefix::Testnet).map_err(|e| e.to_string())?;
     let t0 = std::time::Instant::now();
@@ -379,8 +410,9 @@ async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_c
                     Some(e) => {
                         let ne: kaspa_consensus_core::tx::UtxoEntry = e.utxo_entry.into();
                         if ne.block_daa_score == daa {
-                            println!("{op}: merged by chain block {} at DAA {daa}; node entry DAA {} (after {:.1} s)", a.accepting_block_hash, ne.block_daa_score, t0.elapsed().as_secs_f64());
-                            return Ok(Utxo { op, entry: ne, padded: false });
+                            let secs = t0.elapsed().as_secs_f64();
+                            println!("{op}: merged by chain block {} at DAA {daa}; node entry DAA {} (after {secs:.1} s)", a.accepting_block_hash, ne.block_daa_score);
+                            return Ok((Utxo { op, entry: ne, padded: false }, secs));
                         }
                         format!("node entry DAA {} != accepting chain block DAA {daa}", ne.block_daa_score)
                     }
@@ -392,7 +424,7 @@ async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_c
             println!("{op}: waiting ({note})");
             last = note;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(poll).await;
     }
     Err(format!("{op}: no chain-merged UTXO entry within 300 s ({last})"))
 }
@@ -503,7 +535,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     }
     let gid = gs.tx.id();
     let gn = gs.tx.outputs.len() - 1;
-    let gchange = merged(ctx, g_start, Op::new(gid, gn as u32), &gs.tx.outputs[gn].script_public_key).await?;
+    let gchange = merged(ctx, g_start, Op::new(gid, gn as u32), &gs.tx.outputs[gn].script_public_key).await?.0;
     let gdaa = gchange.entry.block_daa_score;
     println!("genesis {gid} at DAA {gdaa}; covenant id {cov}");
 
@@ -568,7 +600,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         }
         let did = ds.tx.id();
         let dn = ds.tx.outputs.len() - 1;
-        let dchange = merged(ctx, d_start, Op::new(did, dn as u32), &ds.tx.outputs[dn].script_public_key).await?;
+        let dchange = merged(ctx, d_start, Op::new(did, dn as u32), &ds.tx.outputs[dn].script_public_key).await?.0;
         let dx = dc.expected();
         vault_in = (Op::new(did, 0), dx.vault.clone(), dchange.entry.block_daa_score, d_start);
 
@@ -583,6 +615,9 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         wc.position = g.position.clone();
         wc.position_daa = gdaa;
         wc.w = vr.w;
+        // M6 D86 builder policy (the W4b mirror): refuse a partial withdrawal below wmin.
+        let mut wc = wc.checked().map_err(|e| format!("{tag}: builder policy refuses request_withdraw: {e}"))?;
+        println!("request_withdraw: w = {} shares, wmin = {} at total_assets = {}, total_shares = {}", wc.w, wc.w_min(), wc.vault.total_assets, wc.vault.total_shares);
         wc.owner_value = dchange.entry.amount;
         wc.owner_daa = dchange.entry.block_daa_score;
         wc.funding = vec![];
@@ -599,12 +634,12 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         wf.run().map_err(|(i, e)| format!("local engine rejects {tag} request_withdraw at input {i}: {e:?}"))?;
         let ws = sent_of(&wf);
         let w_start = sink(ctx).await?;
-        if !ctx.submit(&format!("request_withdraw() M5 real vault and position scripts: partial, w = {} of {} shares, P2PK Schnorr owner input", vr.w, g.position.shares), &ws, true).await? {
+        if !ctx.submit(&format!("request_withdraw() M5 real vault and position scripts: partial, w = {} of {} shares (wmin {}), P2PK Schnorr owner input", vr.w, g.position.shares, wc.w_min()), &ws, true).await? {
             return Err(format!("{tag} request_withdraw rejected"));
         }
         let wid = ws.tx.id();
         let wn = ws.tx.outputs.len() - 1;
-        let wchange = merged(ctx, w_start, Op::new(wid, wn as u32), &ws.tx.outputs[wn].script_public_key).await?;
+        let wchange = merged(ctx, w_start, Op::new(wid, wn as u32), &ws.tx.outputs[wn].script_public_key).await?.0;
         vault_in = (Op::new(wid, 0), wc.expected().vault.clone(), wchange.entry.block_daa_score, w_start);
         buy_funding = wchange;
         dep = Some((dc, ds, d_start));
@@ -641,7 +676,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     }
     let bid = bs.tx.id();
     let bn = bs.tx.outputs.len() - 1;
-    let bchange = merged(ctx, b_start, Op::new(bid, bn as u32), &bs.tx.outputs[bn].script_public_key).await?;
+    let bchange = merged(ctx, b_start, Op::new(bid, bn as u32), &bs.tx.outputs[bn].script_public_key).await?.0;
     let bdaa = bchange.entry.block_daa_score;
     let tree0 = bc.proofs().2;
 
@@ -684,7 +719,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     }
     let cid = cs.tx.id();
     let cn = cs.tx.outputs.len() - 1;
-    let caller = merged(ctx, c_start, Op::new(cid, cn as u32), &cs.tx.outputs[cn].script_public_key).await?;
+    let caller = merged(ctx, c_start, Op::new(cid, cn as u32), &cs.tx.outputs[cn].script_public_key).await?.0;
     let cdaa = caller.entry.block_daa_score;
     let seed_ref = x.marker.seed_ref;
     println!("close {cid} at DAA {cdaa}; seed_ref {seed_ref}");
@@ -729,7 +764,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     for attempt in 1..=3 {
         let mut node = Vec::new();
         for (i, op) in dops.iter().enumerate() {
-            node.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+            node.push(merged(ctx, starts[i], *op, &spks[i]).await?.0.entry);
         }
         d.drawer_daa = node[0].block_daa_score;
         d.marker_daa = node[1].block_daa_score;
@@ -755,7 +790,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         // Re-read right before submission; rebuild if anything moved.
         let mut again = Vec::new();
         for (i, op) in dops.iter().enumerate() {
-            again.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+            again.push(merged(ctx, starts[i], *op, &spks[i]).await?.0.entry);
         }
         if again == node {
             for (i, e) in node.iter().enumerate() {
@@ -877,7 +912,7 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
     for attempt in 1..=3 {
         let mut node = Vec::new();
         for (i, op) in ops.iter().enumerate() {
-            node.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+            node.push(merged(ctx, starts[i], *op, &spks[i]).await?.0.entry);
         }
         c.ticket_value = node[0].amount;
         c.ticket_daa = node[0].block_daa_score;
@@ -908,7 +943,7 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
         cf.run().map_err(|(i, e)| format!("local engine rejects {TAG} claim at input {i}: {e:?}"))?;
         let mut again = Vec::new();
         for (i, op) in ops.iter().enumerate() {
-            again.push(merged(ctx, starts[i], *op, &spks[i]).await?.entry);
+            again.push(merged(ctx, starts[i], *op, &spks[i]).await?.0.entry);
         }
         if again == node {
             for (i, e) in node.iter().enumerate() {
@@ -945,8 +980,11 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
 /// `settle()` (FINAL, the record drained: payout and the record's R refunded to the draw
 /// caller), every transaction with the real scripts, built by the `lottery` builders and
 /// checked in the local v2.1.0 engine before submission through the public mempool.
-/// - D = 2 KAS (>= MIN_DEPOSIT); w = 1 % of the deployer's S0 = V0 / SHARE_UNIT shares
-///   (0.6 KAS worth, within the draw's slack V' + D - L', so wc = W).
+/// - M6 (D85, D86): D = 12 KAS (>= MIN_DEPOSIT = 10 KAS); w = wmin of the vault' the
+///   withdrawal spends (`game::w_min(total_assets, total_shares)`, the W4b boundary; at
+///   V0 = 60 KAS and S0 = V0 / SHARE_UNIT that is 1,000,000,166 shares, about 10 KAS worth,
+///   within the draw's slack V' + D - L', so wc = W). The withdrawal passes the builder policy
+///   `WithdrawCase::checked()` before it is built.
 /// - The record's state is rebuilt from the draw transaction bytes alone
 ///   (`RoundResult::record`, R4); every input of every step is the node's own entry, read
 ///   once a chain block merged the creating transaction (`merged`, O-S4-4).
@@ -958,13 +996,21 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
 pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {
     use kaspa_consensus_core::tx::TransactionOutpoint as Op;
     use lottery::close::FundingIn;
-    use lottery::game::{SHARE_UNIT, SettleMode};
+    use lottery::game::{MIN_DEPOSIT, SHARE_UNIT, SettleMode, w_min};
     use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, RequestState};
     use lottery::vault::SettleCase;
 
     const TAG: &str = "vault-m5";
-    let s0 = 60 * KAS as i64 / SHARE_UNIT;
-    let vr = VaultRequests { d: 2 * KAS as i64, w: s0 / 100 };
+    let v0 = 60 * KAS as i64;
+    let s0 = v0 / SHARE_UNIT;
+    // The deposit request only raises pend_dep, so the vault' the withdrawal spends still has
+    // total_assets = V0 and total_shares = S0; round1_drawn_with re-checks w against that
+    // state through `WithdrawCase::checked()`.
+    let vr = VaultRequests { d: 12 * KAS as i64, w: w_min(v0, s0) };
+    if vr.d < MIN_DEPOSIT {
+        return Err(format!("{TAG}: D = {} < MIN_DEPOSIT = {MIN_DEPOSIT}", vr.d));
+    }
+    println!("{TAG}: D = {} sompi, w = wmin({v0}, {s0}) = {} shares", vr.d, vr.w);
     let r = round1_drawn_with(ctx, TAG, Some(vr)).await?;
     let t = r.t.clone();
     let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
@@ -989,7 +1035,7 @@ pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {
     let spks1 = [ds.tx.outputs[1].script_public_key.clone(), r.ds.tx.outputs[rec.outpoint.index as usize].script_public_key.clone(), r.ds.tx.outputs[caller].script_public_key.clone()];
     let mut node = Vec::new();
     for (i, op) in ops1.iter().enumerate() {
-        node.push(merged(ctx, starts1[i], *op, &spks1[i]).await?.entry);
+        node.push(merged(ctx, starts1[i], *op, &spks1[i]).await?.0.entry);
     }
     s1.request_value = node[0].amount;
     s1.request_daa = node[0].block_daa_score;
@@ -1038,7 +1084,7 @@ pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {
     let spks2 = [ws.tx.outputs[1].script_public_key.clone(), st1.tx.outputs[0].script_public_key.clone(), st1.tx.outputs[ch1].script_public_key.clone()];
     let mut node = Vec::new();
     for (i, op) in ops2.iter().enumerate() {
-        node.push(merged(ctx, starts2[i], *op, &spks2[i]).await?.entry);
+        node.push(merged(ctx, starts2[i], *op, &spks2[i]).await?.0.entry);
     }
     s2.request_value = node[0].amount;
     s2.request_daa = node[0].block_daa_score;
@@ -1072,5 +1118,454 @@ pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {
         true,
     )
     .await?;
+    Ok(())
+}
+
+
+/// Mean, median and max of `v` (seconds); `None` if empty.
+fn stats(v: &[f64]) -> Option<(f64, f64, f64)> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = s.len();
+    let median = if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 };
+    Some((s.iter().sum::<f64>() / n as f64, median, s[n - 1]))
+}
+
+/// Poll the virtual chain from `start` every `poll` until every id of `all` and (if `any` is not
+/// empty) at least one id of `any` has been accepted by a chain block, or `limit` passes.
+/// Returns the instant at which each watched id was first seen accepted (taken when the RPC
+/// response arrived, so an upper bound by one poll cycle plus the response time).
+async fn watch_accepted(
+    ctx: &Ctx,
+    start: kaspa_rpc_core::RpcHash,
+    all: &[kaspa_consensus_core::tx::TransactionId],
+    any: &[kaspa_consensus_core::tx::TransactionId],
+    poll: std::time::Duration,
+    limit: std::time::Duration,
+) -> Result<std::collections::HashMap<kaspa_consensus_core::tx::TransactionId, std::time::Instant>, String> {
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    let t0 = std::time::Instant::now();
+    let mut seen = std::collections::HashMap::new();
+    loop {
+        let vc = ctx.client.get_virtual_chain_from_block(start, true, None).await.map_err(|e| e.to_string())?;
+        let now = std::time::Instant::now();
+        for a in &vc.accepted_transaction_ids {
+            for id in &a.accepted_transaction_ids {
+                if (all.contains(id) || any.contains(id)) && !seen.contains_key(id) {
+                    seen.insert(*id, now);
+                }
+            }
+        }
+        let all_done = all.iter().all(|id| seen.contains_key(id));
+        let any_done = any.is_empty() || any.iter().any(|id| seen.contains_key(id));
+        if (all_done && any_done) || t0.elapsed() > limit {
+            return Ok(seen);
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// Submit the alternative transactions `cands` in order, each round, every `poll` until one is
+/// accepted or `limit` passes (orphans disallowed). Returns (accepted index, attempts, the
+/// instant the accepting call returned) and every distinct error as "<name>: <text>".
+async fn submit_until(
+    ctx: &Ctx,
+    cands: &[(&str, &Sent)],
+    poll: std::time::Duration,
+    limit: std::time::Duration,
+) -> (Option<(usize, u32, std::time::Instant)>, Vec<String>) {
+    let t0 = std::time::Instant::now();
+    let mut errs: Vec<String> = vec![];
+    let mut attempts = 0;
+    loop {
+        for (k, (name, s)) in cands.iter().enumerate() {
+            attempts += 1;
+            match ctx.submit_raw(s).await {
+                Ok(()) => return (Some((k, attempts, std::time::Instant::now())), errs),
+                Err(e) => {
+                    let e = format!("{name}: {e}");
+                    if !errs.contains(&e) {
+                        println!("rejected (attempt {attempts}) {e}");
+                        errs.push(e);
+                    }
+                }
+            }
+        }
+        if t0.elapsed() > limit {
+            return (None, errs);
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// M6 (spec A6; D87, D88; research F3): purchase conflicts on one shard, with the real
+/// templates, through the public mempool. Not part of `probe all` (it locks about 160 KAS: genesis, then 30 accepted buys at price + d).
+/// - Genesis as draw-m3 (K = 16, J(1) = 10 KAS, V0 = 60 KAS), but with T far ahead (no
+///   close() follows), then a fan-out of 5N plain funding outputs (one per buy) from the genesis
+///   change; both chain-merged before the first repetition.
+/// - N = 10 repetitions; repetition i uses the fresh genesis shard i and then its successor.
+///   Part R (spec A6 steps 1-3):
+///   1. Race: buys A and B (b = 1, different combinations and funding inputs, the same shard
+///      state; B pays twice A's fee, a strictly higher feerate). A is submitted, then B at once
+///      through `submit_transaction` (RbfPolicy::Forbidden). Expected: B rejected as a double spend.
+///   2. Replace: the same B through `submit_transaction_replacement` (RbfPolicy::Mandatory). The
+///      node returns the replaced transaction; the probe records whether it is A. Which of A and
+///      B a chain block then accepts is read from the virtual chain (the node's acceptance of
+///      the replacement does not decide it: a block that already holds A removes B,
+///      `mining/src/mempool/handle_new_block_transactions.rs`).
+///   3. Chain: buy C on the unaccepted successor shard of the node's winner (B if the
+///      replacement was accepted), built with the creation DAA score the mempool gives an
+///      in-pool parent's output, UNACCEPTED_DAA_SCORE (pushed as -1), and submitted right after
+///      step 2 (RBF evicts descendants, `replace_by_fee.rs:124-129`); if rejected, the C built on
+///      the other candidate is tried next, every 200 ms, for up to 60 s. Both Cs are built before
+///      the race. Every distinct error is recorded.
+///   Part F (clean timing, step 4): on the shard's chain-merged tip after part R, a buy P and,
+///   at once, a buy Q chained on P's unaccepted successor (Q built before P is submitted), with
+///   no replacement in between. τ_chain = start of P's submission -> Q accepted (Q retried every
+///   200 ms on rejection). τ_merge = start of a winner's submission -> a chain block accepted it
+///   (virtual chain polled every 200 ms), for the part R winner and for P. The node entry of
+///   each merged change output is read with `merged()` (its DAA = the merging chain block's).
+/// Locked on testnet afterwards: every object of the instance. Unused funding and changes are ours.
+pub async fn conflict_m6(ctx: &mut Ctx) -> Result<(), String> {
+    use kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE;
+    use kaspa_consensus_core::tx::TransactionOutpoint as Op;
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    use lottery::buy::{BuyCase, Final, Templates, b_max};
+    use lottery::combo::{Combo, unrank};
+    use lottery::genesis::{GenesisCase, covenant_id};
+    use lottery::smt::Tree;
+    use lottery::state::Payout;
+    use std::time::{Duration, Instant};
+
+    const TAG: &str = "conflict-m6";
+    const K: usize = 16;
+    const N: usize = 10;
+    const PER: usize = 5;
+    const FUND_EACH: u64 = 3 * KAS;
+    const POLL: Duration = Duration::from_millis(200);
+    const CHAIN_RETRY_FOR: Duration = Duration::from_secs(60);
+    const MERGE_LIMIT: Duration = Duration::from_secs(300);
+    let daa = ctx.client.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+    let t = Templates::get(b_max());
+    let sk = ctx.sk;
+    let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &sk).unwrap().x_only_public_key().0.serialize());
+    // T far ahead (about 11.6 days at 10 BPS): shard check 6 needs creation < T; no close().
+    let deadline = daa as i64 + 10_000_000;
+
+    // ---- genesis (as round1_drawn, T far ahead)
+    let f = fund(ctx).await?;
+    let mut g = GenesisCase::new_with(K, vec![(f.op, f.entry.clone())], &t);
+    g.funding_sk = sk;
+    g.set_owner(&me);
+    g.set_jackpot(10 * KAS as i64);
+    g.set_vault(60 * KAS as i64);
+    g.controller.deadline = deadline;
+    for s in &mut g.shards {
+        s.deadline = deadline;
+    }
+    let mut gf = g.build_with(t.clone()).finish();
+    g.fee = lottery_fee(&gf);
+    gf = g.build_with(t.clone()).finish();
+    gf.run().map_err(|(i, e)| format!("local engine rejects {TAG} genesis at input {i}: {e:?}"))?;
+    let cov = covenant_id(&gf);
+    let gs = sent_of(&gf);
+    let g_start = sink(ctx).await?;
+    if !ctx.submit(&format!("setup: {TAG} genesis, K = {K}, real templates, R = {:.2} KAS, T = DAA + 10^7", g.reserve() as f64 / KAS as f64), &gs, true).await? {
+        return Err(format!("{TAG} genesis rejected"));
+    }
+    let gid = gs.tx.id();
+    let gn = gs.tx.outputs.len() - 1;
+    let (gchange, _) = merged(ctx, g_start, Op::new(gid, gn as u32), &gs.tx.outputs[gn].script_public_key).await?;
+    let gdaa = gchange.entry.block_daa_score;
+    println!("genesis {gid} at DAA {gdaa}; covenant id {cov}");
+
+    // ---- fan-out: one confirmed plain funding output per buy
+    let outs: Vec<TransactionOutput> = (0..PER * N).map(|_| plain(FUND_EACH, &ctx.spk())).collect();
+    let fs = ctx.build(&[p2pk_in(&gchange)], &outs, &[])?;
+    let f_start = sink(ctx).await?;
+    if !ctx.submit(&format!("setup: {TAG} fan-out, {} funding outputs of {} KAS", PER * N, FUND_EACH / KAS), &fs, true).await? {
+        return Err(format!("{TAG} fan-out rejected"));
+    }
+    let fid = fs.tx.id();
+    let fl = fs.tx.outputs.len() - 1;
+    merged(ctx, f_start, Op::new(fid, fl as u32), &fs.tx.outputs[fl].script_public_key).await?;
+    let funds = outs_of(&fs);
+
+    let m = g.controller.m;
+    let empty = Tree::new(m as usize);
+    let fin = |bc: &BuyCase, ops: &[Op]| -> Final {
+        let mut b = bc.build_with(t.clone());
+        b.outpoints = ops.to_vec();
+        b.finish()
+    };
+    // A b = 1 buy of `combo` on shard state `shard` (tree `tree`, creation DAA `sdaa`) at
+    // outpoint `sop`, funded by `fu`; fee = `fee` or, if 0, the priority fee. Checked in the
+    // local engine (with `sdaa`, as the node will see it).
+    let buy = |shard: lottery::state::ShardState, tree: Tree, sdaa: u64, sop: Op, fu: &Utxo, combo: Combo, fee: u64, what: &str| -> Result<(BuyCase, Sent), String> {
+        let mut bc = BuyCase::new(t.b_max).with_tree(tree);
+        bc.shard = shard;
+        bc.reserve = g.reserve();
+        bc.shard_daa = sdaa;
+        bc.cov = cov;
+        bc.payout = me;
+        bc.funding_sk = sk;
+        bc.bundle = vec![combo];
+        bc.funding = vec![fu.entry.amount];
+        let ops = [sop, fu.op];
+        bc.fee = if fee > 0 { fee } else { lottery_fee(&fin(&bc, &ops)) };
+        let bf = fin(&bc, &ops);
+        bf.run().map_err(|(k, e)| format!("local engine rejects {TAG} {what} at input {k}: {e:?}"))?;
+        Ok((bc, sent_of(&bf)))
+    };
+    // A buy chained on `w`'s successor (output 0 of `wid`), creation DAA unaccepted.
+    let chain_on = |w: &BuyCase, wid: kaspa_consensus_core::tx::TransactionId, fu: &Utxo, combo: Combo, what: &str| {
+        buy(w.successor(), w.proofs().2, UNACCEPTED_DAA_SCORE, Op::new(wid, 0), fu, combo, 0, what)
+    };
+    let feerate = |s: &Sent| s.fee as f64 / s.m.priority as f64;
+    let secs = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64();
+
+    let (mut tau_chain_f, mut tau_merge_r, mut tau_merge_f, mut q_merge, mut tau_chain_r) = (vec![], vec![], vec![], vec![], vec![]);
+    let (mut race_rejected, mut replace_ok, mut replaced_a, mut chain_win_a, mut chain_win_b) = (0, 0, 0, 0, 0);
+    let (mut c_ok, mut q_ok, mut q_first, mut q_before_p) = (0, 0, 0, 0);
+    let mut build_secs = vec![];
+    for i in 0..N {
+        let fu = &funds[PER * i..PER * (i + 1)];
+        let combo = |j: usize| Combo::new(unrank((PER * i + j) as u32), 1 + j as u8);
+        assert_eq!(g.shards[i].root, empty.root(), "genesis shard {i} holds the empty tree");
+        let shard_op = Op::new(gid, GenesisCase::shard_output(i) as u32);
+
+        // ======== Part R: race, replace, chain
+        let (a, asent) = buy(g.shards[i].clone(), empty.clone(), gdaa, shard_op, &fu[0], combo(0), 0, &format!("rep {i} buy A"))?;
+        let (b, bsent) = buy(g.shards[i].clone(), empty.clone(), gdaa, shard_op, &fu[1], combo(1), 2 * asent.fee, &format!("rep {i} buy B"))?;
+        if feerate(&bsent) <= feerate(&asent) {
+            return Err(format!("{TAG} rep {i}: B's feerate {} is not above A's {}", feerate(&bsent), feerate(&asent)));
+        }
+        let (aid, bid) = (asent.tx.id(), bsent.tx.id());
+        let tb = Instant::now();
+        let (ca, c_on_a) = chain_on(&a, aid, &fu[2], combo(2), &format!("rep {i} C on A"))?;
+        let (cb, c_on_b) = chain_on(&b, bid, &fu[2], combo(2), &format!("rep {i} C on B"))?;
+        build_secs.push(tb.elapsed().as_secs_f64() / 2.0);
+
+        let start = sink(ctx).await?;
+        let t_a = Instant::now();
+        let ra = ctx.submit_raw(&asent).await;
+        let rtt_a = t_a.elapsed().as_secs_f64();
+        let rb = ctx.submit_raw(&bsent).await;
+        let t_r = Instant::now();
+        let rr = ctx.submit_replacement_raw(&bsent).await;
+        let rtt_r = t_r.elapsed().as_secs_f64();
+        let replaced = rr.is_ok();
+        let (first, second) = if replaced { (("C on B", &c_on_b), ("C on A", &c_on_a)) } else { (("C on A", &c_on_a), ("C on B", &c_on_b)) };
+        let t_c = Instant::now();
+        let (cres, cerrs) = submit_until(ctx, &[first, second], POLL, CHAIN_RETRY_FOR).await;
+
+        let fee_note = |s: &Sent| format!("fee {} sompi, feerate {:.4} sompi/g", s.fee, feerate(s));
+        ctx.row(
+            &format!("rep {i} R1: race, buy A (b = 1, shard {i}, {})", fee_note(&asent)),
+            &asent,
+            &match &ra {
+                Ok(()) => format!("accepted (submit {rtt_a:.3} s)"),
+                Err(e) => format!("REJECTED: {e}"),
+            },
+        );
+        if let Err(e) = &ra {
+            return Err(format!("{TAG} rep {i}: buy A rejected: {e}"));
+        }
+        let rb_detail = match &rb {
+            Ok(()) => "FINDING: ACCEPTED (expected a double-spend rejection)".to_string(),
+            Err(e) => {
+                race_rejected += 1;
+                format!("REJECTED (expected): {e}")
+            }
+        };
+        ctx.row(&format!("rep {i} R1: race, buy B on the same shard state via submit_transaction ({})", fee_note(&bsent)), &bsent, &rb_detail);
+        match &rr {
+            Ok(tx) => {
+                replace_ok += 1;
+                let is_a = tx.id() == aid;
+                if is_a {
+                    replaced_a += 1;
+                }
+                let d = format!("accepted by the node (submit {rtt_r:.3} s); replaced {} ({})", tx.id(), if is_a { "= A" } else { "NOT A" });
+                ctx.row(&format!("rep {i} R2: replace, the same B via submit_transaction_replacement"), &bsent, &d);
+            }
+            Err(e) => ctx.row(&format!("rep {i} R2: replace, the same B via submit_transaction_replacement"), &bsent, &format!("REJECTED: {e}")),
+        }
+        let cands = [first, second];
+        let (c_case, c_parent) = match cres {
+            Some((k, attempts, t_acc)) => {
+                c_ok += 1;
+                let parent_is_a = cands[k].0 == "C on A";
+                let tw = if parent_is_a { t_a } else { t_r };
+                tau_chain_r.push(secs(tw, t_acc));
+                let d = format!(
+                    "{} accepted on attempt {attempts} ({:.3} s after step 2; {:.3} s after its parent's submission){}",
+                    cands[k].0,
+                    secs(t_c, t_acc),
+                    secs(tw, t_acc),
+                    if cerrs.is_empty() { String::new() } else { format!("; errors before: {}", cerrs.join(" / ")) }
+                );
+                ctx.row(&format!("rep {i} R3: chain, buy C on the unaccepted successor shard (creation DAA UNACCEPTED, -1 in the script)"), cands[k].1, &d);
+                (Some(if parent_is_a { (ca.clone(), c_on_a.clone()) } else { (cb.clone(), c_on_b.clone()) }), Some(if parent_is_a { aid } else { bid }))
+            }
+            None => {
+                ctx.row(
+                    &format!("rep {i} R3: chain, buy C on the unaccepted successor shard"),
+                    first.1,
+                    &format!("REJECTED for {} s, both candidates: {}", CHAIN_RETRY_FOR.as_secs(), cerrs.join(" / ")),
+                );
+                (None, None)
+            }
+        };
+        // Which of A and B did a chain block accept?
+        let seen = watch_accepted(ctx, start, &[], &[aid, bid], POLL, MERGE_LIMIT).await?;
+        let (wa, wb) = (seen.contains_key(&aid), seen.contains_key(&bid));
+        let (wname, wcase, wsent, t_w) = match (wa, wb) {
+            (true, false) => {
+                chain_win_a += 1;
+                ("A", &a, &asent, t_a)
+            }
+            (false, true) => {
+                chain_win_b += 1;
+                ("B", &b, &bsent, t_r)
+            }
+            (true, true) => return Err(format!("{TAG} rep {i}: FINDING: both A and B accepted by the chain")),
+            (false, false) => return Err(format!("{TAG} rep {i}: neither A nor B accepted within {} s", MERGE_LIMIT.as_secs())),
+        };
+        let wid = wsent.tx.id();
+        let tm = secs(t_w, seen[&wid]);
+        tau_merge_r.push(tm);
+        let wn = wsent.tx.outputs.len() - 1;
+        let (we, we_s) = merged(ctx, start, Op::new(wid, wn as u32), &wsent.tx.outputs[wn].script_public_key).await?;
+        // C, if accepted on the chain's winner: wait for it too; the shard tip is then C's successor.
+        let mut tip: (BuyCase, Sent, u64) = (wcase.clone(), wsent.clone(), we.entry.block_daa_score);
+        let mut cnote = "no C".to_string();
+        if let (Some((cc, cs)), Some(cp)) = (&c_case, c_parent) {
+            if cp == wid {
+                let cid = cs.tx.id();
+                let cseen = watch_accepted(ctx, start, &[cid], &[], POLL, MERGE_LIMIT).await?;
+                if cseen.contains_key(&cid) {
+                    let cn = cs.tx.outputs.len() - 1;
+                    let (ce, _) = merged(ctx, start, Op::new(cid, cn as u32), &cs.tx.outputs[cn].script_public_key).await?;
+                    cnote = format!("C (on {wname}) merged at DAA {}", ce.entry.block_daa_score);
+                    tip = (cc.clone(), cs.clone(), ce.entry.block_daa_score);
+                } else {
+                    cnote = format!("C (on {wname}) NOT merged within {} s", MERGE_LIMIT.as_secs());
+                }
+            } else {
+                cnote = "FINDING: C accepted by the node on the parent the chain rejected".to_string();
+            }
+        }
+        let summary = format!(
+            "rep {i} R summary: node replacement {}; chain winner {wname} (merged at DAA {}, entry seen {we_s:.1} s later); τ_merge = {tm:.2} s; {cnote}",
+            if replaced { "accepted" } else { "rejected" },
+            we.entry.block_daa_score
+        );
+        println!("{summary}");
+        ctx.report.push(format!("| {summary} | | | | | | | | `{wid}` |"));
+
+        // ======== Part F: P on the merged tip, Q chained on P at once
+        let (tcase, tsent, tdaa) = tip;
+        let tid = tsent.tx.id();
+        let (p, psent) = buy(tcase.successor(), tcase.proofs().2, tdaa, Op::new(tid, 0), &fu[3], combo(3), 0, &format!("rep {i} buy P"))?;
+        let pid = psent.tx.id();
+        let (_q, qsent) = chain_on(&p, pid, &fu[4], combo(4), &format!("rep {i} chained buy Q"))?;
+        let qid = qsent.tx.id();
+        let fstart = sink(ctx).await?;
+        let t_p = Instant::now();
+        let rp = ctx.submit_raw(&psent).await;
+        let rtt_p = t_p.elapsed().as_secs_f64();
+        ctx.row(
+            &format!("rep {i} F: buy P on the merged tip (shard {i}, {} sales before)", tcase.successor().sales / KAS as i64),
+            &psent,
+            &match &rp {
+                Ok(()) => format!("accepted (submit {rtt_p:.3} s)"),
+                Err(e) => format!("REJECTED: {e}"),
+            },
+        );
+        if let Err(e) = rp {
+            return Err(format!("{TAG} rep {i}: buy P rejected: {e}"));
+        }
+        let (qres, qerrs) = submit_until(ctx, &[("Q", &qsent)], POLL, CHAIN_RETRY_FOR).await;
+        let q_acc = match qres {
+            Some((_, attempts, t_acc)) => {
+                q_ok += 1;
+                if attempts == 1 {
+                    q_first += 1;
+                }
+                let s = secs(t_p, t_acc);
+                tau_chain_f.push(s);
+                let d = format!(
+                    "accepted on attempt {attempts}; τ_chain = {s:.3} s{}",
+                    if qerrs.is_empty() { String::new() } else { format!("; errors before: {}", qerrs.join(" / ")) }
+                );
+                ctx.row(&format!("rep {i} F: buy Q chained on P's unaccepted successor (creation DAA UNACCEPTED, -1 in the script)"), &qsent, &d);
+                Some(t_acc)
+            }
+            None => {
+                ctx.row(&format!("rep {i} F: buy Q chained on P's unaccepted successor"), &qsent, &format!("REJECTED for {} s: {}", CHAIN_RETRY_FOR.as_secs(), qerrs.join(" / ")));
+                None
+            }
+        };
+        let watch: Vec<_> = if q_acc.is_some() { vec![pid, qid] } else { vec![pid] };
+        let fseen = watch_accepted(ctx, fstart, &watch, &[], POLL, MERGE_LIMIT).await?;
+        let pm = fseen.get(&pid).map(|&x| secs(t_p, x));
+        if let Some(pm) = pm {
+            tau_merge_f.push(pm);
+        }
+        let mut qnote = String::new();
+        if let Some(t_acc) = q_acc {
+            if let (Some(&pq), Some(&pp)) = (fseen.get(&qid), fseen.get(&pid)) {
+                q_merge.push(secs(t_acc, pq));
+                let before = t_acc < pp;
+                if before {
+                    q_before_p += 1;
+                }
+                qnote = format!("; Q accepted by the mempool {} P was seen chain-accepted; Q chain-accepted {:.2} s after its acceptance", if before { "BEFORE" } else { "after" }, secs(t_acc, pq));
+            } else {
+                qnote = "; Q NOT chain-accepted within the limit".to_string();
+            }
+        }
+        let pn = psent.tx.outputs.len() - 1;
+        let (pe, _) = merged(ctx, fstart, Op::new(pid, pn as u32), &psent.tx.outputs[pn].script_public_key).await?;
+        let fsum = format!(
+            "rep {i} F summary: P merged at DAA {}; τ_merge(P) = {}{qnote}",
+            pe.entry.block_daa_score,
+            pm.map(|x| format!("{x:.2} s")).unwrap_or("not seen".into())
+        );
+        println!("{fsum}");
+        ctx.report.push(format!("| {fsum} | | | | | | | | `{pid}` |"));
+    }
+
+    let line = |name: &str, v: &[f64]| match stats(v) {
+        Some((mean, med, max)) => format!("{name}: n = {}, mean {mean:.3} s, median {med:.3} s, max {max:.3} s", v.len()),
+        None => format!("{name}: no samples"),
+    };
+    let mut pooled = tau_merge_r.clone();
+    pooled.extend(&tau_merge_f);
+    let r3 = |v: &[f64]| v.iter().map(|x| (x * 1000.0).round() / 1000.0).collect::<Vec<_>>();
+    let lines = [
+        format!(
+            "{TAG} R: race B rejected {race_rejected}/{N}; node accepted the replacement {replace_ok}/{N} (replaced A: {replaced_a}); chain accepted A {chain_win_a}/{N}, B {chain_win_b}/{N}; chained C accepted {c_ok}/{N}"
+        ),
+        format!("{TAG} F: chained Q accepted {q_ok}/{N} ({q_first} on the first attempt); Q accepted before P was seen chain-accepted: {q_before_p}/{q_ok}"),
+        line("τ_chain (F: P submit -> chained Q accepted)", &tau_chain_f),
+        line("τ_chain (R: parent submit -> C accepted)", &tau_chain_r),
+        line("τ_merge (R: winner submit -> chain-accepted)", &tau_merge_r),
+        line("τ_merge (F: P submit -> chain-accepted)", &tau_merge_f),
+        line("τ_merge (pooled R + F)", &pooled),
+        line("Q merge (Q accepted -> chain-accepted)", &q_merge),
+        line("local build time per chained buy (not in τ)", &build_secs),
+        format!("τ_chain F samples (s): {:?}", r3(&tau_chain_f)),
+        format!("τ_merge R samples (s): {:?}", r3(&tau_merge_r)),
+        format!("τ_merge F samples (s): {:?}", r3(&tau_merge_f)),
+    ];
+    for l in lines {
+        println!("{l}");
+        ctx.report.push(format!("| {l} | | | | | | | | |"));
+    }
     Ok(())
 }

@@ -19,6 +19,8 @@
 //! Because nothing on chain validates genesis, `build*` refuses an instance that breaks an
 //! A3 range or the share-room invariant (`GenesisCase::validate`). `close()` check 2 rejects
 //! such a controller anyway (M2 review finding R2), so a bad genesis could never close.
+//! It also refuses a genesis whose exact masses exceed 100 % of the mainnet limits
+//! (`genesis_mass_check`, user decision U-M6-1: genesis is exempt from the 90 % margin).
 
 use std::sync::Arc;
 
@@ -29,7 +31,7 @@ use kaspa_consensus_core::tx::GenesisCovenantGroup;
 use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, spk_of};
 use crate::close::{CloseCase, z18};
 use crate::game::{
-    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, SHARE_UNIT, S_F_CAP, S_R_CAP,
+    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, SHARE_UNIT, SHARES_MAX, S_F_CAP, S_R_CAP,
     TOTAL_MAX, muldiv,
 };
 use crate::params::xonly;
@@ -46,11 +48,14 @@ pub const R_MIN: u64 = crate::params::TEST_RESERVE;
 /// M3 re-review S1: draw_window + claim_window cap, so D_claim (check 19) stays below
 /// DAA_MAX while own < DAA_MAX - WINDOWS_MAX. Both windows are fixed at genesis.
 pub const WINDOWS_MAX: i64 = DAA_MAX / 4;
-/// Spec M4 A2, D57: the smallest deposit d the builder accepts (0.11 KAS). The P_MIN bound
-/// (worst PAY-mode claim within 90 % of storage mass) is computed at b = 2, d = 0.11 KAS;
-/// a smaller d would make that bound unsafe. Fixed at genesis per round's controller d
-/// (M6 revisits).
-pub const D_CLAIM_FLOOR: i64 = 11_000_000;
+/// Spec M6 A2, D81 (replaces D57's D_CLAIM_FLOOR = 0.11 KAS): the smallest deposit d the
+/// builder accepts, 0.13 KAS. It covers two bounds that both assume d >= the floor: the
+/// b = 1 referral `buy()` within 90 % of storage mass (D80) and the P_MIN bound (worst
+/// PAY-mode claim at b = 2, D82). Fixed at genesis per round's controller d.
+pub const D_FLOOR: i64 = 13_000_000;
+/// Spec M6 A2, D84: the smallest genesis vault V0 (1 KAS). With SHARE_UNIT = 1 genesis mints
+/// S0 = V0 shares, so the VS virtual shares own < 0.001 % of the vault.
+pub const V0_MIN: i64 = 100_000_000;
 
 #[derive(Clone)]
 pub struct GenesisCase {
@@ -221,9 +226,9 @@ impl GenesisCase {
         range("m_max", c.m_max, c.m_min, M_HARD)?;
         range("m", c.m, c.m_min, c.m_max)?;
         range("price", c.price, 1, PRICE_MAX)?;
-        // D57 (spec M4 A2): d >= D_CLAIM_FLOOR, so the P_MIN storage-mass bound holds.
-        if c.d < D_CLAIM_FLOOR {
-            return Err(format!("d = {} < D_CLAIM_FLOOR = {D_CLAIM_FLOOR} (D57)", c.d));
+        // D81 (spec M6 A2): d >= D_FLOOR, so the buy() and P_MIN storage-mass bounds hold.
+        if c.d < D_FLOOR {
+            return Err(format!("d = {} < D_FLOOR = {D_FLOOR} (D81)", c.d));
         }
         range("d", c.d, 1, DEPOSIT_MAX)?;
         range("s_f", c.s_f, 0, S_F_CAP)?;
@@ -293,9 +298,18 @@ impl GenesisCase {
         if v.round != c.round - 1 {
             return Err(format!("vault round {} != controller round - 1", v.round));
         }
+        // D84 (spec M6 A2): V0 >= V0_MIN = 1 KAS, so the VS virtual shares own < 0.001 % of
+        // the vault at SHARE_UNIT = 1.
+        if v.total_assets < V0_MIN {
+            return Err(format!("vault total_assets V0 = {} < V0_MIN = {V0_MIN} (D84)", v.total_assets));
+        }
         // D66 (spec M5 A9): V0 <= ASSETS_MAX and S0 = floor(V0 / SHARE_UNIT) >= 1.
         range("vault total_assets", v.total_assets, SHARE_UNIT, ASSETS_MAX)?;
         let s0 = v.total_assets / SHARE_UNIT;
+        // D84: S0 <= SHARES_MAX (the vault's W1 range, and room for the S + VS <= 2^62 bound).
+        if s0 > SHARES_MAX {
+            return Err(format!("vault S0 = floor(V0 / SHARE_UNIT) = {s0} > SHARES_MAX = {SHARES_MAX} (D84)"));
+        }
         if v.total_shares != s0 {
             return Err(format!("vault total_shares {} != S0 = floor(V0 / SHARE_UNIT) = {s0} (D66)", v.total_shares));
         }
@@ -385,12 +399,21 @@ impl GenesisCase {
         self.build_with(Templates::get(self.b_max))
     }
 
-    /// Panics if the instance fails `validate_with(t)` (which includes the drawer's route).
+    /// Panics if the instance fails `validate_with(t)` (which includes the drawer's route) or
+    /// the U-M6-1 mass check (`try_build_with`).
     pub fn build_with(&self, t: Arc<Templates>) -> Built {
-        if let Err(e) = self.validate_with(&t) {
-            panic!("genesis refused: {e}");
-        }
-        self.build_unchecked_for_tests(t)
+        self.try_build_with(t).unwrap_or_else(|e| panic!("genesis refused: {e}"))
+    }
+
+    /// `validate_with(t)`, then the transaction, then the U-M6-1 mass check: the finished
+    /// (signed, storage-mass committed) transaction's exact compute, transient and storage
+    /// masses must each be within 100 % of the mainnet limits (`genesis_mass_check`).
+    pub fn try_build_with(&self, t: Arc<Templates>) -> Result<Built, String> {
+        self.validate_with(&t)?;
+        let built = self.build_unchecked_for_tests(t);
+        let f = built.finish();
+        genesis_mass_check(&harness::masses(&f.tx, &f.entries))?;
+        Ok(built)
     }
 
     /// TEST-ONLY: builds a genesis without `validate()`, so attack tests can deploy an
@@ -444,6 +467,29 @@ fn drawer_spk(_: &Templates, _: &DrawerState) -> harness::ScriptPublicKey {
     panic!("no drawer in a build without the test-seed feature (D43)")
 }
 
+/// User decision U-M6-1 (spec M6, the Stage 3a D90 stop): genesis is exempt from the 90 %
+/// margin of D90, because its masses depend only on deployer-chosen output values (K + 4
+/// covenant outputs at about R, the vault at V0 + R, the change) and a genesis over a limit
+/// only means "cannot deploy" (no funds locked, no round frozen). The builder still refuses a
+/// genesis that could never be mined: each mass must be within 100 % of the mainnet block
+/// mass limits, compute 500,000, storage 500,000, transient 1,000,000
+/// (rusty-kaspa v2.1.0 `consensus/core/src/config/params.rs:626`). The mempool rejects a
+/// transaction with compute or transient above the limit
+/// (`mining/src/mempool/check_transaction_limits.rs:19-26`) or storage above it (`:37-41`),
+/// and a block whose summed masses exceed them is invalid
+/// (`consensus/src/pipeline/body_processor/body_validation_in_isolation.rs:88-96`); `>` in
+/// both, so exactly 100 % is allowed. `m` comes from the same v2.1.0 mass calculator with
+/// mainnet parameters as every measurement (`harness::masses`).
+pub fn genesis_mass_check(m: &harness::Masses) -> Result<(), String> {
+    let l = &harness::MAINNET_PARAMS.block_mass_limits;
+    for (name, v, lim) in [("compute", m.compute, l.compute), ("transient", m.transient, l.transient), ("storage", m.storage, l.storage)] {
+        if v > lim {
+            return Err(format!("genesis {name} mass {v} > the mainnet limit {lim} (U-M6-1: genesis is exempt from the 90 % margin, not from the limit)"));
+        }
+    }
+    Ok(())
+}
+
 /// Funding the test fixtures use for a genesis: covers the fixture vault V0 = 10,000,000 KAS
 /// plus the reserves and the fee.
 pub const GENESIS_FUNDING: u64 = 10_100_000 * KAS;
@@ -457,6 +503,7 @@ pub fn covenant_id(f: &Final) -> Hash {
 mod tests {
     use super::*;
     use crate::buy::funding_spk;
+    use crate::game::SHARES_MAX;
     use crate::ledger::Ledger;
 
     fn case() -> GenesisCase {
@@ -596,8 +643,9 @@ mod tests {
             g.controller.g2 = g2;
             g.controller.liability = g.controller.jackpot - g.controller.j_boost + g2 * (g.controller.m - 1);
             g.vault.liability = g.controller.liability;
-            // M5 (D66): V0 <= ASSETS_MAX = TOTAL_MAX - 1 (was TOTAL_MAX).
-            g.set_vault(ASSETS_MAX);
+            // M5 (D66): V0 <= ASSETS_MAX = TOTAL_MAX - 1 (was TOTAL_MAX). M6 (D84): S0 = V0 <=
+            // SHARES_MAX, so the largest V0 is SHARES_MAX (was ASSETS_MAX).
+            g.set_vault(SHARES_MAX);
             if ok {
                 assert_eq!(g.validate(), Ok(()), "G2 = G2_MAX");
             } else {
@@ -728,7 +776,8 @@ mod tests {
     }
 
     /// KP19 (spec M4 A9): the drawer's ticket_tpl is the compiled ticket hash (D54) and is
-    /// verified; d < D_CLAIM_FLOOR is refused (D57); D_CLAIM_FLOOR itself is accepted.
+    /// verified; d < D_FLOOR is refused (D81, was D57's D_CLAIM_FLOOR); D_FLOOR itself is
+    /// accepted.
     #[test]
     fn kp19_genesis_ticket_tpl_and_claim_floor() {
         let good = case();
@@ -753,7 +802,7 @@ mod tests {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
             assert!(r.is_err(), "builder accepted a bad ticket_tpl");
         }
-        // d below the claim floor (D57); every shard carries the controller's d.
+        // d below the floor (D81); every shard carries the controller's d.
         let with_d = |d: i64| {
             let mut g = good.clone();
             g.controller.d = d;
@@ -762,14 +811,108 @@ mod tests {
             }
             g
         };
-        for d in [D_CLAIM_FLOOR - 1, KAS as i64 / 10, 1] {
+        for d in [D_FLOOR - 1, 11_000_000, KAS as i64 / 10, 1] {
             let g = with_d(d);
             let e = g.validate().unwrap_err();
-            assert!(e.contains("D_CLAIM_FLOOR"), "d = {d}: refused for another reason: {e}");
+            assert!(e.contains("D_FLOOR") && e.contains("D81"), "d = {d}: refused for another reason: {e}");
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
             assert!(r.is_err(), "builder accepted d = {d}");
         }
-        assert_eq!(good.controller.d, D_CLAIM_FLOOR, "fixtures use d = D_CLAIM_FLOOR");
-        assert_eq!(with_d(D_CLAIM_FLOOR).validate(), Ok(()));
+        assert_eq!(good.controller.d, D_FLOOR, "fixtures use d = D_FLOOR");
+        assert_eq!(with_d(D_FLOOR).validate(), Ok(()));
+    }
+
+    /// LA6 (spec M6 A8): genesis below the floors is refused by `validate` and by the
+    /// builder: d = D_FLOOR - 1 (names D81), V0 = V0_MIN - 1 (names D84) and a V0 whose
+    /// S0 = V0 exceeds SHARES_MAX (names D84); the floors themselves are accepted. The
+    /// jackpot is 0 (L(1) = 0), so the cap check cannot refuse a small V0.
+    #[test]
+    fn la6_genesis_below_the_floors() {
+        let mut zero = case();
+        zero.set_jackpot(0);
+        assert_eq!(zero.validate(), Ok(()));
+        let with = |f: &dyn Fn(&mut GenesisCase)| {
+            let mut g = zero.clone();
+            f(&mut g);
+            g
+        };
+        let set_d = |g: &mut GenesisCase, d: i64| {
+            g.controller.d = d;
+            for s in &mut g.shards {
+                s.d = d;
+            }
+        };
+        let bad: Vec<(&str, GenesisCase, &str)> = vec![
+            ("d = D_FLOOR - 1", with(&|g| set_d(g, D_FLOOR - 1)), "D81"),
+            ("V0 = V0_MIN - 1", with(&|g| g.set_vault(V0_MIN - 1)), "D84"),
+            ("V0 = 1", with(&|g| g.set_vault(1)), "D84"),
+            ("S0 = V0 = SHARES_MAX + 1", with(&|g| g.set_vault(SHARES_MAX + 1)), "D84"),
+            ("S0 = V0 = ASSETS_MAX", with(&|g| g.set_vault(ASSETS_MAX)), "D84"),
+        ];
+        let mut accepted = vec![];
+        for (name, g, needle) in &bad {
+            assert_eq!(g.vault.total_shares, g.vault.total_assets, "{name}: S0 = V0 (SHARE_UNIT = 1)");
+            match g.validate() {
+                Err(e) => assert!(e.contains(needle), "{name}: refused for another reason: {e}"),
+                Ok(()) => {
+                    accepted.push(*name);
+                    continue;
+                }
+            }
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+            assert!(r.is_err(), "{name}: builder accepted the instance");
+        }
+        assert!(accepted.is_empty(), "LA6: genesis accepts {accepted:?}");
+        // The floors themselves are accepted.
+        for (name, g) in [("d = D_FLOOR", with(&|g| set_d(g, D_FLOOR))), ("V0 = V0_MIN", with(&|g| g.set_vault(V0_MIN))), ("V0 = SHARES_MAX", with(&|g| g.set_vault(SHARES_MAX)))] {
+            assert_eq!(g.validate(), Ok(()), "{name}");
+        }
+    }
+
+    /// User decision U-M6-1 (spec M6, answer to the Stage 3a D90 stop): genesis is exempt
+    /// from the 90 % margin, but the builder refuses a genesis whose exact compute, transient
+    /// or storage mass exceeds 100 % of the mainnet limits (such a transaction could never be
+    /// mined). Shape: the fixture genesis at K = K_MAX (22 outputs) with its change output
+    /// shrunk by raising the fee: 0.2 KAS of change adds C / 0.2 KAS = 50,000 grams of storage
+    /// to the measured 460,532 (Stage 3a), so it is over 500,000; 1,000 sompi of change is far
+    /// over. Large change and no change (exact funding) are accepted.
+    #[test]
+    fn u_m6_1_genesis_refuses_mass_over_the_limit() {
+        let mut l = Ledger::new();
+        let op = l.fund(GENESIS_FUNDING, funding_spk(), 100);
+        let e = l.get(&op).unwrap().clone();
+        let good = GenesisCase::new(K_MAX, vec![(op, e)]);
+        assert_eq!(good.validate(), Ok(()));
+        good.build();
+        let outs: u64 = good.controller_value()
+            + good.reserve()
+            + (0..good.k()).map(|i| good.shard_value(i)).sum::<u64>()
+            + good.vault_value()
+            + 2 * good.reserve();
+        let with_change = |change: u64| {
+            let mut g = good.clone();
+            g.fee = GENESIS_FUNDING - outs - change;
+            g
+        };
+        for change in [KAS / 5, 1_000] {
+            let g = with_change(change);
+            assert_eq!(g.validate(), Ok(()), "change {change}: validate() alone accepts it");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+            let msg = match r {
+                Ok(_) => panic!("U-M6-1: builder accepted a genesis with {change} sompi of change (storage mass over 100 % of the limit)"),
+                Err(p) => p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default(),
+            };
+            assert!(msg.contains("U-M6-1") && msg.contains("storage"), "change {change}: refused for another reason: {msg}");
+        }
+        // 2 KAS of change (C / 2 KAS = 5,000 grams) is accepted.
+        with_change(2 * KAS).build();
+        // No change: funding exactly covers the outputs and the fee.
+        let mut l = Ledger::new();
+        let op = l.fund(outs + good.fee, funding_spk(), 100);
+        let e = l.get(&op).unwrap().clone();
+        let mut g = good.clone();
+        g.funding = vec![(op, e)];
+        g.change = false;
+        g.build();
     }
 }

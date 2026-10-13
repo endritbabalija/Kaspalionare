@@ -23,22 +23,20 @@ mod common;
 
 use common::m2::*;
 use common::m5::*;
+use common::measure::{Pending, dp21, settle_shapes, storage_case_rec, storage_sup_rec, with_pending};
 use harness::{Masses, masses};
 use lottery::buy::{Built, Final, KAS, Sources, Template, Templates, b_max};
 use lottery::claim::RefreshCase;
-use lottery::close::{CloseCase, FundingIn, MIN_CALLER_OUTPUT};
+use lottery::close::{CloseCase, MIN_CALLER_OUTPUT};
 use lottery::draw::{DrawCase, compile_drawer};
-use lottery::game::{A_MAX, F_MIN, F_MIN_FLOOR, M_DRAW, P_MIN, SettleMode};
-use lottery::smt::Tree;
-use lottery::state::{K_MAX, KIND_DEPOSIT, KIND_WITHDRAW, RequestState};
-use lottery::vault::{SettleCase, owner};
+use lottery::game::{A_MAX, F_MIN, F_MIN_FLOOR, M_DRAW};
+use lottery::state::K_MAX;
+use lottery::vault::owner;
 
 const COMPUTE_LIMIT: u64 = 500_000;
 const TRANSIENT_LIMIT: u64 = 1_000_000;
 const STORAGE_LIMIT: u64 = 500_000;
 const MARGIN_PCT: u64 = 90;
-/// KIP-9 storage-mass constant C (rusty-kaspa v2.1.0 `consensus/core/src/constants.rs:26`).
-const C: u64 = 1_000_000_000_000;
 const F_MAX: usize = 8;
 
 fn within(m: &Masses, pct: u64) -> [bool; 3] {
@@ -114,81 +112,6 @@ fn m5a_redeem_sizes() {
 
 // ---------------------------------------------------------------- M5-b
 
-/// ST_ALL with every lower tier funded (np = 7), as m3/m4_measure.rs.
-const ST_ALL_DRAW: [i64; 5] = [400, 300, 300, 200, 200];
-
-/// The DP21 worst shape (m4_measure.rs `dp21`): round 2, K shards, marker m, every leaf at
-/// the winning rank non-empty with every bonus held, sales 1,000,000 KAS, `a` absorbed
-/// pools, `nf` funding inputs.
-fn dp21(k: usize, m: i64, a: usize, nf: usize, np: usize) -> DrawCase {
-    let mut c = DrawCase::at_round(k, 2);
-    if np == 7 {
-        c.marker.st = ST_ALL_DRAW;
-    }
-    c.marker.m = m;
-    let rank = c.seed().rank;
-    c.trees = (0..k)
-        .map(|_| {
-            let mut t = Tree::new(m as usize);
-            t.set(rank, vec![1; m as usize]);
-            t
-        })
-        .collect();
-    c.sync_roots();
-    c.set_sales(1_000_000 * KAS as i64, 50_000 * KAS as i64);
-    if a > 0 {
-        c.absorb(a);
-    }
-    let daa = c.funding[0].daa;
-    c.funding = vec![FundingIn { value: 100 * KAS, daa }; nf];
-    let x = c.expected();
-    assert_eq!((x.h_j, x.n2, x.np(), x.a), (k as i64, m - 1, np, a));
-    c
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Pending {
-    Nothing,
-    /// 30 KAS deposited (converted) and 3,000,000 shares withdrawn within the slack (wc = W:
-    /// two mulfrac calls).
-    Both,
-    /// 30 KAS deposited (converted) and 95 % of the shares withdrawn: the cap binds (wc < W:
-    /// all three mulfrac calls).
-    Cap,
-    /// The refund branch: total_shares = 1,000,000 (price about 10^9 sompi per share), 30
-    /// KAS deposited (mint about 3 < ceil(D / MIN_DEPOSIT) = 30: C1 computes the mint and
-    /// refunds) and 95 % of the shares withdrawn (cap binding: three mulfrac calls).
-    RefundCap,
-}
-
-fn with_pending(mut c: DrawCase, p: Pending) -> DrawCase {
-    match p {
-        Pending::Nothing => {}
-        Pending::Both => {
-            c.vault.pend_dep = 30 * KAS as i64;
-            c.vault.pend_wsh = 3_000_000;
-        }
-        Pending::Cap => {
-            c.vault.pend_dep = 30 * KAS as i64;
-            c.vault.pend_wsh = c.vault.total_shares / 100 * 95;
-        }
-        Pending::RefundCap => {
-            c.vault.total_shares = 1_000_000;
-            c.vault.pend_dep = 30 * KAS as i64;
-            c.vault.pend_wsh = 950_000;
-        }
-    }
-    let x = c.expected();
-    let cv = &x.conv;
-    match p {
-        Pending::Nothing => assert!(!x.rec),
-        Pending::Both => assert!(x.rec && cv.ok && cv.wc == cv.w, "{cv:?}"),
-        Pending::Cap => assert!(x.rec && cv.ok && cv.wc < cv.w, "{cv:?}"),
-        Pending::RefundCap => assert!(x.rec && cv.refund && cv.mint > 0 && cv.wc < cv.w, "{cv:?}"),
-    }
-    c
-}
-
 #[test]
 fn m5b_dp21_with_conversion_and_record() {
     let t = tpl();
@@ -232,61 +155,6 @@ fn m5b_dp21_with_conversion_and_record() {
 }
 
 // ---------------------------------------------------------------- M5-c
-
-/// m3_measure.rs `storage_case_at` (every covenant output at R or 1 sompi above, T_F =
-/// f_min, caller output `caller`) with W = 1 share pending at the smallest V': wc = 1, out_c =
-/// floor((V' + 1) x 1 / (S + VS)) = 0, so the record is written at exactly R (vault' at R + V'): the draw with one more R output. Storage depends only on values and scripts.
-fn storage_case_rec(a: usize, caller: u64, f_min: i64) -> DrawCase {
-    let mut c = DrawCase::at_round(4, 2);
-    c.drawer.f_min = f_min;
-    c.marker.st = ST_ALL_DRAW;
-    c.marker.jackpot = 1;
-    c.marker.j_boost = 0;
-    c.marker.g2 = 1;
-    c.hold_jackpot(0, 1);
-    let ob = c.other_bonus(0);
-    c.hold(1, ob, 1);
-    let mut s = 1_000_000i64;
-    loop {
-        c.set_sales(s, 0);
-        if c.expected().pools.lp.iter().all(|&p| p) {
-            break;
-        }
-        s += s / 4;
-    }
-    if a > 0 {
-        c.absorb(a);
-        for p in &mut c.absorbed {
-            p.remaining = 0;
-        }
-    }
-    c.pot = 0;
-    let x = c.expected();
-    c.controller.acc = c.drawer.f_min - x.amounts.f;
-    assert!(c.controller.acc >= 0);
-    c.vault.total_assets = (c.vault.total_assets - c.expected().v_prime).max(0);
-    c.vault.liability = 0;
-    c.vault.pend_wsh = 1;
-    let x = c.expected();
-    let need = caller as i128 + (x.np() as u64 * c.reserve()) as i128 + c.reserve() as i128 - x.amounts.c_draw as i128 + c.fee as i128;
-    c.funding[0].value = need as u64;
-    let x = c.expected();
-    assert!(x.rec && x.conv.out_c == 0 && x.conv.wc == 1, "{:?}", x.conv);
-    assert_eq!(x.values[x.record_output().unwrap()], c.reserve(), "record at R");
-    // V' is as small as the state allows (m3_measure.rs: V = max(V - V', 0)), so vault' is
-    // R + V' with V' a few hundredths of a KAS at most.
-    assert!(x.values[1] >= c.reserve() && x.v_prime < KAS as i64, "vault' near R: V' = {}", x.v_prime);
-    assert_eq!(x.values[x.caller_output()], caller);
-    c
-}
-
-/// m3_measure.rs `storage_sup` with one more covenant output at >= R (the record: P2SH with
-/// a covenant binding, plurality 2, so 4 C / R): 3 singleton outputs, up to 7 pools and the
-/// record, each >= R; the fee >= f_min, the marker refund and a pool refunds = R, the
-/// caller >= caller_min. Input relief dropped.
-fn storage_sup_rec(a: usize, r: u64, f_min: u64, caller_min: u64) -> u64 {
-    11 * (4 * C / r) + (1 + a as u64) * (C / r) + C / f_min + C / caller_min
-}
 
 #[test]
 fn m5c_draw_storage_with_the_record() {
@@ -342,31 +210,6 @@ fn m5d_close_k16_with_the_m5_marker() {
 }
 
 // ---------------------------------------------------------------- M5-e
-
-fn st(rc: lottery::state::RecordState, kind: u8, amount: i64, mode: SettleMode, drained: bool) -> SettleCase {
-    let c = SettleCase::new(rc, RequestState::new(2, kind, amount, &owner().payout()));
-    let x = c.expected();
-    assert!(x.reference.is_some(), "settle base rejected by game::settle");
-    assert_eq!((x.mode, x.drained), (mode, drained));
-    c
-}
-
-/// Every settle mode, drained and not.
-fn settle_shapes() -> Vec<(&'static str, SettleCase)> {
-    let k = KAS as i64;
-    vec![
-        ("deposit-convert", st_dep()),
-        ("deposit-convert, drained", st_dep_last()),
-        ("deposit-refund", st_refund()),
-        ("deposit-refund, drained", st(record(1, 10 * k, 0, 0, 0, 0), KIND_DEPOSIT, 10 * k, SettleMode::DepositRefund, true)),
-        ("withdrawal FINAL", st_final()),
-        ("withdrawal FINAL, drained", st(record(0, 0, 0, 1_000_000, 1_000_000, 15 * k), KIND_WITHDRAW, 1_000_000, SettleMode::Final, true)),
-        ("withdrawal PAY", st_pay()),
-        ("withdrawal PAY, drained", st(record(0, 0, 0, 1_000_000, 500_000, 15 * k), KIND_WITHDRAW, 1_000_000, SettleMode::Pay, true)),
-        ("withdrawal ACCRUE", st_accrue()),
-        ("withdrawal ACCRUE, drained", st(record(0, 0, 0, 1_000_000, 500_000, P_MIN - 1), KIND_WITHDRAW, 1_000_000, SettleMode::Accrue, true)),
-    ]
-}
 
 #[test]
 fn m5e_request_settle_refresh_masses() {

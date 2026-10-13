@@ -451,6 +451,285 @@ Leg units are the position's `vault_leg` (withdrawals) and the record's `request
 
 **M5-f: testnet-10** (`docs/tn10-mass-check.md` M5): `probe vault-m5` with the real scripts was accepted end to end; its masses equal M5-e (request_deposit 23,143 / 77,372; request_withdraw partial 25,233 / 82,652; settle deposit-convert 22,147 / 73,388; settle FINAL drained 21,857 / 73,108) and the converting `draw()` (K = 16, a = 0, np = 4, record) measured 142,504 / 449,056 / 148,708.
 
+## M6: K shards and limits (final constants; real scripts)
+
+Source: `crates/lottery/tests/m6_measure.rs` (`cargo test -p lottery --release --test m6_measure -- --nocapture --test-threads=1`), all eleven templates at the M6 constants, 2026-10-13. Constants: K = 16 *(provisional, D83)*, B_MAX = 4, m_max = M_DRAW = M_CLAIM = 50 *(provisional, D83)*, R = 1.69 KAS *(provisional, D83)*, d = D_FLOOR = 0.13 KAS, M_REF = 0.1 KAS, P_MIN = 0.05 KAS, F_MIN = 1 KAS, F_MIN_FLOOR = 0.1 KAS, MIN_DEPOSIT = W_MIN_VALUE = 10 KAS, SHARE_UNIT = 1, V0_MIN = 1 KAS. Masses from the v2.1.0 calculator with mainnet parameters (`harness::masses`). Percentages are of compute 500,000 / transient 1,000,000 / storage 500,000 (`refs/rusty-kaspa-v2.1.0/consensus/core/src/config/params.rs:626`). Relay floor fee = 100 sompi per gram of max(compute, ⌈transient / 2⌉) (`lottery::buy::relay_floor_fee`; `mining/src/mempool/check_transaction_standard.rs:71-76, 92-100`); priority fee = 100 sompi per gram of the priority mass (`harness::priority_fee`). Every row is measured unless marked "estimate".
+
+**Stop rule (D90) and genesis (user decision U-M6-1).** Every non-genesis shape is asserted ≤ 90 % of each mass, and the committed (K, B_MAX, m_max) is asserted within 90 % for every transition; all pass. Genesis is **exempt from the 90 % margin** (its masses depend only on deployer-chosen output values; a genesis over a limit only means "cannot deploy"). It is asserted ≤ 100 %, and the genesis builder now refuses a genesis whose exact compute, transient or storage mass exceeds 100 % of the mainnet limits (`lottery::genesis::genesis_mass_check`, called by `GenesisCase::try_build_with` / `build_with`; per-transaction limits in the mempool at `mining/src/mempool/check_transaction_limits.rs:19-26, 37-41`, per block at `consensus/src/pipeline/body_processor/body_validation_in_isolation.rs:88-96`).
+
+**M6-a / M6-i: redeem sizes.**
+
+| Object | Prefix B | Suffix B | State B | Redeem B |
+|---|---|---|---|---|
+| shard (`buy`, `close_leg`) | 1 | 11,244 | 116 | 11,361 |
+| ticket (`claim`, two returns, `refresh`) | 1 | 25,359 | 92 | 25,452 |
+| controller (`close`, `draw_leg`) | 1 | 27,266 | 427 | 27,694 |
+| params (`set_params`, `close_leg`) | 1 | 2,808 | 109 | 2,918 |
+| marker (`draw_leg`, `refresh`) | 1 | 1,388 | 715 | 2,104 |
+| drawer (`draw_test_seed`, TEST-ONLY seed) | 1 | 65,096 | 137 | 65,234 |
+| **vault** (`draw_leg`, `request_deposit`, `request_withdraw` with W4b; M5: 3,380) | 1 | 3,266 | 155 | **3,422** |
+| pool (`absorb_leg`, `ticket_leg`, `refresh`) | 1 | 1,831 | 649 | 2,481 |
+| record (`request_leg`, `refresh`) | 1 | 1,026 | 127 | 1,154 |
+| position (`vault_leg`, `refresh`) | 1 | 1,137 | 56 | 1,194 |
+| request (`settle`, `refresh`) | 1 | 15,420 | 58 | 15,479 |
+
+Only the vault changed size (+42 B, check W4b). MIN_DEPOSIT 10⁸ → 10⁹ is a 4-byte script number either way, so the drawer and request sizes are unchanged.
+
+**M6-a / M6-h / M6-i: every transition** (one funding input unless stated; "leg" = the units of the named delegate input):
+
+| Transition | Input 0 units / sigscript B | Leg units | Outputs | Compute | Transient | Storage | % c / t / s | Relay floor (KAS) | Priority fee (KAS) |
+|---|---|---|---|---|---|---|---|---|---|
+| genesis K = 16, fixture (V0 = 10,000,000 KAS, acc 2 KAS, large change) — **exempt (U-M6-1)** | 100,000 / 66 | — | 22 | 11,223 | 8,372 | 460,532 | 2.2 / 0.8 / **92.1** | 0.01122 | 0.46053 |
+| genesis worst under `validate()` + U-M6-1, no change — **exempt** | 100,000 / 66 | — | 21 | 10,811 | 8,164 | 487,956 | 2.2 / 0.8 / 97.6 | 0.01081 | 0.48796 |
+| genesis worst, change 1,000,000 KAS — **exempt** | 100,000 / 66 | — | 22 | 11,223 | 8,372 | 488,229 | 2.2 / 0.8 / **97.6** | 0.01122 | 0.48823 |
+| genesis worst, smallest change the builder accepts (83,063,378 sompi = 0.8306 KAS; 83,063,377 refused) — **exempt** | 100,000 / 66 | — | 22 | 11,223 | 8,372 | 500,000 | 2.2 / 0.8 / 100.0 | 0.01122 | 0.50000 |
+| `buy()` b = 1, no referral, large change | 354,091 / 37,378 | — | 3 | 43,472 | 151,488 | 321,777 | 8.7 / 15.1 / 64.4 | 0.07574 | 0.32178 |
+| `buy()` b = 1, no referral, change 1 KAS | 354,091 / 37,378 | — | 3 | 43,472 | 151,488 | 311,729 | 8.7 / 15.1 / 62.3 | 0.07574 | 0.31173 |
+| `buy()` b = 1, referral 0.1 KAS, large change | 354,375 / 37,378 | — | 4 | 43,884 | 151,696 | **422,352** | 8.8 / 15.2 / **84.5** | 0.07585 | 0.42235 |
+| `buy()` b = 1, referral 0.1 KAS, change 1 KAS | 354,375 / 37,378 | — | 4 | 43,884 | 151,696 | 412,304 | 8.8 / 15.2 / 82.5 | 0.07585 | 0.41230 |
+| `buy()` b = 4, no referral, large change | 439,229 / 39,185 | — | 3 | 46,079 | 158,716 | 83,172 | 9.2 / 15.9 / 16.6 | 0.07936 | 0.08317 |
+| `buy()` b = 4, no referral, change 1 KAS | 439,229 / 39,185 | — | 3 | 46,079 | 158,716 | 82,279 | 9.2 / 15.9 / 16.5 | 0.07936 | 0.08228 |
+| `buy()` b = 4, referral 0.4 KAS, large change | 439,513 / 39,185 | — | 4 | 46,491 | 158,924 | 108,704 | 9.3 / 15.9 / 21.7 | 0.07946 | 0.10870 |
+| `buy()` b = 4, referral 0.4 KAS, change 1 KAS | 439,513 / 39,185 | — | 4 | 46,491 | 158,924 | 107,811 | 9.3 / 15.9 / 21.6 | 0.07946 | 0.10781 |
+| `set_params()`, change | 120,376 / 3,067 | — | 2 | 6,404 | 13,896 | 16,980 | 1.3 / 1.4 / 3.4 | 0.00695 | 0.01698 |
+| `set_params()`, no change | 120,310 / 3,067 | — | 1 | 5,992 | 13,688 | 0 | 1.2 / 1.4 / 0.0 | 0.00684 | 0.00684 |
+| `close()` K = 16, sales in every shard (M2-a shape) | 3,379,799 / 29,140 | — | 20 | 294,619 | **867,716** | 402,301 | 58.9 / **86.8** / 80.5 | 0.43386 | 0.43386 |
+| `close()` K = 16, storage worst case (M2-c grid: zero sales, O = J_boost = A = 0, caller 1,000,000 KAS) | 3,378,742 / 29,140 | — | 20 | 294,619 | 867,716 | **449,692** | 58.9 / 86.8 / **89.9** | 0.43386 | 0.44969 |
+| `draw()` worst (DP21: m = 50, a = 7, np = 7, 8 funding inputs, cap binding, record) | 1,810,706 / 79,050 | 463,913 (vault) | 21 | 208,661 | 531,564 | 71,009 | 41.7 / 53.2 / 14.2 | 0.26578 | 0.26578 |
+| `draw()` typical (m = 10, a = 0, np = 3, no record) | 1,507,504 / 77,763 | 463,913 (vault) | 9 | 141,229 | 448,516 | 93,028 | 28.2 / 44.9 / 18.6 | 0.22426 | 0.22426 |
+| `claim()` PAY, K = 16, m = 50, h = K | 700,682 / 36,287 | 183,651 (pool) | 4 | 50,640 | 157,520 | 247,222 | 10.1 / 15.8 / 49.4 | 0.07876 | 0.24722 |
+| `claim()` ACCRUE, K = 16, m = 50, h = K | 700,178 / 36,287 | 183,651 | 3 | 50,228 | 157,312 | 150,420 | 10.0 / 15.7 / 30.1 | 0.07866 | 0.15042 |
+| `claim()` FINAL, K = 16, m = 50, h = K | 597,960 / 36,287 | 183,651 | 3 | 49,083 | 157,172 | 21,153 | 9.8 / 15.7 / 4.2 | 0.07859 | 0.07859 |
+| `claim()` PAY, K = 16, m = 50, 8 funding inputs | 701,172 / 36,287 | 183,651 | 4 | 58,480 | 160,880 | 149,925 | 11.7 / 16.1 / 30.0 | 0.08044 | 0.14993 |
+| `claim()` PAY at P = P_MIN, storage worst case (b = 2, pool' at R, change 1,000,000 KAS) | 288,417 / 27,854 | 183,627 | 4 | 38,007 | 123,788 | 377,514 | 7.6 / 12.4 / 75.5 | 0.06189 | 0.37751 |
+| `return_deposit_after` (b = 2 ticket) | 51,819 / 25,460 | — | 2 | 28,052 | 103,328 | 30,702 | 5.6 / 10.3 / 6.1 | 0.05166 | 0.05166 |
+| `return_deposit_with_pool` (b = 2 ticket, K = 1 pool) | 96,636 / 25,464 | 183,576 | 3 | 33,260 | 113,880 | 34,301 | 6.7 / 11.4 / 6.9 | 0.05694 | 0.05694 |
+| `refresh` ticket | 153,991 / 25,460 | — | 2 | 29,097 | 103,468 | 146,087 | 5.8 / 10.3 / 29.2 | 0.05173 | 0.14609 |
+| `refresh` pool (K = 4) | 22,647 / 2,489 | — | 2 | 4,826 | 11,584 | 7,869 | 1.0 / 1.2 / 1.6 | 0.00579 | 0.00787 |
+| `refresh` marker (K = 4 and K = 16, identical) | 20,046 / 2,112 | — | 2 | 4,449 | 10,076 | 310 | 0.9 / 1.0 / 0.1 | 0.00504 | 0.00504 |
+| `refresh` position | 8,044 / 1,202 | — | 2 | 3,339 | 6,436 | 16,980 | 0.7 / 0.6 / 3.4 | 0.00334 | 0.01698 |
+| `refresh` request | 93,809 / 15,487 | — | 2 | 18,524 | 63,576 | 16,980 | 3.7 / 6.4 / 3.4 | 0.03179 | 0.03179 |
+| `refresh` record | 8,651 / 1,162 | — | 2 | 3,299 | 6,276 | 115 | 0.7 / 0.6 / 0.0 | 0.00330 | 0.00330 |
+| `request_deposit` (D = 10 KAS = MIN_DEPOSIT) | 178,110 / 18,891 | — | 3 | 23,185 | 77,540 | 24,886 | 4.6 / 7.8 / 5.0 | 0.03877 | 0.03877 |
+| `request_withdraw` whole (Schnorr owner) | 187,408 / 18,866 | 26,686 (position) | 3 | 24,720 | 82,480 | 24,678 | 4.9 / 8.2 / 4.9 | 0.04124 | 0.04124 |
+| `request_withdraw` partial (Schnorr owner) | 199,736 / 18,866 | 26,686 | 4 | 25,277 | 82,828 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04141 | 0.04855 |
+| `request_withdraw` partial (ECDSA owner) | 199,673 / 18,866 | 26,686 | 4 | 25,277 | 82,828 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04141 | 0.04855 |
+| `request_withdraw` partial (P2SH owner) | 199,602 / 18,866 | 26,686 | 4 | 25,312 | 82,968 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04148 | 0.04855 |
+| **M6-i** `request_withdraw` partial at the W4b boundary, w = wmin = 1,000,000,000 (Schnorr owner) | 199,723 / 18,865 | 26,686 | 4 | 25,276 | 82,824 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04141 | 0.04855 |
+| `settle` deposit-convert | 67,258 / 16,633 | 111,202 (record) | 3 | 22,147 | 73,388 | 20,180 | 4.4 / 7.3 / 4.0 | 0.03669 | 0.03669 |
+| `settle` deposit-convert, drained | 52,984 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 11,915 | 4.4 / 7.3 / 2.4 | 0.03662 | 0.03662 |
+| `settle` deposit-refund | 56,138 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 0 | 4.4 / 7.3 / 0.0 | 0.03662 | 0.03662 |
+| `settle` deposit-refund, drained | 42,418 / 16,633 | 111,202 | 3 | 21,857 | 73,108 | 0 | 4.4 / 7.3 / 0.0 | 0.03655 | 0.03655 |
+| `settle` withdrawal FINAL | 59,817 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 0 | 4.4 / 7.3 / 0.0 | 0.03662 | 0.03662 |
+| `settle` withdrawal FINAL, drained | 42,443 / 16,633 | 111,202 | 3 | 21,857 | 73,108 | 0 | 4.4 / 7.3 / 0.0 | 0.03655 | 0.03655 |
+| `settle` withdrawal PAY | 121,822 / 16,633 | 111,202 | 4 | 23,159 | 73,596 | 21,294 | 4.6 / 7.4 / 4.3 | 0.03680 | 0.03680 |
+| `settle` withdrawal PAY, drained | 104,957 / 16,633 | 111,202 | 4 | 22,914 | 73,456 | 22,456 | 4.6 / 7.3 / 4.5 | 0.03673 | 0.03673 |
+| `settle` withdrawal ACCRUE | 121,314 / 16,633 | 111,202 | 3 | 22,747 | 73,388 | 27,869 | 4.5 / 7.3 / 5.6 | 0.03669 | 0.03669 |
+| `settle` withdrawal ACCRUE, drained | 104,470 / 16,633 | 111,202 | 3 | 22,502 | 73,248 | 11,300 | 4.5 / 7.3 / 2.3 | 0.03662 | 0.03662 |
+
+**Tightest margins (genesis excluded, U-M6-1):** compute 58.9 % and transient **86.8 %** (`close()` K = 16, M2-a shape; 32,284 grams of transient headroom, unchanged since M4-f), storage **89.9 %** (`close()` K = 16 storage worst case), then 84.5 % (`buy()` b = 1 with a 0.1 KAS referral at d = 0.13). Against M5: the vault's +42 B adds 42 compute and 168 transient grams to every request (+4 grams per byte) and +143 / +172 to the worst `draw()`; request leader units rose by 252 (`request_deposit`, the longer vault redeem) to 347 (partial `request_withdraw`, the redeem plus W4b's two divisions), and the position leg by 294; storage of every `buy()`, `claim()`, return and ticket refresh fell with d = 0.11 → 0.13 KAS (for example PAY at P_MIN 405,486 → 377,514). Every other row equals M4/M5.
+
+**Genesis (U-M6-1).** Genesis has K + 4 covenant outputs at R (controller at acc + pot + R, params, K shards, drawer, position) plus the vault at V0 + R and the change. The worst instance `validate()` allows (K = 16, acc = pot = 0, J = 0 so that V0 = V0_MIN passes the cap check, V0 = V0_MIN, R = R_MIN, fee = its relay floor 1,122,300 sompi) measures **488,229 (97.6 %)** with large change and 487,956 with no change. A change output adds C / change: the builder accepts at least 83,063,378 sompi (0.8306 KAS) of change at this instance, which gives exactly 500,000; one sompi less is refused with a "U-M6-1" error. The fixture genesis (V0 = 10,000,000 KAS, acc 2 KAS) is 460,532 (92.1 %). M3's genesis (no position output) was 437,512 on testnet-10.
+
+**Minimums (M6).**
+
+| Quantity | Value | Condition |
+|---|---|---|
+| Ticket deposit d | **0.13 KAS (13,000,000 sompi) = D_FLOOR**, genesis refuses d < D_FLOOR (D80, D81) | b = 1 `buy()` with a referral output at M_REF ≤ 90 % of storage: 422,352 (84.5 %) at d = 0.13; the measured floor is 0.1193 KAS (M6-e) |
+| M_REF, smallest referral output | 0.1 KAS (shard) | bounds the referral output's storage term at C / M_REF = 100,000 grams (plain output, p = 1; M1); the M6-e shape puts the referral at exactly M_REF |
+| F_MIN_FLOOR / default F_MIN | 0.1 KAS / 1 KAS | `draw()` storage supremum with the record 83.5 % / 65.5 % (M6-g) |
+| P_MIN, smallest PAY payout | **0.05 KAS (unchanged, D82)** | measured floor 3,669,900 sompi (0.036699 KAS) at the worst change, rounded up to 0.04 KAS; P_MIN = 0.05 gives 377,514 (75.5 %) (M6-f) |
+| MIN_DEPOSIT / W_MIN_VALUE | 10 KAS / 10 KAS (D85, D86) | vault D5, drawer C1, request settle range; vault W4b |
+| V0_MIN, SHARE_UNIT | 1 KAS, 1 sompi (D84) | genesis only |
+| R | 1.69 KAS *(provisional, D83)* | M6-g |
+
+**M6-b: K frontier for `close()`** *(K provisional, D83).* In-memory K_MAX variants (controller K_MAX line and every `byte[512]` roots array → `byte[32·K_MAX]` in controller, marker, drawer, pool and ticket; D91), `close()` at K = K_MAX with the M2-a shape (1,000 KAS sales and 50 KAS referral per shard, distinct roots). The K = 16 variant is hash-identical to the committed templates (asserted). The run stops at the first K whose transient exceeds 100 %.
+
+| K_MAX = K | Controller redeem B | Controller units / sigscript B | Compute | Transient | Storage at R = 1.69 | % c / t / s | R(K) = 4C(K + 3)/(0.9 L), 0.01 KAS up | Storage at R(K) |
+|---|---|---|---|---|---|---|---|---|
+| **16** | 27,694 | 3,379,799 / 29,140 | 294,619 | 867,716 | 402,301 | 58.9 / **86.8** / 80.5 | 1.69 | 402,301 (80.5 %) |
+| 17 | 29,035 | 3,583,953 / 30,481 | 313,744 | 919,136 | 425,961 | 62.7 / **91.9** / 85.2 | 1.78 | 404,415 (80.9 %) |
+| 18 | 30,371 | 3,788,141 / 31,817 | 333,064 | 970,536 | 449,622 | 66.6 / 97.1 / 89.9 | 1.87 | 406,340 (81.3 %) |
+| 19 | 31,707 | 3,992,396 / 33,153 | 352,684 | 1,021,936 | 473,282 | 70.5 / **102.2** / 94.7 | 1.96 | 408,082 (81.6 %) |
+
+| Limit | Largest K within 90 % | Largest K within 100 % |
+|---|---|---|
+| transient (binding) | **16** | **18** |
+| compute | ≥ 19 (largest measured) | ≥ 19 |
+| storage, this shape at R = 1.69 | 18 | 19 |
+| storage, worst case | — (R is set from K: (K + 3)·4C/R(K) ≤ 90 % by construction; R(K) above) | — |
+
+Each shard adds about 51,400 transient grams (the shard redeem pushed once, plus about 1,336 B of controller and 32 B of marker roots per K_MAX). Transient sets the ceiling: **K = 16 is the largest K within 90 %, K = 18 the largest within 100 %**.
+
+`draw()` and `claim()` at K_MAX variants — **estimates** (transient only, 4 grams per byte, `refs/rusty-kaspa-v2.1.0/consensus/core/src/constants.rs:31`; extra bytes = Δdrawer + Δcontroller + Δmarker code + 32ΔK + A_MAX·(Δpool code + 32ΔK) + Δpool code + ΔK·(576 + 2m) for `draw()`; Δticket + Δpool code + 32ΔK + ΔK·(576 + 2m) for `claim()`; compute not estimated):
+
+| K_MAX | Drawer code B (Δ) | Ticket code B (Δ) | `draw()` extra B | Worst `draw()` transient (estimate) | % | `claim()` PAY F_MAX extra B | `claim()` transient (estimate) | % |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 65,097 (+0) | 25,360 (+0) | 0 | 531,564 (measured) | 53.2 | 0 | 160,880 (measured) | 16.1 |
+| 17 | 66,335 (+1,238) | 26,581 (+1,221) | 3,511 | 545,608 (estimate) | 54.6 | 1,929 | 168,596 (estimate) | 16.9 |
+| 18 | 67,571 (+2,474) | 27,799 (+2,439) | 7,015 | 559,624 (estimate) | 56.0 | 3,855 | 176,300 (estimate) | 17.6 |
+| 19 | 68,807 (+3,710) | 29,017 (+3,657) | 10,519 | 573,640 (estimate) | 57.4 | 5,781 | 184,004 (estimate) | 18.4 |
+
+`draw()` and `claim()` are far from binding K; `close()` transient is.
+
+**M6-c: B_MAX frontier at K = 16** (shard, ticket and pool resized, `Templates::get(b)`):
+
+| B_MAX | Shard redeem B | Ticket redeem B | `close()` K = 16: compute | transient | storage | % c / t / s | `buy()` b = B_MAX, referral, large change: compute | transient | storage | % c / t / s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 3 | 9,400 | 25,446 | 257,943 | 742,212 | 402,301 | 51.6 / 74.2 / 80.5 | 43,527 | 148,668 | 144,227 | 8.7 / 14.9 / 28.8 |
+| **4** | 11,361 | 25,452 | 294,619 | 867,716 | 402,301 | 58.9 / **86.8** / 80.5 | 46,491 | 158,924 | 108,704 | 9.3 / 15.9 / 21.7 |
+| 5 | 13,322 | 25,458 | 332,995 | 993,220 | 402,301 | 66.6 / **99.3** / 80.5 | 49,554 | 169,176 | 87,221 | 9.9 / 16.9 / 17.4 |
+
+**B_MAX = 4 is final** (D83). B_MAX = 5 puts K = 16 `close()` at 99.3 % of transient (M2: 98.2 %; the controller and marker have grown since).
+
+**M6-d: m frontier at K = 16** *(m_max provisional, D83).* `buy()` b = 4 with referral; worst `draw()` (a = 7, np = 7, 8 funding inputs, cap binding, record); worst `claim()` (h = K).
+
+| Transition | m | Compute | Transient | Storage | % c / t / s |
+|---|---|---|---|---|---|
+| `buy()` b = 4 | 10 | 46,491 | 158,924 | 108,704 | 9.3 / 15.9 / 21.7 |
+| `buy()` b = 4 | 25 | 46,711 | 159,404 | 108,704 | 9.3 / 15.9 / 21.7 |
+| `buy()` b = 4 | **50** | 46,912 | 160,208 | 108,704 | 9.4 / 16.0 / 21.7 |
+| `draw()`, drawer M_DRAW = 50 (committed) | 10 | 206,881 | 526,444 | 71,009 | 41.4 / 52.6 / 14.2 |
+| `draw()`, drawer M_DRAW = 50 (committed) | 25 | 207,561 | 528,364 | 71,009 | 41.5 / 52.8 / 14.2 |
+| `draw()`, drawer M_DRAW = 50 (committed) | **50** | 208,661 | 531,564 | 71,009 | 41.7 / 53.2 / 14.2 |
+| `draw()`, drawer M_DRAW = 25 (variant) | 10 | 202,931 | 518,244 | 71,009 | 40.6 / 51.8 / 14.2 |
+| `draw()`, drawer M_DRAW = 25 (variant) | 25 | 203,511 | 520,164 | 71,009 | 40.7 / 52.0 / 14.2 |
+| `claim()` PAY, 8 funding inputs | 10 | 56,800 | 155,760 | 149,925 | 11.4 / 15.6 / 30.0 |
+| `claim()` PAY, 8 funding inputs | 25 | 57,480 | 157,680 | 149,925 | 11.5 / 15.8 / 30.0 |
+| `claim()` PAY, 8 funding inputs | **50** | 58,480 | 160,880 | 149,925 | 11.7 / 16.1 / 30.0 |
+| `claim()` ACCRUE | 10 | 48,548 | 152,192 | 150,420 | 9.7 / 15.2 / 30.1 |
+| `claim()` ACCRUE | 25 | 49,128 | 154,112 | 150,420 | 9.8 / 15.4 / 30.1 |
+| `claim()` ACCRUE | **50** | 50,228 | 157,312 | 150,420 | 10.0 / 15.7 / 30.1 |
+| `claim()` FINAL | 10 | 47,503 | 152,052 | 21,153 | 9.5 / 15.2 / 4.2 |
+| `claim()` FINAL | 25 | 48,083 | 153,972 | 21,153 | 9.6 / 15.4 / 4.2 |
+| `claim()` FINAL | **50** | 49,083 | 157,172 | 21,153 | 9.8 / 15.7 / 4.2 |
+
+m = 50 is within 90 % for every transition (asserted). Drawer code: 63,047 B at M_DRAW = 25, 65,097 B at M_DRAW = 50.
+
+**M6-e: d frontier** (fresh shard at R = 1.69 KAS, worst of large and 1 KAS change; with a referral, the price is set so that the referral output is exactly M_REF = 0.1 KAS for every b (price ⌈1 KAS / b⌉, s_R = 10 %), the largest referral storage term; M-c/M2 used 0.1·b KAS at price 1, so the b ≥ 2 referral columns are stricter than M2's):
+
+| b | No referral: d at 90 % | d at 100 % | Referral at M_REF: d at 90 % | d at 100 % |
+|---|---|---|---|---|
+| 1 | 9,176,080 (0.0918 KAS) | 8,231,876 (0.0823) | **11,928,157 (0.1193)** | 10,380,417 (0.1038) |
+| 2 | 4,546,034 (0.0455) | 4,082,100 (0.0408) | 5,964,079 (0.0596) | 5,190,209 (0.0519) |
+| 3 | 3,014,852 (0.0301) | 2,708,624 (0.0271) | 3,976,053 (0.0398) | 3,460,139 (0.0346) |
+| 4 | 2,253,506 (0.0225) | 2,025,305 (0.0203) | 2,982,040 (0.0298) | 2,595,105 (0.0260) |
+
+The D80 shape, `buy()` b = 1 with a referral at M_REF (scripts run):
+
+| d (KAS) | Change | Compute | Transient | Storage | % of limit |
+|---|---|---|---|---|---|
+| 0.11 | large | 43,884 | 151,696 | 478,296 | 95.7 |
+| 0.11 | 1 KAS | 43,884 | 151,696 | 468,152 | 93.6 |
+| 0.12 | large | 43,884 | 151,696 | 447,993 | 89.6 |
+| 0.12 | 1 KAS | 43,884 | 151,696 | 437,897 | 87.6 |
+| **0.13** | large | 43,884 | 151,696 | **422,352** | **84.5** |
+| 0.13 | 1 KAS | 43,884 | 151,696 | 412,304 | 82.5 |
+
+D80's predictions (447,993 at d = 0.12, 422,352 at d = 0.13) are measured exactly. **d = 0.13 KAS is final; U2 is closed.**
+
+**M6-f: P_MIN at d = 0.13.** Worst PAY: b = 2, d = D_FLOOR (ticket' 0.26 KAS), pool' at R, one funding input. Storage by payout P:
+
+| Change | P = 0.03 KAS | 0.0367 | 0.04 | 0.05 (P_MIN) | 0.1 | Smallest P ≤ 90 % (sompi) | Rounded up to 0.01 KAS |
+|---|---|---|---|---|---|---|---|
+| 1 KAS | 439,682 | 379,003 | 356,609 | 306,869 | 208,149 | 2,909,709 (0.029097 KAS) | 0.03 KAS |
+| 1,000 KAS | 510,612 | 449,758 | 427,279 | 377,279 | 277,279 | 3,666,738 (0.036667 KAS) | 0.04 KAS |
+| 1,000,000 KAS | 510,847 | 449,993 | 427,514 | **377,514** | 277,514 | **3,669,900 (0.036699 KAS)** | 0.04 KAS |
+
+The floor is 0.0367 KAS as D82 predicted (rounded up: 0.04 KAS). **P_MIN = 0.05 KAS is kept** (stricter; lowering it would change the ticket template): 377,514 (75.5 %).
+
+**M6-g: R re-check** *(R provisional, D83)* at R = 1.69 KAS, K = 16, d = 0.13 KAS:
+
+| Transition | Measured worst | % | Supremum | % |
+|---|---|---|---|---|
+| `close()` (M2-c grid; worst: zero sales, O = J_boost = A = 0, caller 1,000,000 KAS) | 449,692 | 89.9 | 449,692 = (K + 3)·4C/R | **89.9** |
+| `draw()` with the record (M5-c method), f_min = F_MIN = 1 KAS | 317,481 | 63.5 | 327,684 = 11·4C/R + (1 + a)·C/R + C/f_min + C/caller | 65.5 |
+| `draw()` with the record, f_min = F_MIN_FLOOR = 0.1 KAS | 407,481 | 81.5 | 417,684 (same formula) | 83.5 |
+| genesis — **exempt (U-M6-1)** | 488,229 (worst `validate()` instance, large change) | 97.6 | (K + 4)·4C/R + 4C/(V0 + R) + C/change | — |
+
+**Binding transition: `close()`.** R = 4C(K + 3)/(0.9 L) = 168,888,889 sompi at K = 16, rounded up to **1.69 KAS**; `draw()` alone needs R ≥ 152,941,177 sompi (1.529 KAS) at f_min = F_MIN_FLOOR. Genesis is a third storage transition whose fresh outputs sit at R (K + 4 of them, one more than `close()`), so at R = 1.69 its worst instance exceeds 90 %; it is exempt from the margin by U-M6-1 and bounded at 100 % by the builder check, so it does not set R.
+
+**M6-h: fees.** Claims against prizes (relay floor and priority fee as above):
+
+| Claim shape | Priority mass | Relay floor (KAS) | Priority fee (KAS) | Priority fee % of P_MIN | % of 0.1 KAS | % of 1 KAS | Relay floor % of P_MIN |
+|---|---|---|---|---|---|---|---|
+| PAY, K = 16, m = 50, h = K | 247,222 | 0.07876 | 0.24722 | 494.4 | 247.2 | 24.72 | 157.5 |
+| ACCRUE, K = 16, m = 50, h = K | 150,420 | 0.07866 | 0.15042 | 300.8 | 150.4 | 15.04 | 157.3 |
+| FINAL, K = 16, m = 50, h = K | 78,586 | 0.07859 | 0.07859 | 157.2 | 78.6 | 7.86 | 157.2 |
+| PAY at P = P_MIN, storage worst case (b = 2, pool' at R, change 1,000,000 KAS) | 377,514 | 0.06189 | **0.37751** | **755.0** | 377.5 | 37.75 | 123.8 |
+| PAY at P = P_MIN, change 1 KAS | 306,869 | 0.06189 | 0.30687 | 613.7 | 306.9 | 30.69 | 123.8 |
+
+Under load a PAY claim at P_MIN costs about 7.55 × P_MIN at the priority floor; even the relay floor (no load) is 1.24–1.58 × P_MIN, because the K = 16 proofs dominate transient mass. Documented, not tuned (D82; closes the M4-h OPEN row as documented).
+
+Round sales S at which C_close = s_C·S and C_draw = s_D·S (s_C = s_D = 50 bp) cover the transaction's fee:
+
+| Transaction | Priority mass | Priority fee (KAS) | S covering it (KAS) | Relay floor (KAS) | S covering the relay floor (KAS) |
+|---|---|---|---|---|---|
+| `close()` K = 16 (M2-a shape) | 433,858 | 0.43386 | 86.77 | 0.43386 | 86.77 |
+| `close()` K = 16, storage worst case | 449,692 | 0.44969 | 89.94 | 0.43386 | 86.77 |
+| `draw()` worst (M6-a) | 265,782 | 0.26578 | 53.16 | 0.26578 | 53.16 |
+| `draw()` typical (M6-a) | 224,258 | 0.22426 | 44.85 | 0.22426 | 44.85 |
+
+The `draw()` storage supremum with the record at F_MIN_FLOOR (417,684, M6-g) means a priority fee of at most 0.41768 KAS when storage dominates; C_draw covers it from S = 83.54 KAS. Below these sales the caller pays part of the fee (D19 liveness note).
+
+**M6-i: vault request sizes.** Vault redeem 3,422 B (+42 B for W4b). `request_withdraw` partial at the W4b boundary (w = wmin = 10⁹ at the fixture vault): leader 199,723 units, sigscript 18,865 B, position leg 26,686 units; 25,276 / 82,824 / 48,554 (5.1 / 8.3 / 9.7 %), the same masses as any partial withdrawal (rows above).
+
+**M6-j: drawer sensitivity and byte budget, for the seed milestone.** Drawer-only variants run as full worst draws (K = 16, a = 7, np = 7, 8 funding inputs, cap binding, record), with marker, vault and pool committing to the variant drawer's hash:
+
+| Pair | m | Drawer redeem B (a / b) | Δ B | Compute (a / b) | Transient (a / b) | Δ compute per B | Δ transient per B |
+|---|---|---|---|---|---|---|---|
+| M_DRAW 25 vs 50 | 25 | 63,184 / 65,234 | 2,050 | 203,511 / 207,561 | 520,164 / 528,364 | 1.976 | 4.000 |
+| K_MAX 16 vs 17 | 50 | 65,234 / 66,472 | 1,238 | 208,661 / 210,701 | 531,564 / 536,524 | 1.648 | 4.006 |
+
+Worst `draw()` at the committed drawer (65,234 B): compute 208,661 (41.7 %), transient 531,564 (53.2 %). With the larger slope of each (1.976 compute and 4.006 transient grams per drawer byte), **the drawer can grow by about 91,960 B before the worst `draw()` reaches 90 % of transient** (122,159 B for compute); transient binds. **Stack-slot budget (not a mass):** the drawer has 4 free slots of the 244-item combined stack limit at check 24 (DECISIONS 2026-10-12 Fact S4-1; M6 changed only the drawer's MIN_DEPOSIT constant, so the drawer compiles unchanged). For the seed milestone the 4 stack slots are the scarcer drawer budget; the byte budget is large.
+
+**A5a: which M6 measurements depend on the drawer or `close()`** (rows marked "re-run" must be repeated at the end of the real-seed milestone before K, R or m_max count as final):
+
+| Measurement | Depends on drawer size | Depends on the `draw()` shape | Depends on `close()` size or shape | After the seed milestone |
+|---|---|---|---|---|
+| M6-a `draw()` rows (worst and typical) | **yes**: compute (leg reads) and transient (push) | yes | no | **re-run** |
+| M6-a `close()` rows | no (the marker holds DRAWER_TPL as 32 B) | no | **yes** (R1 fix) | **re-run** if `close()` changes |
+| M6-a genesis rows (exempt, U-M6-1) | no (storage counts outputs) | no | no; depends on the K + 4 outputs at R | re-run if genesis gains an output |
+| M6-a `buy()`, `claim()`, returns, refreshes, vault requests, settlements, `set_params()` | no (hashes, not drawer bytes) | no | no | valid |
+| M6-b K frontier for `close()` | no | no | **yes** | **re-run** if `close()` changes |
+| M6-b `draw()` estimates at K_MAX variants | **yes** | yes | no | **re-run** |
+| M6-c B_MAX frontier | no | no | **yes** | **re-run** if `close()` changes |
+| M6-d `draw()` rows (M_DRAW variants) | **yes** | yes | no | **re-run** (sets m_max) |
+| M6-d `buy()` and `claim()` rows | no | no | no | valid |
+| M6-e d frontier, M6-f P_MIN | no | no | no | valid |
+| M6-g R: `close()` storage worst case | no | no | **yes** (K + 3 outputs) | **re-run** if `close()` gains or loses an output |
+| M6-g R: `draw()` storage supremum | no | **yes** (output count and values) | no | **re-run** if `draw()` gains an output |
+| M6-h fees | follows M6-a | follows M6-a | follows M6-a | re-run the dependent rows |
+| M6-j drawer sensitivity and byte budget | is the measurement | yes | no | the seed milestone's budget input |
+
+**K = 16, R = 1.69 KAS and m_max = 50 are provisional (D83)** until the seed milestone re-confirms them with these rows; d = 0.13 KAS and B_MAX = 4 are final.
+
+### Purchase conflict rate (M6, D88)
+
+**τ measured on testnet-10** (`probe conflict-m6`, 2026-10-13, public node, real shard script; results in `docs/tn10-mass-check.md` M6): **τ_chain = 0.919 s** (median, n = 10: start of the parent buy's submission → a buy chained on its unaccepted successor shard accepted by the mempool; mean 0.920, max 0.925; that is two RPC round trips to the public node, the node accepted every chained buy on the first attempt) and **τ_merge = 1.655 s** (median, n = 10: start of the submission → a chain block accepted the buy; mean 1.650, max 1.962; the virtual chain was polled about every 0.6 s, so this is an upper bound by one poll). Source: `crates/lottery/tests/m6_conflict.rs` (`cargo test -p lottery --release --test m6_conflict -- --nocapture --test-threads=1`, `TAU_CHAIN` / `TAU_MERGE` = these medians), a seeded discrete-event model (no network), 2026-10-13.
+
+Model: K shards; buys arrive as a Poisson process at rate λ and pick a shard uniformly (research F1). An accepted buy makes its shard busy for τ (τ_chain: until a chained buy on the unaccepted successor is accepted; τ_merge: until the successor is merged by a chain block). A buy that finds its shard busy conflicts (the mempool rejects it as a double spend; it does not restart the busy time) and retries after a rebuild delay ρ on a shard drawn uniformly from the other K − 1. Reported: first-attempt conflict rate, mean attempts, P(≥ 3 attempts), saturation throughput K/τ. With a = λτ/K:
+- **Correction to spec A7 (S3b-2):** as ρ → ∞ each shard is a one-server loss system, so the first-attempt rate is **a / (1 + a)** (Erlang B with one server). The spec's 1 − e^(−a) holds only if every arrival, rejected ones included, restarts the busy time; under the protocol semantics it misses by more than 0.01 in 26 of 45 grid cells. Sanity grid (K ∈ {4, 8, 16}, λ ∈ {0.1, 0.5, 1, 2, 5}/s, τ ∈ {1, 2, 5} s): the simulation is within 0.00107 of a/(1 + a) (≤ 2.15 SE) and, with restart semantics, within 0.00136 of 1 − e^(−a).
+- **At a finite ρ below saturation (S3b-5)** every buy eventually succeeds, so a fresh buy finds its shard busy with probability exactly **a** (shard utilisation), independent of ρ and the retry rule (max deviation 0.00337). This is the practical first-attempt rate.
+- λ ≥ K/τ has no steady state; those cells run as a 600 s burst from idle and are marked SAT (their numbers depend on the burst length).
+
+Table at the measured τ, K = 16, ρ = 1 s (K = 4 and 8 are printed by the test):
+
+| τ (measured median) | λ (buys/s) | K/τ (/s) | a = λτ/K | First-attempt conflict (sim) | a/(1 + a) | 1 − e^(−a) | Mean attempts | P(≥ 3) | Max attempts | Regime |
+|---|---|---|---|---|---|---|---|---|---|---|
+| τ_chain = 0.919 s | 0.1 | 17.41 | 0.006 | 0.0057 | 0.0057 | 0.0057 | 1.006 | 0.0000 | 3 | steady |
+| τ_chain = 0.919 s | 0.5 | 17.41 | 0.029 | 0.0286 | 0.0279 | 0.0283 | 1.029 | 0.0008 | 4 | steady |
+| τ_chain = 0.919 s | 1.0 | 17.41 | 0.057 | 0.0560 | 0.0543 | 0.0558 | 1.060 | 0.0033 | 5 | steady |
+| τ_chain = 0.919 s | 2.0 | 17.41 | 0.115 | 0.1149 | 0.1030 | 0.1085 | 1.130 | 0.0138 | 7 | steady |
+| τ_chain = 0.919 s | 5.0 | 17.41 | 0.287 | 0.2861 | 0.2231 | 0.2496 | 1.404 | 0.0827 | 11 | steady |
+| τ_merge = 1.655 s | 0.1 | 9.668 | 0.010 | 0.0104 | 0.0102 | 0.0103 | 1.011 | 0.0001 | 3 | steady |
+| τ_merge = 1.655 s | 0.5 | 9.668 | 0.052 | 0.0502 | 0.0492 | 0.0504 | 1.053 | 0.0026 | 5 | steady |
+| τ_merge = 1.655 s | 1.0 | 9.668 | 0.103 | 0.1042 | 0.0937 | 0.0983 | 1.116 | 0.0109 | 6 | steady |
+| τ_merge = 1.655 s | 2.0 | 9.668 | 0.207 | 0.2070 | 0.1714 | 0.1869 | 1.264 | 0.0444 | 9 | steady |
+| τ_merge = 1.655 s | 5.0 | 9.668 | 0.517 | 0.5171 | 0.3409 | 0.4038 | 2.099 | 0.2702 | 20 | steady |
+
+Reading: τ_chain applies to wallets that build on the pending successor (the probe shows the mempool accepts such a buy at once, research F3); τ_merge to wallets that wait for a chain block. Saturation is K/τ = 17.4 buys/s (chained) or 9.7 buys/s (waiting for the merge) at K = 16. The probe also measured that a racing buy on the same shard state is always rejected (10/10), and that a higher-feerate replacement through `submit_transaction_replacement` did not displace a pending buy on chain in any attempt (D87 input; `docs/tn10-mass-check.md` M6).
+
 ## Scripts (M0 probes)
 
 | Script | Redeem B | Sigscript B | Script units | Compute budget | Source test |

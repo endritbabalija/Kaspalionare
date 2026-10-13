@@ -29,134 +29,18 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common::m2::{Sil, accept_m4, is_engine_arithmetic, lookalike, reject_at, tpl};
+use common::m2::{Sil, accept_m4, lookalike, reject_at, tpl};
 use common::m5::*;
-use harness::{ArtifactValue, TxScriptError};
-use lottery::buy::{Built, InKind, Sources, Template, Templates, b_max};
+use common::mutants::*;
+use harness::ArtifactValue;
+use lottery::buy::{Built, InKind, Template, Templates};
 use lottery::draw::{ARG_RECORD_PREFIX, ARG_RECORD_SUFFIX};
 use lottery::vault::*;
 
 // ---------------------------------------------------------------- mutant mechanism
 
-/// "file:TAG" or "file:TAG#n".
-fn parse(t: &str) -> (Sil, &str, Option<usize>) {
-    let (file, rest) = t.split_once(':').expect("file:TAG");
-    let sil = match file {
-        "vault" => Sil::Vault,
-        "drawer" => Sil::Drawer,
-        "request" => Sil::Request,
-        "record" => Sil::Record,
-        "position" => Sil::Position,
-        f => panic!("no M5 file {f}"),
-    };
-    match rest.split_once('#') {
-        Some((tag, n)) => (sil, tag, Some(n.parse().expect("line index"))),
-        None => (sil, rest, None),
-    }
-}
-
-/// The tags of a line (a header comment's `// mut:M5<ID>` is not a tag).
-fn line_tags(line: &str) -> Vec<&str> {
-    match line.find("// mut:") {
-        Some(p) if line[p + 7..].starts_with("M5<") || line[p + 7..].starts_with('<') => vec![],
-        Some(p) => line[p + 7..].split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()).collect(),
-        None => vec![],
-    }
-}
-
-/// `src` without the `nth` line carrying `tag` (every such line if `None`).
-fn strip(src: &str, tag: &str, nth: Option<usize>) -> String {
-    let mut k = 0;
-    let mut removed = 0;
-    let out: Vec<&str> = src
-        .lines()
-        .map(|l| {
-            if line_tags(l).contains(&tag) {
-                let this = k;
-                k += 1;
-                if nth.is_none_or(|n| n == this) {
-                    removed += 1;
-                    return "";
-                }
-            }
-            l
-        })
-        .collect();
-    assert!(removed > 0 && nth.is_none_or(|_| removed == 1), "tag {tag} line {nth:?} not found");
-    out.join("\n")
-}
-
-fn field(s: &mut Sources, which: Sil) -> &mut String {
-    match which {
-        Sil::Vault => &mut s.vault,
-        Sil::Drawer => &mut s.drawer,
-        Sil::Request => &mut s.request,
-        Sil::Record => &mut s.record,
-        Sil::Position => &mut s.position,
-        _ => unreachable!(),
-    }
-}
-
-fn hash(t: &Templates, which: Sil) -> [u8; 32] {
-    match which {
-        Sil::Vault => t.vault.hash,
-        Sil::Drawer => t.drawer.hash,
-        Sil::Request => t.request.hash,
-        Sil::Record => t.record.hash,
-        Sil::Position => t.position.hash,
-        _ => unreachable!(),
-    }
-}
-
-/// Templates compiled with the given tag lines removed (one or more files). Lines of the
-/// same tag are given as distinct tags only (stripping shifts the line index).
-fn mutant5(tags: &[&str]) -> Arc<Templates> {
-    let mut src = Sources::committed(b_max());
-    let mut files = vec![];
-    for t in tags {
-        let (sil, tag, n) = parse(t);
-        let s = field(&mut src, sil);
-        *s = strip(s, tag, n);
-        files.push(sil);
-    }
-    let t = Templates::compile_sources(b_max(), &src);
-    for sil in files {
-        assert_ne!(hash(&t, sil), hash(&tpl(), sil), "mutant {tags:?} compiled to the committed template");
-    }
-    Arc::new(t)
-}
-
-/// The attack is rejected with the committed templates (strike), the base is accepted
-/// under the mutant, and the mutant's named input accepts the attack.
-fn killed(tags: &[&str], id: &str) {
-    let a = atk5(id);
-    a.strike();
-    let t = mutant5(tags);
-    let (g, b) = a.pair(&t);
-    accept_m4(&format!("base under mutant {tags:?}"), &g);
-    if let Err(e) = b.finish().run_input(a.input) {
-        panic!("mutant {tags:?}: input {} still rejects `{id}`: {e:?}", a.input);
-    }
-}
-
-/// Redundant line: the mutant still rejects the attack at the named input (not on the
-/// budget, and not only by an engine arithmetic error such as division by zero or a 64-bit
-/// overflow, which is no guard: Stage 7 S7-1), and still accepts the base.
-fn redundant(tags: &[&str], id: &str) {
-    let a = atk5(id);
-    a.strike();
-    let t = mutant5(tags);
-    let (g, b) = a.pair(&t);
-    accept_m4(&format!("base under mutant {tags:?}"), &g);
-    match b.finish().run_input(a.input) {
-        Ok(_) => panic!("mutant {tags:?} accepts `{id}` at input {}: the line is not redundant", a.input),
-        Err(e) => {
-            assert!(!matches!(e, TxScriptError::ExceededCommittedScriptUnits { .. }), "budget error: {e:?}");
-            assert!(!is_engine_arithmetic(&e), "mutant {tags:?} `{id}`: input {} rejects only by an engine arithmetic error, not a require: {e:?}", a.input);
-            println!("redundant {tags:?} `{id}`: still rejected at input {} by {e:?}", a.input);
-        }
-    }
-}
+// `parse`, `line_tags`, `strip`, `mutant5`, `killed` and `redundant` are in
+// `common::mutants` (shared with m6_mutants.rs since M6).
 
 macro_rules! killed {
     ($name:ident, [$($tag:expr),+], $id:expr) => {
@@ -263,7 +147,12 @@ killed!(w1_assets_0, ["vault:M5W1_assets#0"], "VA6 request_withdraw: total_asset
 killed!(w1_assets_1, ["vault:M5W1_assets#1"], "VA6 request_withdraw: total_assets ASSETS_MAX + 1 (fabricated, engine only)");
 // total_shares >= 0: 0 <= pend_wsh <= total_shares (M5W1_wsh) implies it.
 redundant!(w1_shares_0_redundant, ["vault:M5W1_shares#0"], "VA6 request_withdraw: total_shares -1 (fabricated)");
-killed!(w1_shares_1, ["vault:M5W1_shares#1"], "VA6 request_withdraw: total_shares = SHARES_MAX + 1 (fabricated vault)");
+// M6 Stage 2 (S2-1): W4b also rejects the fixture-base attack (S + VS inflates wmin above
+// w), so the mutant is killed on the whole-position base, which passes W4b.
+#[test]
+fn w1_shares_1() {
+    killed_atk(&["vault:M5W1_shares#1"], &common::m6::atk6("VA6 request_withdraw whole position: total_shares = SHARES_MAX + 1 (fabricated vault, M6 rebase)"));
+}
 killed!(w1_dep_0, ["vault:M5W1_dep#0"], "VA6 request_withdraw: pend_dep -1 (fabricated)");
 killed!(w1_dep_1, ["vault:M5W1_dep#1"], "VA6 request_withdraw: pend_dep TOTAL_MAX - total_assets + 1 (fabricated, engine only)");
 killed!(w1_wsh_0, ["vault:M5W1_wsh#0"], "VA6 request_withdraw: pend_wsh -1 (fabricated)");
@@ -300,7 +189,12 @@ killed!(w3_shares_1, ["vault:M5W3_shares#1"], "VA10 a position with SHARES_MAX +
 killed!(w3_class, ["vault:M5W3_class"], "VA10 a position with owner class 3, the owner input its P2SH form (fabricated)");
 killed!(w3_pad, ["vault:M5W3_pad"], "VA10 a position with the key padding byte set (class 0, fabricated)");
 killed!(w3_value, ["vault:M5W3_value"], "VA10 the position's value R + 1");
-killed!(w4_min, ["vault:M5W4_min"], "VA6 request_withdraw w = 0");
+// M6 Stage 2 (S2-1): at the fixture vault W4b also rejects w = 0 (wmin = 10^9); where
+// wmin = 0 (S1-1) only W4's `w >= 1` does, so the mutant is killed there.
+#[test]
+fn w4_min() {
+    killed_atk(&["vault:M5W4_min"], &common::m6::atk6("VA6 request_withdraw w = 0 at wmin = 0 (M6 rebase)"));
+}
 killed!(w4_shares, ["vault:M5W4_shares"], "VA6 request_withdraw w = shares + 1");
 killed!(w4_total, ["vault:M5W4_total"], "VA6 request_withdraw pend_wsh + w > total_shares");
 killed!(w5_idx_0, ["vault:M5W5_idx#0"], "VA10 owner_idx = 0 with a P2SH owner whose script hash is the vault's (fabricated)");

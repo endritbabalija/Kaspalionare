@@ -121,6 +121,8 @@ async fn run_probes(which: &str) -> Result<(), String> {
     if all || which == "draw-m3" { cases::draw_m3(&mut ctx).await?; }
     if all || which == "claim-m4" { cases::claim_m4(&mut ctx).await?; }
     if all || which == "vault-m5" { cases::vault_m5(&mut ctx).await?; }
+    // M6: not in `all` (it locks about 160 KAS: an instance genesis and 30 accepted buys).
+    if which == "conflict-m6" { cases::conflict_m6(&mut ctx).await?; }
     for k in [16usize, 32, 62] {
         if all || which == format!("close{k}") { cases::close(&mut ctx, k).await?; }
     }
@@ -161,7 +163,7 @@ async fn run() -> ExitCode {
         Some("keygen") => keygen(),
         Some("info") => info().await,
         Some("probe") => run_probes(args.get(1).map(String::as_str).unwrap_or("all")).await,
-        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|claim-m4|vault-m5|close16|close32|close62]>".into()),
+        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|claim-m4|vault-m5|conflict-m6|close16|close32|close62]> (conflict-m6 is not part of all)".into()),
     };
     match res {
         Ok(()) => ExitCode::SUCCESS,

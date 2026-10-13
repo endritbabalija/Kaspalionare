@@ -6,6 +6,9 @@ pub mod m3;
 pub mod m4;
 pub mod m5;
 pub mod m5_spec;
+pub mod m6;
+pub mod measure;
+pub mod mutants;
 
 use harness::TxScriptError;
 use lottery::buy::{BuyCase, Built, Final, b_max};

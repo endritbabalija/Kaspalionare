@@ -38,12 +38,12 @@ contract Request(
     // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
     int constant SCRIPT_MAX = 1000000;
     // Spec M5 A2: TOTAL_MAX = 2^62; SHARES_MAX = TOTAL_MAX - VS (VS = 1,000); funding inputs;
-    // reserve bound; minimum deposit (1 KAS); minimum partial payout (D70, as D57).
+    // reserve bound; minimum deposit (10 KAS, M6 D85); minimum partial payout (D70, as D57).
     int constant TOTAL_MAX = 4611686018427387904;
     int constant SHARES_MAX = 4611686018427386904;
     int constant F_MAX = 8;
     int constant RESERVE_MAX = 10000000000;
-    int constant MIN_DEPOSIT = 100000000;
+    int constant MIN_DEPOSIT = 1000000000;
     int constant P_MIN = 5000000;
     // Spec M4 A2/A6 (D59, D76): refresh idle time (24 h at 10 BPS), DAA bound
     // (= LOCK_TIME_THRESHOLD, rusty-kaspa v2.1.0 crypto/txscript/src/lib.rs:84).

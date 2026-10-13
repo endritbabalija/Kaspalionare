@@ -53,6 +53,7 @@ pub struct Ctx {
     pub report: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct Sent {
     pub tx: Transaction,
     pub m: Masses,
@@ -182,7 +183,6 @@ impl Ctx {
 
     /// Submit; report accept/reject and, if accepted, seconds until the change output (last) is in the UTXO set.
     pub async fn submit(&mut self, case: &str, s: &Sent, wait: bool) -> Result<bool, String> {
-        let id = s.tx.id();
         let res = self.client.submit_transaction(RpcTransaction::from(&s.tx), false).await;
         let (ok, detail) = match res {
             Ok(_) => {
@@ -195,18 +195,45 @@ impl Ctx {
             }
             Err(e) => (false, format!("REJECTED: {e}")),
         };
+        self.row(case, s, &detail);
+        Ok(ok)
+    }
+
+    /// Print and record one report row for `s` with the result text `detail`.
+    pub fn row(&mut self, case: &str, s: &Sent, detail: &str) {
         let row = format!(
-            "| {case} | {} | {} | {} | {} | {} | {:.4} | {detail} | `{id}` |",
+            "| {case} | {} | {} | {} | {} | {} | {:.4} | {detail} | `{}` |",
             s.m.compute,
             s.m.transient,
             s.m.storage,
             s.m.priority,
             s.tx.inputs.len(),
-            s.fee as f64 / KAS as f64
+            s.fee as f64 / KAS as f64,
+            s.tx.id()
         );
         println!("{row}");
         self.report.push(row);
-        Ok(ok)
+    }
+
+    /// Submit through `submit_transaction` with orphans disallowed (RbfPolicy::Forbidden), without
+    /// recording a row: Ok(()) if accepted, Err(the node's error text) if rejected.
+    pub async fn submit_raw(&self, s: &Sent) -> Result<(), String> {
+        self.client.submit_transaction(RpcTransaction::from(&s.tx), false).await.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Submit through the replacement path, `submit_transaction_replacement` (RbfPolicy::Mandatory:
+    /// exactly one double-spending mempool transaction and a strictly higher feerate,
+    /// rusty-kaspa v2.1.0 `rpc/core/src/api/rpc.rs:217-227`,
+    /// `mining/src/mempool/replace_by_fee.rs:44-55, 124-136, 150-164`), without recording a
+    /// row: Ok(the replaced transaction, as the node returned it) or Err(the node's error text).
+    pub async fn submit_replacement_raw(&self, s: &Sent) -> Result<Transaction, String> {
+        let r = self.client.submit_transaction_replacement(RpcTransaction::from(&s.tx)).await.map_err(|e| e.to_string())?;
+        if r.transaction_id != s.tx.id() {
+            return Err(format!("replacement accepted under id {} != submitted {}", r.transaction_id, s.tx.id()));
+        }
+        let mut replaced = Transaction::try_from(r.replaced_transaction).map_err(|e| format!("replaced transaction: {e}"))?;
+        replaced.finalize();
+        Ok(replaced)
     }
 
     /// Poll until the last output of `tx` (our change) appears in our address's UTXO set.

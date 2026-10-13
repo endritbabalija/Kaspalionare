@@ -40,7 +40,7 @@ fn ctrl(price: i64, m: i64, s_f: i64, s_r: i64, e: i64, g: i64, margin: i64, cap
         k: 4,
         m,
         price,
-        d: 11_000_000,
+        d: 13_000_000, // M6 (D80): d = D_FLOOR, was 11,000,000 (cosmetic)
         deadline: 0,
         s_f,
         s_r,

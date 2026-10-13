@@ -735,13 +735,17 @@ pub fn claim_mode(claimed: u8, b: i64, idx: i64, prize: i64) -> Option<ClaimMode
 
 // ------------------------------------------------------------------ M5: vault shares
 
-/// Genesis share unit (spec M5 A2, D66): S0 = floor(V0 / SHARE_UNIT). Genesis builder only.
-pub const SHARE_UNIT: i64 = 1_000;
+/// Genesis share unit (spec M5 A2, D66; M6 D84: 1 sompi, was 1,000): S0 = floor(V0 /
+/// SHARE_UNIT) = V0. Genesis builder only.
+pub const SHARE_UNIT: i64 = 1;
 /// Virtual offset (D66): the price is (A + VA) / (S + VS).
 pub const VS: i64 = 1_000;
 pub const VA: i64 = 1;
-/// Smallest deposit request (D70), 1 KAS.
-pub const MIN_DEPOSIT: i64 = 100_000_000;
+/// Smallest deposit request (D70; M6 D85: 10 KAS, was 1 KAS). Template constant in
+/// vault.sil (D5), drawer.sil (C1 mint guard) and request.sil (settle range).
+pub const MIN_DEPOSIT: i64 = 1_000_000_000;
+/// Withdrawal minimum by value (M6 D86, vault check W4b), 10 KAS.
+pub const W_MIN_VALUE: i64 = 1_000_000_000;
 /// Largest total_shares (spec M5 A2), so S + VS <= 2^62.
 pub const SHARES_MAX: i64 = TOTAL_MAX - VS;
 /// Largest V' (spec M5 A2), so V' + VA <= 2^62. Cannot bind on chain (MAX_SOMPI < 2^62,
@@ -755,6 +759,22 @@ pub const ASSETS_MAX: i64 = TOTAL_MAX - VA;
 /// consensus/core/src/config/params.rs:643 and :699, `BlockrateParams::new::<10>()`), the
 /// same 10-BPS convention as D_IDLE and D_RET (no network split).
 pub const VAULT_REQ_DELAY: i64 = 600;
+
+/// The smallest partial withdrawal (M6 D86, vault check W4b), the exact mirror of the
+/// script: q = (A + VA) / W_MIN_VALUE; wmin = (S + VS) / q if q >= 1, else 1 (integer
+/// division over the vault's own total_assets A and total_shares S). `request_withdraw`
+/// accepts w >= wmin or w = the position's whole share count. At the request-time price
+/// (A + VA) / (S + VS), any w >= wmin is worth at least W_MIN_VALUE minus one share's price
+/// (spec M6 A4). Defined for 0 <= A <= ASSETS_MAX and 0 <= S <= SHARES_MAX (W1); both sums
+/// are then <= 2^62.
+pub fn w_min(total_assets: i64, total_shares: i64) -> i64 {
+    let q = (total_assets + VA) / W_MIN_VALUE;
+    if q >= 1 {
+        (total_shares + VS) / q
+    } else {
+        1
+    }
+}
 
 /// mulfrac(a, r, c) = floor(a x r / c) (D73, spec M5 A8) for 0 <= a <= 2^62 and
 /// 0 <= r < c <= 2^62, through u128; `None` outside that domain (the script's
@@ -1301,5 +1321,70 @@ mod tests {
         assert_eq!(next_deadline(1_000_000, 864_000, 1_500_000, 72_000), 1_864_000);
         assert_eq!(next_deadline(1_000_000, 864_000, 1_900_000, 72_000), 1_972_000);
         assert_eq!(seed_ref(1_900_000, 600), 1_900_600);
+    }
+
+    /// The value bound of W4b (spec M6 A4) in u128: at the price pi = (A + VA) / (S + VS),
+    /// w x pi >= W_MIN_VALUE - pi, i.e. (w + 1)(A + VA) >= W_MIN_VALUE (S + VS).
+    fn value_bound(a: i64, s: i64, w: i64) -> bool {
+        (w as u128 + 1) * (a as u128 + VA as u128) >= W_MIN_VALUE as u128 * (s as u128 + VS as u128)
+    }
+
+    /// LP4 (spec M6 A8, Rust half; the script half is in m6_limits.rs): `w_min` on the grid
+    /// edges equals the A4 formula computed in i128; q = 0 gives 1, q = 1 gives S + VS; the
+    /// operands stay <= 2^62; and the value bound holds for 100,000 random (A, S, w >= wmin)
+    /// with q >= 1 (A + VA >= W_MIN_VALUE), and fails one share below wmin somewhere (so the
+    /// bound is tight, not vacuous).
+    #[test]
+    fn lp4_w_min_grid_and_value_bound() {
+        let reference = |a: i64, s: i64| -> i64 {
+            let q = (a as i128 + VA as i128) / W_MIN_VALUE as i128;
+            if q >= 1 { ((s as i128 + VS as i128) / q) as i64 } else { 1 }
+        };
+        for a in [0, 1, W_MIN_VALUE - 2, W_MIN_VALUE - 1, W_MIN_VALUE, 2 * W_MIN_VALUE - 1, 10_000_000 * KAS, ASSETS_MAX] {
+            assert!(a + VA <= TOTAL_MAX);
+            for s in [0, 1, W_MIN_VALUE, SHARES_MAX - 1, SHARES_MAX] {
+                assert!(s + VS <= TOTAL_MAX);
+                let wm = w_min(a, s);
+                assert_eq!(wm, reference(a, s), "A = {a}, S = {s}");
+                // wmin = 0 when q > S + VS (a share is worth more than W_MIN_VALUE): W4's
+                // w >= 1 is then the only floor, and the value bound still holds.
+                assert!(wm >= 0);
+                if a + VA >= W_MIN_VALUE {
+                    assert!(value_bound(a, s, wm), "value bound at wmin: A = {a}, S = {s}, wmin = {wm}");
+                }
+            }
+        }
+        // q = 0 (A + VA < W_MIN_VALUE): any w >= 1; q = 1 exactly: wmin = S + VS.
+        assert_eq!(w_min(W_MIN_VALUE - 2, 5), 1);
+        assert_eq!(w_min(0, SHARES_MAX), 1);
+        assert_eq!(w_min(W_MIN_VALUE - 1, 5), 5 + VS);
+        assert_eq!(w_min(W_MIN_VALUE - 1, SHARES_MAX), TOTAL_MAX);
+        assert_eq!(w_min(ASSETS_MAX, 0), 0, "q = 4.6 x 10^9 > S + VS = 1,000");
+        // The fixture vault (V = S = 10^15): wmin = 10^9; the extreme vault: about 10^9.
+        assert_eq!(w_min(10_000_000 * KAS, 10_000_000 * KAS), 1_000_000_000);
+        assert_eq!(w_min(ASSETS_MAX, SHARES_MAX), (SHARES_MAX + VS) / (TOTAL_MAX / W_MIN_VALUE));
+        // The property.
+        let mut r = Rng(0x6d36_7734);
+        let (mut n, mut tight) = (0, 0);
+        while n < 100_000 {
+            let a = r.mag(ASSETS_MAX);
+            if a + VA < W_MIN_VALUE {
+                continue;
+            }
+            let s = r.mag(SHARES_MAX);
+            let wm = w_min(a, s);
+            assert_eq!(wm, reference(a, s));
+            let w = match r.range(0, 3) {
+                0 | 1 => wm,
+                2 => wm.saturating_add(r.range(0, 1_000)),
+                _ => r.range(wm, TOTAL_MAX.max(wm)),
+            };
+            assert!(value_bound(a, s, w), "value bound: A = {a}, S = {s}, w = {w}, wmin = {wm}");
+            if wm >= 2 && !value_bound(a, s, wm - 2) {
+                tight += 1;
+            }
+            n += 1;
+        }
+        assert!(tight > 0, "the bound is never tight two shares below wmin");
     }
 }

@@ -13,10 +13,9 @@
 //!
 //! Spec M5 (D65): the vault's pending totals are converted at the post-settlement price
 //! (`game::convert`, C1-C3) and the record is written; the caller posts the record's R.
-//! The M5 entry signature (`SIG_DRAW_M5`, arguments wc, record_prefix, record_suffix
-//! inserted before own_daa) is used once the compiled drawer has it; until then (M5 Stages
-//! 2 and 3) the builder encodes the M4 signature (`SIG_DRAW_M4`), so draws with nothing
-//! pending, whose outputs are the M4 ones, still run against the M4 drawer (S2-2).
+//! The entry is called by its M5 signature (`SIG_DRAW_M5`: wc, record_prefix and
+//! record_suffix before own_daa). The M4 signature and the builder's M4 fallback were
+//! removed in M6 (D89): the committed drawer has only the M5 entry.
 //!
 //! `DrawCase` describes a draw with public fields; `expected()` derives every output from
 //! the Rust reference in `game` (never from the script); `build()` returns an editable
@@ -80,30 +79,13 @@ pub const ARG_RECORD_PREFIX: usize = 20;
 pub const ARG_RECORD_SUFFIX: usize = 21;
 /// `own_daa`: the maximum creation DAA score of the inputs, verified by check 19 (user
 /// decision 2026-10-10, spec correction of A4 check 19 and A9). Its position in the M5
-/// signature; `ARG_OWN_M4` in the M4 one.
+/// signature.
 pub const ARG_OWN: usize = 22;
-pub const ARG_OWN_M4: usize = 19;
 
-/// The M4 `draw_test_seed` signature (20 arguments).
-pub const SIG_DRAW_M4: &str = "draw_test_seed(byte[32],byte[5],byte[],byte[],int,int,int,int,int,int,int,int,int,int,int,byte[],byte[],byte,byte[33],int)";
 /// The M5 signature (spec M5 A5 "New arguments", 23 arguments): wc, record_prefix and
 /// record_suffix before own_daa.
 pub const SIG_DRAW_M5: &str =
     "draw_test_seed(byte[32],byte[5],byte[],byte[],int,int,int,int,int,int,int,int,int,int,int,byte[],byte[],byte,byte[33],int,byte[],byte[],int)";
-
-/// Whether the compiled drawer of `t` has the M5 entry signature (S2-2). Panics if it has
-/// neither the M4 nor the M5 one.
-pub fn drawer_is_m5(t: &Templates) -> bool {
-    let c = t.drawer.art.contracts.values().next().unwrap();
-    let tag = c.entries.get("draw_test_seed").expect("drawer has draw_test_seed").dispatch_tag.as_bytes().to_vec();
-    if tag == crate::buy::dispatch_tag(SIG_DRAW_M5) {
-        true
-    } else if tag == crate::buy::dispatch_tag(SIG_DRAW_M4) {
-        false
-    } else {
-        panic!("the compiled draw_test_seed has neither the M4 nor the M5 signature")
-    }
-}
 
 /// An expired pool of an earlier round absorbed by this draw (input 4 + i). Value
 /// remaining + R.
@@ -731,22 +713,9 @@ impl DrawCase {
 
     /// draw_test_seed(test_only_seed, win5, leaves, siblings, x1, y, x2, ctrl_pl, ctrl_sl,
     /// marker_pl, marker_sl, vault_pl, vault_sl, pool_pl, pool_sl, pool_prefix, pool_suffix,
-    /// funder_class, funder_key, own_daa).
-    ///
-    /// Spec M5: wc, record_prefix and record_suffix before own_daa when the compiled drawer
-    /// has the M5 signature (`drawer_is_m5`); the M4 argument list otherwise (S2-2).
+    /// funder_class, funder_key, wc, record_prefix, record_suffix, own_daa): the M5
+    /// signature (`SIG_DRAW_M5`, 23 arguments; spec M5 A5 "New arguments").
     pub fn args(&self, t: &Templates, x: &DrawExpected) -> Vec<ArtifactValue> {
-        use ArtifactValue::*;
-        let mut v = self.args_m4(t, x);
-        if drawer_is_m5(t) {
-            let own = v.pop().unwrap();
-            v.extend([Int(x.conv.wc), Bytes(t.record.prefix.clone()), Bytes(t.record.suffix.clone()), own]);
-        }
-        v
-    }
-
-    /// The M4 argument list (20 arguments, own_daa last).
-    pub fn args_m4(&self, t: &Templates, x: &DrawExpected) -> Vec<ArtifactValue> {
         use ArtifactValue::*;
         vec![
             Bytes(self.test_only_seed.to_vec()),
@@ -768,6 +737,9 @@ impl DrawCase {
             Bytes(t.pool.suffix.clone()),
             Byte(self.funder.class()),
             Bytes(self.funder.key33().to_vec()),
+            Int(x.conv.wc),
+            Bytes(t.record.prefix.clone()),
+            Bytes(t.record.suffix.clone()),
             Int(x.own),
         ]
     }
@@ -801,7 +773,7 @@ impl DrawCase {
                 entry: UtxoEntry::new(self.reserve(), t.drawer_spk(&self.drawer), self.drawer_daa, false, cov),
                 kind: InKind::Entry {
                     template: t.drawer.clone(),
-                    entry: if drawer_is_m5(&t) { SIG_DRAW_M5.into() } else { "draw_test_seed".into() },
+                    entry: SIG_DRAW_M5.into(),
                     args: self.args(&t, &x),
                     redeem: t.drawer_redeem(&self.drawer),
                 },
@@ -966,22 +938,18 @@ impl RoundResult {
     ///     and m, input 3's redeem), the wc argument and the funder; checked against the
     ///     record output's script and value at 3 + np.
     /// `t` supplies the committed marker, drawer, vault, controller and record layouts.
-    /// Returns an error on any inconsistency (wrong shape, pool count or value). Both the M5
-    /// entry (23 arguments) and the M4 one (20, no record) are read.
+    /// Returns an error on any inconsistency (wrong shape, pool count or value). Only the M5
+    /// entry (23 arguments) is read; the M4 one (20 arguments) was removed in M6 (D89).
     pub fn from_tx(tx: &Transaction, t: &Templates) -> Result<Self, String> {
         let cov = tx.outputs.first().and_then(|o| o.covenant).ok_or("output 0 has no covenant binding")?.covenant_id;
         let drawer_pushes = pushes(&tx.inputs.first().ok_or("no input 0")?.signature_script)?;
         let marker_pushes = pushes(&tx.inputs.get(1).ok_or("no input 1")?.signature_script)?;
         let vault_pushes = pushes(&tx.inputs.get(2).ok_or("no input 2")?.signature_script)?;
         let ctrl_pushes = pushes(&tx.inputs.get(3).ok_or("no input 3")?.signature_script)?;
-        // draw_test_seed has 23 arguments (M5; 20 in M4), then the dispatch tag and the
-        // redeem script.
-        let m5 = match drawer_pushes.len() {
-            25 => true,
-            22 => false,
-            n => return Err(format!("input 0: {n} pushes, expected 25 (M5) or 22 (M4)")),
-        };
-        let arg_own = if m5 { ARG_OWN } else { ARG_OWN_M4 };
+        // draw_test_seed has 23 arguments (M5), then the dispatch tag and the redeem script.
+        if drawer_pushes.len() != 25 {
+            return Err(format!("input 0: {} pushes, expected 25 (M5)", drawer_pushes.len()));
+        }
         let drawer = state_values(&t.drawer, drawer_pushes.last().unwrap())?;
         let mk = state_values(&t.marker, marker_pushes.last().ok_or("input 1: empty sigscript")?)?;
         let int = |v: &std::collections::BTreeMap<String, ArtifactValue>, k: &str| -> Result<i64, String> {
@@ -1061,7 +1029,7 @@ impl RoundResult {
             }
             pools.push(ResultPool { tier: np.tier, slice: np.slice, value, outpoint: TransactionOutpoint::new(txid, 3 + p as u32) });
         }
-        let own = script_num(&drawer_pushes[arg_own])?;
+        let own = script_num(&drawer_pushes[ARG_OWN])?;
         let d_claim = claim_deadline(own, marker.seed_ref, int(&drawer, "draw_window")?, int(&drawer, "claim_window")?).ok_or("D_claim out of range")?;
         let roots = (0..k as usize).map(|i| roots_bytes[32 * i..32 * (i + 1)].try_into().unwrap()).collect();
         let bytes32 = |v: &std::collections::BTreeMap<String, ArtifactValue>, f: &str| -> Result<[u8; 32], String> {
@@ -1073,9 +1041,6 @@ impl RoundResult {
         let ticket_tpl = bytes32(&drawer, "ticket_tpl")?;
         // Spec M5 A5 C1-C3: the record, rebuilt from the transaction bytes.
         let record = if rec {
-            if !m5 {
-                return Err("an M4 draw_test_seed with something pending".into());
-            }
             let wc = script_num(&drawer_pushes[ARG_WC])?;
             let (x2, y) = (script_num(&drawer_pushes[ARG_X2])?, script_num(&drawer_pushes[ARG_Y])?);
             let (g, cm) = (int(&ctrl, "g")?, int(&ctrl, "m")?);

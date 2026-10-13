@@ -27,9 +27,10 @@ use crate::state::DrawerState;
 
 pub const KAS: u64 = 100_000_000;
 pub const M_REF: u64 = 10_000_000;
-/// Ticket deposit per combination used in tests: above the measured 0.1043 KAS floor of a
-/// one-combination buy with a 0.1 KAS referral output (M-c). Final d is set in M6.
-pub const TEST_DEPOSIT: u64 = 11_000_000;
+/// Ticket deposit per combination used in tests: the genesis floor d = D_FLOOR = 0.13 KAS
+/// (M6 D80, D81; was 0.11 KAS), at which the b = 1 buy with a 0.1 KAS referral output is
+/// within 90 % of storage mass.
+pub const TEST_DEPOSIT: u64 = crate::genesis::D_FLOOR as u64;
 /// Test covenant ID of the instance (spec M1 D14).
 pub const COV: Hash = Hash::from_bytes([0x4c; 32]);
 /// Funding key used by every test buyer.
@@ -212,9 +213,12 @@ impl Templates {
         let drawer_hash = drawer.hash;
         #[cfg(not(feature = "test-seed"))]
         let drawer_hash = [0u8; 32];
-        let marker = Template::from(compile_source(&src.marker, &dummy_marker().ctor(drawer_hash)));
+        // M6-b K_MAX variants (measurement only, D91): the marker and pool constructor roots
+        // follow the controller source's K_MAX (16 for the committed sources).
+        let k_max = source_k_max(&src.controller);
+        let marker = Template::from(compile_source(&src.marker, &dummy_marker(k_max).ctor(drawer_hash)));
         let vault = Template::from(compile_source(&src.vault, &dummy_vault().ctor(drawer_hash)));
-        let pool = Template::from(compile_source(&src.pool, &dummy_pool().ctor(drawer_hash)));
+        let pool = Template::from(compile_source(&src.pool, &dummy_pool(k_max).ctor(drawer_hash)));
         let record = Template::from(compile_source(&src.record, &dummy_record().ctor()));
         let position = Template::from(compile_source(&src.position, &dummy_position().ctor(vault.hash)));
         let request = Template::from(compile_source(&src.request, &dummy_request().ctor(record.hash, position.hash)));
@@ -345,6 +349,31 @@ impl Templates {
     }
 }
 
+/// The K_MAX of a controller source: its `int constant K_MAX = n;` line, or the committed
+/// K_MAX if there is none (spec M6 A5 M6-b: in-memory K_MAX variants size the marker and
+/// pool constructor roots from it; the committed sources give K_MAX = 16).
+pub fn source_k_max(controller_src: &str) -> usize {
+    controller_src
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("int constant K_MAX = ")?.strip_suffix(';')?.trim().parse().ok())
+        .unwrap_or(K_MAX)
+}
+
+/// Minimum relay fee in sompi, as the rusty-kaspa v2.1.0 mempool computes it
+/// (`mining/src/mempool/check_transaction_standard.rs:71-76, 92-100`): fee mass =
+/// max(compute, ceil(transient x cofactor)), with the transient cofactor L_compute /
+/// L_transient = 0.5 of the block mass limits (`consensus/core/src/mass/mod.rs:178-188,
+/// 256-259`; limits `consensus/core/src/config/params.rs:626`; the node passes its block
+/// mass limits to the mempool, `kaspad/src/daemon.rs:648-652`), times
+/// DEFAULT_MINIMUM_RELAY_TRANSACTION_FEE = 100,000 sompi per kg = 100 sompi per gram
+/// (`mining/src/mempool/config.rs:20`). Storage mass is not part of it
+/// (`check_transaction_standard.rs:67-70`).
+pub fn relay_floor_fee(m: &harness::Masses) -> u64 {
+    let cof = harness::MAINNET_PARAMS.block_mass_limits.cofactors();
+    let fee_mass = kaspa_consensus_core::mass::NonContextualMasses::new(m.compute, m.transient).normalized_max(&cof);
+    fee_mass * harness::MIN_FEERATE_SOMPI_PER_GRAM
+}
+
 /// Placeholder states for compiling (the template hash does not depend on state values).
 fn dummy_controller() -> ControllerState {
     ControllerState {
@@ -389,11 +418,11 @@ fn dummy_params() -> ParamsState {
     ParamsState { round: 1, admin_hash: [0; 32], nonce: 0, used: 0, next_s_f: 500, next_s_r: 1_000, next_fee_class: 0, next_fee_key: [0; 33] }
 }
 
-fn dummy_marker() -> MarkerState {
+fn dummy_marker(k_max: usize) -> MarkerState {
     MarkerState {
         round: 1,
         k: 1,
-        roots: vec![0; 32 * K_MAX],
+        roots: vec![0; 32 * k_max],
         sales: 0,
         ref_paid: 0,
         m: 10,
@@ -448,7 +477,7 @@ fn dummy_request() -> RequestState {
     RequestState { round: 1, kind: 0, amount: 0, owner_class: 0, owner_key: [0; 33] }
 }
 
-fn dummy_pool() -> PoolState {
+fn dummy_pool(k_max: usize) -> PoolState {
     PoolState {
         round: 1,
         tier: 0,
@@ -456,7 +485,7 @@ fn dummy_pool() -> PoolState {
         win: [1, 2, 3, 4, 5, 1],
         m: 10,
         k: 1,
-        roots: vec![0; 32 * K_MAX],
+        roots: vec![0; 32 * k_max],
         deadline: 0,
         ticket_tpl: [0; 32],
         reserve: 0,

@@ -251,3 +251,123 @@ The rejection message is the node's CLTV error: the script's required lock time,
 **Earlier runs, superseded.** Two earlier `vault-m5` runs on 2026-10-12 were also accepted end to end. The first, before the age window (U-4), measured request_deposit transient 77,092, request_withdraw 82,372 and draw 448,800 (the vault redeem was 64 B smaller); its first attempt in a debug build had overflowed the 1 MB Windows main-thread stack before submitting anything (fixed: the probe runs on a 64 MB thread). The second, on the final scripts without the negative case (node `vector-10.kaspa.green`, DAA ≈ 595,059,437), had the same masses as the table above (draw `2691a0f00f8873859800b57d2894283fab288386bf58bbd345fbb2ffa13f4448`). The run above replaces both.
 
 Locked on testnet (no further entry exercised): the round 2 objects, drawer', vault', the four pools, the ticket, the new position (236,539 shares) and position' (5,940,000 shares). Payouts, the record's refunded R and changes are ours.
+
+## M6: purchase conflicts, replacement and chained buys, and the re-runs at the final templates (spec A6, 2026-10-13)
+
+All runs: `cargo run -p tn10 --release -- probe <name>` from `crates/`, public testnet-10 nodes found by the resolver (all version 2.1.0, network `testnet-10`), the M6 templates (vault with W4b, MIN_DEPOSIT = 10 KAS, d = 0.13 KAS). Every transaction is built by the `lottery` builders and checked in the local v2.1.0 engine before submission. Balance before the M6 runs: 8,022.88 testnet KAS.
+
+### `conflict-m6` (D87, D88, research F3)
+
+`probe conflict-m6` (new; not part of `probe all`, since it locks about 160 KAS). Genesis as `draw-m3` (K = 16, J(1) = 10 KAS, V0 = 60 KAS) with T = virtual DAA + 10⁷ (no `close()` follows), then a fan-out of 50 funding outputs of 3 KAS. Ten repetitions; repetition i works on genesis shard i:
+- **Part R (spec A6 steps 1–3).** Buys A and B (b = 1, no referral, different combinations and funding inputs) on the same shard state; B pays twice A's fee (feerate 199.61 vs 100.32 sompi/gram; the mempool compares fee / max(compute, normalized transient, storage), `consensus/core/src/tx.rs:662-668`, `mining/src/mempool/replace_by_fee.rs:150-164`). A is submitted with `submit_transaction`, then B at once (RbfPolicy::Forbidden), then the same B with `submit_transaction_replacement` (RbfPolicy::Mandatory, `rpc/core/src/api/rpc.rs:217-227`). Then a buy C chained on the unaccepted successor shard (creation DAA UNACCEPTED_DAA_SCORE, which the script reads as −1) of the node's winner, and if that is rejected, the C built on the other candidate (both Cs are built before the race). Which of A and B a chain block accepted is read from the virtual chain.
+- **Part F (step 4, clean timing).** On the shard's chain-merged tip after part R, a buy P and, at once, a buy Q chained on P's unaccepted successor (built before P is submitted). τ_chain = start of P's submission → Q accepted by the mempool. τ_merge = start of a buy's submission → a chain block accepted it (virtual chain polled every 200 ms after each response, about every 0.6 s in practice, so an upper bound by one poll). Each merged buy's change output was then read from the UTXO index with the merging chain block's DAA score (`merged()`).
+
+**Run 3 (recorded; node `quark-10.kaspa.red`, DAA ≈ 595,208,236; covenant instance from genesis `424df434…`).** All 60 buys have the same compute and transient, which equal M6-a's `buy()` b = 1 without referral (43,472 / 151,488). Their storage is 309,126–311,382, between M6-a's 1 KAS change row (311,729) and its large-change row (321,777): here the funding input is 3 KAS and the change about 1.56 KAS.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS, T = DAA + 10⁷ | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `424df434081eaad0b08ebe52621cec8a06da87a38907a6bac9f35e968e1e2455` |
+| setup: fan-out, 50 funding outputs of 3 KAS | 22,226 | 11,464 | 166,650 | 166,650 | 1 | 0.1668 | accepted | `c87cdbcfdeee65497e183de38a3eac50cfb165177f74bdb976b794ce0b7ebec6` |
+| buy A (each rep) | 43,472 | 151,488 | 309,786 | 309,786 | 2 | 0.3108 | accepted 10/10 | per rep below |
+| buy B (each rep), race and replacement | 43,472 | 151,488 | 311,382 | 311,382 | 2 | 0.6215 | see below | per rep below |
+| buy C chained on A (each rep) | 43,472 | 151,488 | 309,126 | 309,126 | 2 | 0.3101 | accepted 10/10 | per rep below |
+| buy P on the merged tip (each rep) | 43,472 | 151,488 | 309,178 | 309,178 | 2 | 0.3102 | accepted 10/10 | per rep below |
+| buy Q chained on P (each rep) | 43,472 | 151,488 | 309,429 | 309,429 | 2 | 0.3104 | accepted 10/10, first attempt | per rep below |
+
+Per repetition (B's race rejection: "spent" = `output (<shard outpoint>) already spent by transaction <A> in the mempool`; "orphan" = `transaction <B> is an orphan where orphan is disallowed`. Replacement: "no DS" = `replace by fee found no double spending transaction in the mempool`. The node's error texts are verbatim in the run output):
+
+| rep | A (chain winner, every rep) | B race | B replacement | C (on A) | τ_merge A (s) | P | Q | τ_chain (s) | τ_merge P (s) |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | `5d222980…` | orphan | no DS | `a54772e1…`, attempt 1 | 2.49 | `0a750315…` | `70a4ee54…` | 0.920 | 1.34 |
+| 1 | `96e4363c…` | orphan | no DS | `34761462…`, attempt 1 | 2.25 | `0dda1fd3…` | `68548649…` | 0.924 | 1.35 |
+| 2 | `b13cbc79…` | spent | no DS | `f01a6aee…`, attempt 1 | 2.27 | `4b637341…` | `7aeac789…` | 0.918 | 1.95 |
+| 3 | `a0f35ea6…` | orphan | no DS | `60fb74d5…`, attempt 1 | 2.31 | `f950b8a7…` | `dcd3ff5d…` | 0.922 | 1.96 |
+| 4 | `3945faba…` | orphan | no DS | `3c9042c3…`, attempt 1 | 2.25 | `166465f7…` | `14c075b2…` | 0.915 | 1.96 |
+| 5 | `94c1af34…` | spent | **accepted by the node, replaced A** (0.660 s); A still won on chain | `6b8f3c3d…`, attempt 2 (C on B: orphan) | 2.91 | `cb7347c8…` | `72b8a87c…` | 0.922 | 1.34 |
+| 6 | `96759540…` | spent | no DS | `c86e2a21…`, attempt 1 | 2.24 | `9e4518ee…` | `4252555e…` | 0.925 | 1.34 |
+| 7 | `cc0f3ac7…` | orphan | no DS | `8cc81bff…`, attempt 1 | 2.28 | `01d1fed4…` | `0e8de099…` | 0.914 | 1.96 |
+| 8 | `546bb7e8…` | orphan | no DS | `28b1fdbe…`, attempt 1 | 2.26 | `5ca330ff…` | `a2b7310c…` | 0.919 | 1.34 |
+| 9 | `890435db…` | spent | no DS | `c3aef386…`, attempt 1 | 2.26 | `7728a8e7…` | `3fd94ee8…` | 0.919 | 1.96 |
+
+Full transaction ids are in the run output (`crates/tn10/results-conflict-m6.md`, git-ignored, and the session log). Every C and every Q was later accepted by a chain block (consensus re-ran shard check 6 with the merging block's DAA score), and no losing B was ever accepted.
+
+**Facts (run 3, plus run 2 below):**
+1. **Race:** a second buy on the same shard state was rejected 10/10. 4/10 as a mempool double spend; 6/10 as an orphan, because 0.46–0.69 s after A's submission started, A had already left the mempool: it was in a block and the shard outpoint was spent in the virtual UTXO set.
+2. **Replacement (D87):** `submit_transaction_replacement` with a strictly higher feerate was accepted by the node only when A was still in its mempool: 1/10 in run 3 (rep 5) and 1/1 in run 2. **In both cases A, not B, was accepted on chain**; B was dropped (C on B was an orphan right after the replacement returned, and B was never merged). In the other 9/10 the node answered "no double spending transaction in the mempool", because A was already block-included. The node broadcasts an accepted replacement and P2P peers insert with RbfPolicy::Allowed (`protocol/flows/src/flow_context.rs:676-690`, `protocol/flows/src/v10/txrelay/flow.rs:233`), but a block that already holds A removes its double spends from the mempool (`mining/src/mempool/handle_new_block_transactions.rs`, `remove_double_spends`). **So, at 10 BPS with a ~0.46 s round trip to a public node, the covenant spend is RBF-eligible at the node, but it did not displace a pending transaction in any of 11 attempts.** This is an input to D87 (the "honest request outbids the attacker's pending request" argument); nothing was redesigned.
+3. **Chain (F3):** a buy chained on the unaccepted successor shard was accepted by the mempool 20/20: C in part R (9 at the first attempt, 1 at the second after the orphaned C on B) and Q in part F (10/10 at the first attempt, each before its parent was seen chain-accepted). All 20 were then merged on chain.
+4. **Timing (part F, n = 10):** **τ_chain median 0.919 s** (mean 0.920, max 0.925): two RPC round trips (P's, then Q's); local build time 0.005 s per buy, excluded. **τ_merge median 1.655 s** (mean 1.650, max 1.962; values cluster at 1.34 and 1.96 because of the ~0.6 s poll). Part R's τ_merge for A (median 2.262 s, mean 2.351, max 2.914) is biased upward, because its polling starts only after the chain step (about 1.8 s); pooled R + F: median 2.103 s. Q accepted → chain-accepted: median 1.047 s, max 1.684. The medians of part F feed `m6_conflict` (`TAU_CHAIN = 0.919`, `TAU_MERGE = 1.655`; `docs/costs.md` "Purchase conflict rate").
+
+**Earlier runs.**
+- **Run 1** was killed by the operator after about a minute while the resolver connection was still being set up. Nothing was submitted, and the balance was unchanged.
+- **Run 2** (node `muon-10.kaspa.blue`; first probe version) stopped in rep 0 after 300 s. That version assumed the node's replacement decides the winner, and waited for B. What happened:
+  - genesis `049d5aa3e8af2d9ca21fbe746763c7590feb25db5a5d6332fdd8417da55ec1ec`;
+  - A `e5ec7c275506f40b1335ae45382cf8d705e2f39ad7e92dad0cf6b3970871740c` accepted (submit 0.612 s);
+  - B `e0d26f2bd32f7ea77adbb0dd1978fc2902743d69a4f7d75ef6fbc5561a9f889e` rejected "already spent by transaction e5ec7c27… in the mempool", then **accepted by `submit_transaction_replacement`, which returned A as the replaced transaction** (0.545 s);
+  - C `97305742…` on B was an orphan for 60 s (100 attempts);
+  - A's change was later found in the UTXO set at DAA 595,200,941, and B's funding was unspent.
+
+  The probe was then changed: part R detects the chain winner from the virtual chain and tries C on both candidates, and part F was added. Run 2's genesis and fan-out (about 96 KAS) and A's shard successor and ticket stay locked.
+
+Locked on testnet by run 3: every object of the instance (controller, params, 16 shards, vault, drawer, position; the 40 tickets of the accepted buys and the shard successors). Unused funding outputs, the changes and the fan-out change are ours.
+
+### Re-runs at the final templates
+
+**`buy-m1`** (run 2, node `boson-10.kaspa.red`, DAA ≈ 595,214,626). The probe now runs b = B_MAX = 4 and b = 1, each with a referral (s_R = 10 %, so 0.4 KAS and 0.1 KAS = M_REF), each on its own genesis shard, with the builder's fixed 0.5 KAS fee and a large change (≈ 7,700 KAS):
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis shard (b = 4) | 2,083 | 1,412 | 23,668 | 23,668 | 1 | 0.0238 | accepted | `f1b22913a3b3fb2404978e65a9bfdf0c64bc80422a9921fd155d02ce8d7d0a14` |
+| **`buy()`, real shard script, b = 4, referral 0.40 KAS, d = 0.13 KAS, R = 1.69 KAS** | **46,491** | **158,924** | 109,473 | 109,473 | 2 | 0.5000 | **accepted** | `978f08b67bc14b1a24e55b2fa47ccd21c28d1db4bf9700c6c0682d04f694de00` |
+| setup: genesis shard (b = 1) | 2,083 | 1,412 | 23,668 | 23,668 | 1 | 0.0238 | accepted | `d8a820d9efb2bca145f87ea4308a2795433f9317af9ec174daff2d84e7239426` |
+| **`buy()`, real shard script, b = 1, referral 0.10 KAS, d = 0.13 KAS, R = 1.69 KAS (D80 worst shape)** | **43,884** | **151,696** | **423,125** | 423,125 | 2 | 0.5000 | **accepted** | `2263d66cc5b96bdd532b37798be5abb52b4a600aed06b920bb11ba023f731070` |
+
+Compute and transient equal M6-a exactly (b = 4 referral 46,491 / 158,924; b = 1 referral 43,884 / 151,696). Storage differs with the output values. The b = 1 referral buy is 423,125 (84.6 %) against M6-a's 422,352 (84.5 %, change 1,000,000 KAS); the b = 4 buy is 109,473 against 108,704 (large change). The b = 1 shape at d = 0.13 is the one D80 brought under 90 %; at d = 0.11 it was 478,296 (M4-d). An earlier run the same day (b = 4 only, before the probe gained the b = 1 case) gave the same b = 4 masses (storage 109,476): `40bfedaeeec6868365cbc68b83c8a0600c104a5f722cea0c7800f736616a7baa`.
+
+**`claim-m4`** (node `vector-10.kaspa.green`, DAA ≈ 595,209,816):
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `945762f9cd24b9855e5bfa0779c59758192e9455504fc7fba3eea5e4ecc645fa` |
+| setup: `buy()` of the jackpot combination [5, 11, 19, 23, 24] + 7 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `9a380a2d75b05f668949e0edbd5a30c1fe4cf26a180138a498f91290557b3511` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 294,619 | 867,716 | 426,281 | 433,858 | 19 | 0.4340 | accepted | `1906f7b9b3a4cb3a02dd1f8f8a354834856323bfece284b94e46c75924126789` |
+| setup: `draw_test_seed()`, K = 16, a = 0, np = 4, h_J = 1, n2 = 0, R = 1.69 KAS | 141,986 | 448,864 | 130,525 | 224,432 | 5 | 0.2245 | accepted | `75eff605977608fb617aeea00cb1842780c5f1cd8e00ab78fd749502b827348c` |
+| **`claim()` FINAL on the jackpot pool: K = 16, m = 10, h = 1, prize 10.0000 KAS, payout 10.1300 KAS, pool' 1.6900 KAS (R)** | **47,503** | **152,052** | **24,626** | 76,026 | 3 | 0.0761 | **accepted** | `a4b593bd0da1d7e41e32b7c722c0c988793731d9f14d70ed5fea60934dcd2a78` |
+
+Round result from the draw bytes: round 1, win [5, 11, 19, 23, 24, 7], D_claim 601,690,509, pools (tier, slice, value) [(0, 1000000000, 1169000000), (2, 32000, 173000000), (3, 2666, 172000000), (4, 1000, 172000000)].
+
+Comparison with the measured shapes:
+- **The claim** has the same compute and transient as M4-i's run (47,503 / 152,052); the ticket script did not change in M6. M6-a's FINAL row is the m = 50, h = K shape (49,083 / 157,172), not this m = 10, h = 1 one. The payout is J + d = 10.13 KAS at d = 0.13.
+- **The buy** equals M6-a b = 1 without referral (43,472 / 151,488).
+- **`close()`** equals M6-a (294,619 / 867,716).
+- **The draw** (141,986 / 448,864) is the m = 10, a = 0 shape with np = 4 pools. M6-a's typical draw has np = 3 (141,229 / 448,516), so this one carries one more pool output.
+- **The genesis** storage (461,180, 92.2 %) is U-M6-1's exempt shape.
+
+**`vault-m5`** (node `vector-10.kaspa.green`, DAA ≈ 595,210,933). Rescaled for M6:
+- **Deposit:** D = 12 KAS (≥ MIN_DEPOSIT = 10 KAS).
+- **Withdrawal:** partial, w = wmin = `game::w_min(6,000,000,000, 6,000,000,000)` = **1,000,000,166 shares**. That is exactly the W4b boundary at the vault' it spends (total_assets = V0 = 60 KAS, total_shares = S0 = V0 at SHARE_UNIT = 1), and it passed the builder policy `WithdrawCase::checked()`.
+- **The δ − 1 negative case** is kept.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `7d6651120fe6b1023d7dd9af3dd6d98892fbbd97305d7a2889cc7068b4fc6eff` |
+| **negative: `request_deposit()` at vault age δ − 1 (lock_time = creation 595,210,970 + 599 = 595,211,569)** | 41,485 | 77,540 | 24,199 | 41,485 | 2 | 0.0389 | **REJECTED: "failed to verify the signature script: Unsatisfied lock time: locktime requirement not satisfied -- locktime is greater than the transaction locktime: 595211570 > 595211569"** | `f9d84a860d78d17a3839060131091130901c86b6c83347e3e615bdfe17e0ebd3` |
+| **`request_deposit()`, real vault script: D = 12.00 KAS** | **23,185** | **77,540** | 24,199 | 38,770 | 2 | 0.0389 | **accepted** | `eb865a3b0c93df2c2b84b6b8cb7f799c06e9e21912311dac6329777152efbc86` |
+| **`request_withdraw()`, partial, w = 1,000,000,166 = wmin of 6,000,000,000 shares, P2PK Schnorr owner** | **25,276** | **82,824** | 47,849 | 47,849 | 3 | 0.0479 | **accepted** | `74d3a57d7a239604d8b6339f8bcf339e67dbffb0045589183270a54d7de313a4` |
+| setup: `buy()` of the jackpot combination [2, 6, 9, 10, 21] + 7 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `e171b72bbd507d0c9ea1b45b7a62c387cc56f9330be02ca67ff2589db642909e` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 294,619 | 867,716 | 426,244 | 433,858 | 19 | 0.4340 | accepted | `4fd32210179034bbdb76a2ba2850f7766b926b351a6a2d1b6d24ef5487828e0c` |
+| **`draw_test_seed()`, K = 16, a = 0, np = 4, h_J = 1, n2 = 0; conversion D = 12.00 KAS → mint 1,418,999,053 shares, W = 1,000,000,166 → wc = W, out_c = 8.4567 KAS; record at output 7** | **142,547** | **449,228** | 134,410 | 224,614 | 5 | 0.2247 | **accepted** | `1a004c020444f457f3d86ddae9ed73e5a44ab72e23bae7562e927423b101a0e1` |
+| **`settle()`: deposit-convert, s = 12.00 KAS → position of 1,418,999,053 shares; record' kept** | **22,147** | **73,388** | 27,581 | 36,694 | 3 | 0.0368 | **accepted** | `3e56e413793f510ee68a8538e5aa762bbcc3ebfc204bb0133db201c61bfe6db2` |
+| **`settle()`: withdrawal FINAL, w = 1,000,000,166 shares, payout 10.1467 KAS (pay + R), record drained** | **21,857** | **73,108** | 6,873 | 36,554 | 3 | 0.0367 | **accepted** | `7b899c3cc8f31536208945a90bf6491ed005026be694a1dd21efc6fd354a4a36` |
+
+Round result: round 1, win [2, 6, 9, 10, 21, 7], D_claim 601,692,908, the same four pools as `claim-m4`, plus the record.
+
+The masses equal M6-a / M6-i:
+- `request_deposit` 23,185 / 77,540 (M6-a, D = 10 KAS);
+- `request_withdraw` partial at the W4b boundary 25,276 / 82,824 (M6-i, w = wmin; 1 compute and 4 transient below the generic partial row 25,277 / 82,828, because the sigscript is 1 B shorter);
+- settle deposit-convert 22,147 / 73,388;
+- settle withdrawal FINAL drained 21,857 / 73,108;
+- `close()` 294,619 / 867,716.
+
+The converting draw is 142,547 / 449,228. M5's run was 142,504 / 449,056; the difference, +43 compute and +172 transient, is the vault redeem's +42 B (check W4b; 168 transient at 4 grams per byte) plus 1 B for the larger push of W (1,000,000,166 is a 4-byte script number, M5's 60,000 a 3-byte one). The withdrawal is worth about 10 KAS (out_c 8.4567 KAS + the request's R = 10.1467 KAS payout; the gap to W_MIN_VALUE comes from the share price after the draw's jackpot payout and the deposit's mint, not the request-time price π of the W4b bound). The node rejected the early deposit with check D10's CLTV error, as in M5.
+
+Locked on testnet after the re-runs: for `claim-m4` and `vault-m5`, the round 2 objects, drawer', vault', the pools (and in `vault-m5` the new position and position'); for `buy-m1`, both shard successors and both tickets. Payouts, referrals, refunds and changes are ours. Balance after all M6 runs: 7,542.77 testnet KAS (480.11 KAS locked or paid in fees by `conflict-m6` runs 2 and 3, the two `buy-m1` runs, `claim-m4` and `vault-m5`).

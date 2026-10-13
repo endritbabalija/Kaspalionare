@@ -20,7 +20,7 @@ use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, TEST_DEPOSIT, Template
 use crate::game::{CloseMath, close_math};
 use crate::params::{ADMIN_SK, TEST_RESERVE, admin_hash, xonly};
 use crate::smt::empty_hashes;
-use crate::state::{ControllerState, MarkerState, ParamsState, Payout, ShardState};
+use crate::state::{ControllerState, K_MAX, MarkerState, ParamsState, Payout, ShardState};
 
 /// Instance values of the tests (spec M2 D17-D23).
 pub const TEST_ROUND_LEN: i64 = 864_000;
@@ -97,6 +97,10 @@ pub struct CloseCase {
     pub m_next: Option<i64>,
     pub cov: Hash,
     pub funding_sk: [u8; 32],
+    /// K_MAX of the templates the case is built against: the marker' roots are padded to
+    /// 32 x k_max bytes. `state::K_MAX` (16) for the committed templates; the M6-b K_MAX
+    /// variants (measurement only, D91) set it to the variant's K_MAX.
+    pub k_max: usize,
 }
 
 impl CloseCase {
@@ -187,6 +191,7 @@ impl CloseCase {
             m_next: None,
             cov: COV,
             funding_sk: FUNDING_SK,
+            k_max: K_MAX,
         }
     }
 
@@ -288,7 +293,7 @@ impl CloseCase {
         let mut marker = MarkerState {
             round: c.round,
             k: c.k,
-            roots: MarkerState::roots_bytes(&roots),
+            roots: MarkerState::roots_bytes_k(&roots, self.k_max),
             sales: math.sales,
             ref_paid: math.ref_paid,
             m: c.m,

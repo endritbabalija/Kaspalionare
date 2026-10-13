@@ -165,15 +165,11 @@ fn vp4_draw_with_deposits() {
     assert!(!x0.rec);
     assert_eq!((x.fix.jackpot, x.fix.g2, x.fix.liability), (x0.fix.jackpot, x0.fix.g2, x0.fix.liability), "J', G2', L' independent of the deposits");
     assert_eq!(x.controller.v_rec, x0.controller.v_rec + 35 * KAS as i64, "v_rec = total_assets' = V' + D_c");
-    // The record is rebuilt from the bytes only with the M5 entry (its wc argument, S2-2);
-    // an M4-signature draw with something pending is refused.
-    if lottery::draw::drawer_is_m5(&ch.t) {
-        let rr = RoundResult::from_tx(&f.tx, &ch.t).expect("round result from the bytes");
-        assert_eq!(rr, RoundResult::new(&c, &x, f.tx.id()));
-        assert_eq!(rr.record.as_ref().map(|r| &r.state), x.record.as_ref());
-    } else {
-        assert_eq!(RoundResult::from_tx(&f.tx, &ch.t), Err("an M4 draw_test_seed with something pending".to_string()));
-    }
+    // The record is rebuilt from the bytes of the M5 entry (its wc argument, S2-2; the M4
+    // entry was removed in M6, D89).
+    let rr = RoundResult::from_tx(&f.tx, &ch.t).expect("round result from the bytes");
+    assert_eq!(rr, RoundResult::new(&c, &x, f.tx.id()));
+    assert_eq!(rr.record.as_ref().map(|r| &r.state), x.record.as_ref());
 }
 
 // ---------------------------------------------------------------- VP5
@@ -414,7 +410,8 @@ fn vp11_refresh_then_use() {
     let now = ch.controller.1.deadline as u64 - 50_000;
     let x = ch.settle_now(qi, now.max(at(rd) + 100));
     assert_eq!(x.mode, SettleMode::DepositConvert);
-    let (c, ops) = ch.withdraw_case(0, 1_000, deployer(), now.max(at(rd) + 200));
+    // M6 (D86): 10^10 shares (about 100 KAS), above wmin (about 10^9 at V = S = 10^15); was 1,000.
+    let (c, ops) = ch.withdraw_case(0, 10_000_000_000, deployer(), now.max(at(rd) + 200));
     ch.withdraw(&c, ops, now.max(at(rd) + 200));
     ch.assert_share_invariants("VP11");
 }
@@ -474,7 +471,8 @@ fn s7_request_at_vault_age() {
     assert_eq!(ch.vault.2, g + delay, "the first request waits for the genesis vault's age");
     ch.deposit_now(&key(2).payout(), MIN_DEPOSIT, 0);
     assert_eq!(ch.vault.2, g + 2 * delay, "the next request waits for vault' age");
-    let (c, ops) = ch.withdraw_case(0, 1_000, deployer(), 0);
+    // M6 (D86): 10^10 shares (about 100 KAS), above wmin (about 10^9); was 1,000.
+    let (c, ops) = ch.withdraw_case(0, 10_000_000_000, deployer(), 0);
     assert_eq!(c.lock_time, g + 3 * delay);
     ch.withdraw(&c, ops, 0);
     ch.assert_share_invariants("Stage 7 chain");
@@ -550,7 +548,8 @@ fn vp14_three_draws() {
     let w = ch.winning(&seed);
     let p1 = ch.positions.iter().position(|p| Payout::from_fields(p.1.owner_class, &p.1.owner_key) == key(1).payout()).unwrap();
     let half = ch.positions[p1].1.shares / 2;
-    round(&mut ch, seed, &[(key(3).payout(), 5 * KAS as i64)], &[(p1, half)], Some(vec![Combo::new(w.main, w.bonus)]));
+    // M6 (D85): 15 KAS, at least MIN_DEPOSIT = 10 KAS; was 5 KAS.
+    round(&mut ch, seed, &[(key(3).payout(), 15 * KAS as i64)], &[(p1, half)], Some(vec![Combo::new(w.main, w.bonus)]));
     settle_all(&mut ch);
     // Round 3: nothing new but the carried request'.
     round(&mut ch, [3; 32], &[(key(4).payout(), MIN_DEPOSIT)], &[], None);

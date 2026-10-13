@@ -10,6 +10,8 @@ use harness::{
 use lottery::buy::{BuyCase, KAS, Templates, b_max};
 use lottery::smt::Tree;
 
+use common::measure::{buy_case, buy_storage};
+
 const COMPUTE_LIMIT: u64 = 500_000;
 const TRANSIENT_LIMIT: u64 = 1_000_000;
 const STORAGE_LIMIT: u64 = 500_000;
@@ -22,13 +24,6 @@ const R_KAS: f64 = lottery::params::TEST_RESERVE as f64 / KAS as f64;
 
 fn sigscript_len(b: &lottery::buy::Built) -> usize {
     b.finish().tx.inputs[0].signature_script.len()
-}
-
-/// A buy of `b` distinct combinations at bonus range `m` under templates with `b_max` slots.
-fn buy_case(b_max: usize, b: usize, m: usize) -> BuyCase {
-    let mut c = BuyCase::new(b_max).with_tree(Tree::new(m));
-    c.bundle = common::distinct(b, m.min(255) as u8);
-    c
 }
 
 /// Bytes the shard's own redeem script takes inside a sigscript (push opcode included).
@@ -151,18 +146,6 @@ fn report(name: &str, c: &BuyCase) {
     );
 }
 
-/// Storage mass of a buy with deposit `d` per combination; `small_change` uses a ~1 KAS change.
-fn buy_storage(b: usize, with_ref: bool, small_change: bool, d: u64) -> u64 {
-    let mut c = buy_case(b_max(), b, 10);
-    c.shard.d = d as i64;
-    c.with_ref = with_ref;
-    if small_change {
-        c.funding = vec![c.gross() + c.b() * d + c.fee + KAS];
-    }
-    let f = c.build().finish();
-    masses(&f.tx, &f.entries).storage
-}
-
 /// Smallest d (sompi) keeping storage <= 500,000 for every shape with bundle size b.
 fn min_deposit(b: usize, with_ref: bool) -> u64 {
     let ok = |d: u64| [false, true].iter().all(|&s| buy_storage(b, with_ref, s, d) <= STORAGE_LIMIT);
@@ -187,7 +170,7 @@ fn mc_deposit_floor() {
 
 #[test]
 fn mc_buy_masses_and_referral_minimum() {
-    println!("\nM-c: buy() masses, d = 0.11 KAS, price 1 KAS, fresh shard at R = {:.2} KAS (K = 16)", R_KAS);
+    println!("\nM-c: buy() masses, d = {} KAS, price 1 KAS, fresh shard at R = {:.2} KAS (K = 16)", lottery::buy::TEST_DEPOSIT as f64 / KAS as f64, R_KAS);
     println!("| shape | compute | transient | storage | shard units | fee for priority (KAS) |");
     println!("|---|---|---|---|---|---|");
     let bm = b_max();

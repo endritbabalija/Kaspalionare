@@ -714,9 +714,10 @@ fn every_m3_tag_is_tested() {
             tags.retain(|t| !t.starts_with("RF"));
         }
         // drawer.sil, vault.sil: the M5 tags (prefix "M5", spec M5 A10 mutants, Stage 6's
-        // m5_mutants.rs; M5 Stage 2 decision S2-8) are not M3's.
+        // m5_mutants.rs; M5 Stage 2 decision S2-8) and the M6 tags (prefix "M6",
+        // m6_mutants.rs) are not M3's.
         if f == "drawer.sil" || f == "vault.sil" {
-            tags.retain(|t| !t.starts_with("M5"));
+            tags.retain(|t| !t.starts_with("M5") && !t.starts_with("M6"));
         }
         tags.sort();
         tags.dedup();
