@@ -467,13 +467,13 @@ Source: `crates/lottery/tests/m6_measure.rs` (`cargo test -p lottery --release -
 | params (`set_params`, `close_leg`) | 1 | 2,808 | 109 | 2,918 |
 | marker (`draw_leg`, `refresh`) | 1 | 1,388 | 715 | 2,104 |
 | drawer (`draw_test_seed`, TEST-ONLY seed) | 1 | 65,096 | 137 | 65,234 |
-| **vault** (`draw_leg`, `request_deposit`, `request_withdraw` with W4b; M5: 3,380) | 1 | 3,266 | 155 | **3,422** |
+| **vault** (`draw_leg`, `request_deposit`, `request_withdraw` with W4b incl. the RV-1 remainder rule; M5: 3,380) | 1 | 3,276 | 155 | **3,432** |
 | pool (`absorb_leg`, `ticket_leg`, `refresh`) | 1 | 1,831 | 649 | 2,481 |
 | record (`request_leg`, `refresh`) | 1 | 1,026 | 127 | 1,154 |
 | position (`vault_leg`, `refresh`) | 1 | 1,137 | 56 | 1,194 |
 | request (`settle`, `refresh`) | 1 | 15,420 | 58 | 15,479 |
 
-Only the vault changed size (+42 B, check W4b). MIN_DEPOSIT 10⁸ → 10⁹ is a 4-byte script number either way, so the drawer and request sizes are unchanged.
+Only the vault changed size (+52 B, check W4b: +42 B for wmin, then +10 B for the Stage 5 RV-1 remainder rule, O-M6-2). MIN_DEPOSIT 10⁸ → 10⁹ is a 4-byte script number either way, so the drawer and request sizes are unchanged.
 
 **M6-a / M6-h / M6-i: every transition** (one funding input unless stated; "leg" = the units of the named delegate input):
 
@@ -495,8 +495,8 @@ Only the vault changed size (+42 B, check W4b). MIN_DEPOSIT 10⁸ → 10⁹ is a
 | `set_params()`, no change | 120,310 / 3,067 | — | 1 | 5,992 | 13,688 | 0 | 1.2 / 1.4 / 0.0 | 0.00684 | 0.00684 |
 | `close()` K = 16, sales in every shard (M2-a shape) | 3,379,799 / 29,140 | — | 20 | 294,619 | **867,716** | 402,301 | 58.9 / **86.8** / 80.5 | 0.43386 | 0.43386 |
 | `close()` K = 16, storage worst case (M2-c grid: zero sales, O = J_boost = A = 0, caller 1,000,000 KAS) | 3,378,742 / 29,140 | — | 20 | 294,619 | 867,716 | **449,692** | 58.9 / 86.8 / **89.9** | 0.43386 | 0.44969 |
-| `draw()` worst (DP21: m = 50, a = 7, np = 7, 8 funding inputs, cap binding, record) | 1,810,706 / 79,050 | 463,913 (vault) | 21 | 208,661 | 531,564 | 71,009 | 41.7 / 53.2 / 14.2 | 0.26578 | 0.26578 |
-| `draw()` typical (m = 10, a = 0, np = 3, no record) | 1,507,504 / 77,763 | 463,913 (vault) | 9 | 141,229 | 448,516 | 93,028 | 28.2 / 44.9 / 18.6 | 0.22426 | 0.22426 |
+| `draw()` worst (DP21: m = 50, a = 7, np = 7, 8 funding inputs, cap binding, record) | 1,810,876 / 79,050 | 463,933 (vault) | 21 | 208,671 | 531,604 | 71,009 | 41.7 / 53.2 / 14.2 | 0.26580 | 0.26580 |
+| `draw()` typical (m = 10, a = 0, np = 3, no record) | 1,507,674 / 77,763 | 463,933 (vault) | 9 | 141,239 | 448,556 | 93,028 | 28.2 / 44.9 / 18.6 | 0.22428 | 0.22428 |
 | `claim()` PAY, K = 16, m = 50, h = K | 700,682 / 36,287 | 183,651 (pool) | 4 | 50,640 | 157,520 | 247,222 | 10.1 / 15.8 / 49.4 | 0.07876 | 0.24722 |
 | `claim()` ACCRUE, K = 16, m = 50, h = K | 700,178 / 36,287 | 183,651 | 3 | 50,228 | 157,312 | 150,420 | 10.0 / 15.7 / 30.1 | 0.07866 | 0.15042 |
 | `claim()` FINAL, K = 16, m = 50, h = K | 597,960 / 36,287 | 183,651 | 3 | 49,083 | 157,172 | 21,153 | 9.8 / 15.7 / 4.2 | 0.07859 | 0.07859 |
@@ -510,12 +510,12 @@ Only the vault changed size (+42 B, check W4b). MIN_DEPOSIT 10⁸ → 10⁹ is a
 | `refresh` position | 8,044 / 1,202 | — | 2 | 3,339 | 6,436 | 16,980 | 0.7 / 0.6 / 3.4 | 0.00334 | 0.01698 |
 | `refresh` request | 93,809 / 15,487 | — | 2 | 18,524 | 63,576 | 16,980 | 3.7 / 6.4 / 3.4 | 0.03179 | 0.03179 |
 | `refresh` record | 8,651 / 1,162 | — | 2 | 3,299 | 6,276 | 115 | 0.7 / 0.6 / 0.0 | 0.00330 | 0.00330 |
-| `request_deposit` (D = 10 KAS = MIN_DEPOSIT) | 178,110 / 18,891 | — | 3 | 23,185 | 77,540 | 24,886 | 4.6 / 7.8 / 5.0 | 0.03877 | 0.03877 |
-| `request_withdraw` whole (Schnorr owner) | 187,408 / 18,866 | 26,686 (position) | 3 | 24,720 | 82,480 | 24,678 | 4.9 / 8.2 / 4.9 | 0.04124 | 0.04124 |
-| `request_withdraw` partial (Schnorr owner) | 199,736 / 18,866 | 26,686 | 4 | 25,277 | 82,828 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04141 | 0.04855 |
-| `request_withdraw` partial (ECDSA owner) | 199,673 / 18,866 | 26,686 | 4 | 25,277 | 82,828 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04141 | 0.04855 |
-| `request_withdraw` partial (P2SH owner) | 199,602 / 18,866 | 26,686 | 4 | 25,312 | 82,968 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04148 | 0.04855 |
-| **M6-i** `request_withdraw` partial at the W4b boundary, w = wmin = 1,000,000,000 (Schnorr owner) | 199,723 / 18,865 | 26,686 | 4 | 25,276 | 82,824 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04141 | 0.04855 |
+| `request_deposit` (D = 10 KAS = MIN_DEPOSIT) | 178,170 / 18,901 | — | 3 | 23,195 | 77,580 | 24,886 | 4.6 / 7.8 / 5.0 | 0.03879 | 0.03879 |
+| `request_withdraw` whole (Schnorr owner) | 187,456 / 18,876 | 26,756 (position) | 3 | 24,730 | 82,520 | 24,678 | 4.9 / 8.3 / 4.9 | 0.04126 | 0.04126 |
+| `request_withdraw` partial (Schnorr owner) | 199,819 / 18,876 | 26,756 | 4 | 25,287 | 82,868 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04143 | 0.04855 |
+| `request_withdraw` partial (ECDSA owner) | 199,756 / 18,876 | 26,756 | 4 | 25,287 | 82,868 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04143 | 0.04855 |
+| `request_withdraw` partial (P2SH owner) | 199,685 / 18,876 | 26,756 | 4 | 25,322 | 83,008 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04150 | 0.04855 |
+| **M6-i** `request_withdraw` partial at the W4b boundary, w = wmin = 1,000,000,000 (Schnorr owner) | 199,805 / 18,875 | 26,756 | 4 | 25,286 | 82,864 | 48,554 | 5.1 / 8.3 / 9.7 | 0.04143 | 0.04855 |
 | `settle` deposit-convert | 67,258 / 16,633 | 111,202 (record) | 3 | 22,147 | 73,388 | 20,180 | 4.4 / 7.3 / 4.0 | 0.03669 | 0.03669 |
 | `settle` deposit-convert, drained | 52,984 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 11,915 | 4.4 / 7.3 / 2.4 | 0.03662 | 0.03662 |
 | `settle` deposit-refund | 56,138 / 16,633 | 111,202 | 3 | 22,002 | 73,248 | 0 | 4.4 / 7.3 / 0.0 | 0.03662 | 0.03662 |
@@ -527,7 +527,7 @@ Only the vault changed size (+42 B, check W4b). MIN_DEPOSIT 10⁸ → 10⁹ is a
 | `settle` withdrawal ACCRUE | 121,314 / 16,633 | 111,202 | 3 | 22,747 | 73,388 | 27,869 | 4.5 / 7.3 / 5.6 | 0.03669 | 0.03669 |
 | `settle` withdrawal ACCRUE, drained | 104,470 / 16,633 | 111,202 | 3 | 22,502 | 73,248 | 11,300 | 4.5 / 7.3 / 2.3 | 0.03662 | 0.03662 |
 
-**Tightest margins (genesis excluded, U-M6-1):** compute 58.9 % and transient **86.8 %** (`close()` K = 16, M2-a shape; 32,284 grams of transient headroom, unchanged since M4-f), storage **89.9 %** (`close()` K = 16 storage worst case), then 84.5 % (`buy()` b = 1 with a 0.1 KAS referral at d = 0.13). Against M5: the vault's +42 B adds 42 compute and 168 transient grams to every request (+4 grams per byte) and +143 / +172 to the worst `draw()`; request leader units rose by 252 (`request_deposit`, the longer vault redeem) to 347 (partial `request_withdraw`, the redeem plus W4b's two divisions), and the position leg by 294; storage of every `buy()`, `claim()`, return and ticket refresh fell with d = 0.11 → 0.13 KAS (for example PAY at P_MIN 405,486 → 377,514). Every other row equals M4/M5.
+**Tightest margins (genesis excluded, U-M6-1):** compute 58.9 % and transient **86.8 %** (`close()` K = 16, M2-a shape; 32,284 grams of transient headroom, unchanged since M4-f), storage **89.9 %** (`close()` K = 16 storage worst case), then 84.5 % (`buy()` b = 1 with a 0.1 KAS referral at d = 0.13). Against M5: the vault's +52 B adds 52 compute and 208 transient grams to every request (+4 grams per byte) and +153 / +212 to the worst `draw()`; request leader units rose by 312 (`request_deposit`, the longer vault redeem) to 430 (partial `request_withdraw`, the redeem plus W4b's two divisions and two comparisons), and the position leg by 364; storage of every `buy()`, `claim()`, return and ticket refresh fell with d = 0.11 → 0.13 KAS (for example PAY at P_MIN 405,486 → 377,514). Every other row equals M4/M5.
 
 **Genesis (U-M6-1).** Genesis has K + 4 covenant outputs at R (controller at acc + pot + R, params, K shards, drawer, position) plus the vault at V0 + R and the change. The worst instance `validate()` allows (K = 16, acc = pot = 0, J = 0 so that V0 = V0_MIN passes the cap check, V0 = V0_MIN, R = R_MIN, fee = its relay floor 1,122,300 sompi) measures **488,229 (97.6 %)** with large change and 487,956 with no change. A change output adds C / change: the builder accepts at least 83,063,378 sompi (0.8306 KAS) of change at this instance, which gives exactly 500,000; one sompi less is refused with a "U-M6-1" error. The fixture genesis (V0 = 10,000,000 KAS, acc 2 KAS) is 460,532 (92.1 %). M3's genesis (no position output) was 437,512 on testnet-10.
 
@@ -565,10 +565,10 @@ Each shard adds about 51,400 transient grams (the shard redeem pushed once, plus
 
 | K_MAX | Drawer code B (Δ) | Ticket code B (Δ) | `draw()` extra B | Worst `draw()` transient (estimate) | % | `claim()` PAY F_MAX extra B | `claim()` transient (estimate) | % |
 |---|---|---|---|---|---|---|---|---|
-| 16 | 65,097 (+0) | 25,360 (+0) | 0 | 531,564 (measured) | 53.2 | 0 | 160,880 (measured) | 16.1 |
-| 17 | 66,335 (+1,238) | 26,581 (+1,221) | 3,511 | 545,608 (estimate) | 54.6 | 1,929 | 168,596 (estimate) | 16.9 |
-| 18 | 67,571 (+2,474) | 27,799 (+2,439) | 7,015 | 559,624 (estimate) | 56.0 | 3,855 | 176,300 (estimate) | 17.6 |
-| 19 | 68,807 (+3,710) | 29,017 (+3,657) | 10,519 | 573,640 (estimate) | 57.4 | 5,781 | 184,004 (estimate) | 18.4 |
+| 16 | 65,097 (+0) | 25,360 (+0) | 0 | 531,604 (measured) | 53.2 | 0 | 160,880 (measured) | 16.1 |
+| 17 | 66,335 (+1,238) | 26,581 (+1,221) | 3,511 | 545,648 (estimate) | 54.6 | 1,929 | 168,596 (estimate) | 16.9 |
+| 18 | 67,571 (+2,474) | 27,799 (+2,439) | 7,015 | 559,664 (estimate) | 56.0 | 3,855 | 176,300 (estimate) | 17.6 |
+| 19 | 68,807 (+3,710) | 29,017 (+3,657) | 10,519 | 573,680 (estimate) | 57.4 | 5,781 | 184,004 (estimate) | 18.4 |
 
 `draw()` and `claim()` are far from binding K; `close()` transient is.
 
@@ -589,11 +589,11 @@ Each shard adds about 51,400 transient grams (the shard redeem pushed once, plus
 | `buy()` b = 4 | 10 | 46,491 | 158,924 | 108,704 | 9.3 / 15.9 / 21.7 |
 | `buy()` b = 4 | 25 | 46,711 | 159,404 | 108,704 | 9.3 / 15.9 / 21.7 |
 | `buy()` b = 4 | **50** | 46,912 | 160,208 | 108,704 | 9.4 / 16.0 / 21.7 |
-| `draw()`, drawer M_DRAW = 50 (committed) | 10 | 206,881 | 526,444 | 71,009 | 41.4 / 52.6 / 14.2 |
-| `draw()`, drawer M_DRAW = 50 (committed) | 25 | 207,561 | 528,364 | 71,009 | 41.5 / 52.8 / 14.2 |
-| `draw()`, drawer M_DRAW = 50 (committed) | **50** | 208,661 | 531,564 | 71,009 | 41.7 / 53.2 / 14.2 |
-| `draw()`, drawer M_DRAW = 25 (variant) | 10 | 202,931 | 518,244 | 71,009 | 40.6 / 51.8 / 14.2 |
-| `draw()`, drawer M_DRAW = 25 (variant) | 25 | 203,511 | 520,164 | 71,009 | 40.7 / 52.0 / 14.2 |
+| `draw()`, drawer M_DRAW = 50 (committed) | 10 | 206,891 | 526,484 | 71,009 | 41.4 / 52.6 / 14.2 |
+| `draw()`, drawer M_DRAW = 50 (committed) | 25 | 207,571 | 528,404 | 71,009 | 41.5 / 52.8 / 14.2 |
+| `draw()`, drawer M_DRAW = 50 (committed) | **50** | 208,671 | 531,604 | 71,009 | 41.7 / 53.2 / 14.2 |
+| `draw()`, drawer M_DRAW = 25 (variant) | 10 | 202,941 | 518,284 | 71,009 | 40.6 / 51.8 / 14.2 |
+| `draw()`, drawer M_DRAW = 25 (variant) | 25 | 203,521 | 520,204 | 71,009 | 40.7 / 52.0 / 14.2 |
 | `claim()` PAY, 8 funding inputs | 10 | 56,800 | 155,760 | 149,925 | 11.4 / 15.6 / 30.0 |
 | `claim()` PAY, 8 funding inputs | 25 | 57,480 | 157,680 | 149,925 | 11.5 / 15.8 / 30.0 |
 | `claim()` PAY, 8 funding inputs | **50** | 58,480 | 160,880 | 149,925 | 11.7 / 16.1 / 30.0 |
@@ -667,21 +667,21 @@ Round sales S at which C_close = s_C·S and C_draw = s_D·S (s_C = s_D = 50 bp) 
 |---|---|---|---|---|---|
 | `close()` K = 16 (M2-a shape) | 433,858 | 0.43386 | 86.77 | 0.43386 | 86.77 |
 | `close()` K = 16, storage worst case | 449,692 | 0.44969 | 89.94 | 0.43386 | 86.77 |
-| `draw()` worst (M6-a) | 265,782 | 0.26578 | 53.16 | 0.26578 | 53.16 |
-| `draw()` typical (M6-a) | 224,258 | 0.22426 | 44.85 | 0.22426 | 44.85 |
+| `draw()` worst (M6-a) | 265,802 | 0.26580 | 53.16 | 0.26580 | 53.16 |
+| `draw()` typical (M6-a) | 224,278 | 0.22428 | 44.86 | 0.22428 | 44.86 |
 
 The `draw()` storage supremum with the record at F_MIN_FLOOR (417,684, M6-g) means a priority fee of at most 0.41768 KAS when storage dominates; C_draw covers it from S = 83.54 KAS. Below these sales the caller pays part of the fee (D19 liveness note).
 
-**M6-i: vault request sizes.** Vault redeem 3,422 B (+42 B for W4b). `request_withdraw` partial at the W4b boundary (w = wmin = 10⁹ at the fixture vault): leader 199,723 units, sigscript 18,865 B, position leg 26,686 units; 25,276 / 82,824 / 48,554 (5.1 / 8.3 / 9.7 %), the same masses as any partial withdrawal (rows above).
+**M6-i: vault request sizes.** Vault redeem 3,432 B (+52 B for W4b vs M5: +42 B for wmin, +10 B for the Stage 5 RV-1 remainder rule). `request_withdraw` partial at the W4b boundary (w = wmin = 10⁹ at the fixture vault, remainder 4.9 × 10¹⁰ ≥ wmin): leader 199,805 units, sigscript 18,875 B, position leg 26,756 units; 25,286 / 82,864 / 48,554 (5.1 / 8.3 / 9.7 %), the same masses as any partial withdrawal (rows above).
 
 **M6-j: drawer sensitivity and byte budget, for the seed milestone.** Drawer-only variants run as full worst draws (K = 16, a = 7, np = 7, 8 funding inputs, cap binding, record), with marker, vault and pool committing to the variant drawer's hash:
 
 | Pair | m | Drawer redeem B (a / b) | Δ B | Compute (a / b) | Transient (a / b) | Δ compute per B | Δ transient per B |
 |---|---|---|---|---|---|---|---|
-| M_DRAW 25 vs 50 | 25 | 63,184 / 65,234 | 2,050 | 203,511 / 207,561 | 520,164 / 528,364 | 1.976 | 4.000 |
-| K_MAX 16 vs 17 | 50 | 65,234 / 66,472 | 1,238 | 208,661 / 210,701 | 531,564 / 536,524 | 1.648 | 4.006 |
+| M_DRAW 25 vs 50 | 25 | 63,184 / 65,234 | 2,050 | 203,521 / 207,571 | 520,204 / 528,404 | 1.976 | 4.000 |
+| K_MAX 16 vs 17 | 50 | 65,234 / 66,472 | 1,238 | 208,671 / 210,711 | 531,604 / 536,564 | 1.648 | 4.006 |
 
-Worst `draw()` at the committed drawer (65,234 B): compute 208,661 (41.7 %), transient 531,564 (53.2 %). With the larger slope of each (1.976 compute and 4.006 transient grams per drawer byte), **the drawer can grow by about 91,960 B before the worst `draw()` reaches 90 % of transient** (122,159 B for compute); transient binds. **Stack-slot budget (not a mass):** the drawer has 4 free slots of the 244-item combined stack limit at check 24 (DECISIONS 2026-10-12 Fact S4-1; M6 changed only the drawer's MIN_DEPOSIT constant, so the drawer compiles unchanged). For the seed milestone the 4 stack slots are the scarcer drawer budget; the byte budget is large.
+Worst `draw()` at the committed drawer (65,234 B): compute 208,671 (41.7 %), transient 531,604 (53.2 %). With the larger slope of each (1.976 compute and 4.006 transient grams per drawer byte), **the drawer can grow by about 91,950 B before the worst `draw()` reaches 90 % of transient** (122,154 B for compute); transient binds. **Stack-slot budget (not a mass):** the drawer has 4 free slots of the 244-item combined stack limit at check 24 (DECISIONS 2026-10-12 Fact S4-1; M6 changed only the drawer's MIN_DEPOSIT constant, so the drawer compiles unchanged). For the seed milestone the 4 stack slots are the scarcer drawer budget; the byte budget is large.
 
 **A5a: which M6 measurements depend on the drawer or `close()`** (rows marked "re-run" must be repeated at the end of the real-seed milestone before K, R or m_max count as final):
 

@@ -323,7 +323,7 @@ Locked on testnet by run 3: every object of the instance (controller, params, 16
 
 Compute and transient equal M6-a exactly (b = 4 referral 46,491 / 158,924; b = 1 referral 43,884 / 151,696). Storage differs with the output values. The b = 1 referral buy is 423,125 (84.6 %) against M6-a's 422,352 (84.5 %, change 1,000,000 KAS); the b = 4 buy is 109,473 against 108,704 (large change). The b = 1 shape at d = 0.13 is the one D80 brought under 90 %; at d = 0.11 it was 478,296 (M4-d). An earlier run the same day (b = 4 only, before the probe gained the b = 1 case) gave the same b = 4 masses (storage 109,476): `40bfedaeeec6868365cbc68b83c8a0600c104a5f722cea0c7800f736616a7baa`.
 
-**`claim-m4`** (node `vector-10.kaspa.green`, DAA ≈ 595,209,816):
+**`claim-m4`, first M6 run (its draw is SUPERSEDED by the Stage 5 RV-1 re-run below: the draw spends the vault, so it carries the vault redeem)** (node `vector-10.kaspa.green`, DAA ≈ 595,209,816):
 
 | case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
 |---|---|---|---|---|---|---|---|---|
@@ -342,7 +342,7 @@ Comparison with the measured shapes:
 - **The draw** (141,986 / 448,864) is the m = 10, a = 0 shape with np = 4 pools. M6-a's typical draw has np = 3 (141,229 / 448,516), so this one carries one more pool output.
 - **The genesis** storage (461,180, 92.2 %) is U-M6-1's exempt shape.
 
-**`vault-m5`** (node `vector-10.kaspa.green`, DAA ≈ 595,210,933). Rescaled for M6:
+**`vault-m5`, first M6 run (SUPERSEDED by the Stage 5 RV-1 re-run below: the vault script then had W4b without the remainder rule; kept for the record)** (node `vector-10.kaspa.green`, DAA ≈ 595,210,933). Rescaled for M6:
 - **Deposit:** D = 12 KAS (≥ MIN_DEPOSIT = 10 KAS).
 - **Withdrawal:** partial, w = wmin = `game::w_min(6,000,000,000, 6,000,000,000)` = **1,000,000,166 shares**. That is exactly the W4b boundary at the vault' it spends (total_assets = V0 = 60 KAS, total_shares = S0 = V0 at SHARE_UNIT = 1), and it passed the builder policy `WithdrawCase::checked()`.
 - **The δ − 1 negative case** is kept.
@@ -369,5 +369,37 @@ The masses equal M6-a / M6-i:
 - `close()` 294,619 / 867,716.
 
 The converting draw is 142,547 / 449,228. M5's run was 142,504 / 449,056; the difference, +43 compute and +172 transient, is the vault redeem's +42 B (check W4b; 168 transient at 4 grams per byte) plus 1 B for the larger push of W (1,000,000,166 is a 4-byte script number, M5's 60,000 a 3-byte one). The withdrawal is worth about 10 KAS (out_c 8.4567 KAS + the request's R = 10.1467 KAS payout; the gap to W_MIN_VALUE comes from the share price after the draw's jackpot payout and the deposit's mint, not the request-time price π of the W4b bound). The node rejected the early deposit with check D10's CLTV error, as in M5.
+
+**`vault-m5`, re-run after the Stage 5 RV-1 fix (current; 2026-10-13)** (node `vector-10.kaspa.green`, DAA ≈ 595,238,862; log: orchestrator scratchpad `vault-m5_rv1.txt`, 0 hits for "PRIVATE"). The vault script now has W4b with the remainder rule (orchestrator decision O-M6-2: a partial withdrawal needs w ≥ wmin and shares − w ≥ wmin; vault redeem 3,432 B, +10 B). Same values as the first run: D = 12 KAS; w = wmin = `game::w_min(6,000,000,000, 6,000,000,000)` = 1,000,000,166 shares from the deployer's 6,000,000,000-share position, so the remainder is 4,999,999,834 ≥ wmin and the builder policy `WithdrawCase::checked()` (which now includes the remainder rule) accepts it.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `7722bd3818521fde39d718b9ed49241187902632cadf0f953aa530802447fa2d` |
+| **negative: `request_deposit()` at vault age δ − 1 (lock_time = creation 595,238,911 + 599 = 595,239,510)** | 41,495 | 77,580 | 24,199 | 41,495 | 2 | 0.0389 | **REJECTED: "… Unsatisfied lock time: locktime requirement not satisfied -- locktime is greater than the transaction locktime: 595239511 > 595239510"** | `0b3cee648606c2e9622f5cf8d6c6b577cf34cc37755d122cecaa7ff194ecbda4` |
+| **`request_deposit()`, real vault script: D = 12.00 KAS** | **23,195** | **77,580** | 24,199 | 38,790 | 2 | 0.0389 | **accepted** | `952e46398dc7cc4129f846c62e4b19c6754f481b5fcfa16af906e20df05bce88` |
+| **`request_withdraw()`, partial, w = 1,000,000,166 = wmin of 6,000,000,000 shares (remainder 4,999,999,834 ≥ wmin), P2PK Schnorr owner** | **25,286** | **82,864** | 47,849 | 47,849 | 3 | 0.0479 | **accepted** | `d5cea0c1de398fcb49eab623741d9a303f58f0a2385260b019f55ebf22d85ec6` |
+| setup: `buy()` of the jackpot combination [3, 13, 14, 20, 21] + 5 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `ffce1240f4600118d3215155c75945690e89276308487bd5260ec5cc43fb6200` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 294,619 | 867,716 | 426,207 | 433,858 | 19 | 0.4340 | accepted | `2a3056e0ad013858bee6c7c8e3ad020980fde259419c2553ceba3a36902a05e2` |
+| **`draw_test_seed()`, K = 16, a = 0, np = 4, h_J = 1, n2 = 0; conversion D = 12.00 KAS → mint 1,418,999,053 shares, W = 1,000,000,166 → wc = W, out_c = 8.4567 KAS; record at output 7** | **142,557** | **449,268** | 134,410 | 224,634 | 5 | 0.2247 | **accepted** | `fa2980bea369105b22fa3f2418b7c9067e9e36376688aca79952763ade7c0839` |
+| **`settle()`: deposit-convert, s = 12.00 KAS → position of 1,418,999,053 shares; record' kept** | **22,147** | **73,388** | 27,581 | 36,694 | 3 | 0.0368 | **accepted** | `e476a247b41b39a0044a77af1378625f73161c35b087d3696d5d58643a1b27c5` |
+| **`settle()`: withdrawal FINAL, w = 1,000,000,166 shares, payout 10.1467 KAS (pay + R), record drained** | **21,857** | **73,108** | 6,873 | 36,554 | 3 | 0.0367 | **accepted** | `ff94bba0b31da4eef984f9e437ecfd285598afc21db21543406e7c5568763a22` |
+
+Round result: round 1, win [3, 13, 14, 20, 21, 5], D_claim 601,720,854, the same four pools (tier, slice, value) as the first run, plus the record.
+
+Against the first run, every transaction that carries the vault redeem grew by exactly the +10 B: `request_deposit` +10 / +40 (23,195 / 77,580), `request_withdraw` +10 / +40 (25,286 / 82,864), the draw (vault leg) +10 / +40 (142,557 / 449,268). The requests equal the re-measured M6-a / M6-i rows (`request_deposit` 23,195 / 77,580; M6-i 25,286 / 82,864). Settlements, `close()`, the buy and genesis are unchanged (they do not carry the vault redeem). The negative D10 case was rejected by the node as before.
+
+**`claim-m4`, re-run after the Stage 5 RV-1 fix (current; 2026-10-13)** (node `electron-10.kaspa.blue`, DAA ≈ 595,241,800; log: orchestrator scratchpad `claim-m4_rv1.txt`, 0 hits for "PRIVATE"). Re-run because its `draw()` spends the vault (`draw_leg`) and so carries the vault redeem (+10 B). `buy-m1` and `conflict-m6` were not re-run: they submit only genesis and `buy()`, which carry no vault script, and the vault template hash feeds only the position and request templates (`lottery::buy::Templates::compile_sources`), so their shard, ticket, controller and params scripts are byte-identical.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `db4851b9f461b5199e8945ada67fe0db4f280ae377ba2531d31eda15f015b210` |
+| setup: `buy()` of the jackpot combination [10, 13, 15, 17, 28] + 1 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `7c542d4efca73f6e0c5f8e9557c4c44cc2d1f77ac5eddf97ce0fe543ab85754d` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 294,619 | 867,716 | 426,170 | 433,858 | 19 | 0.4340 | accepted | `36d369250fb01ee68edea4e7dd13ec04d48bbd3a31d41a9ca373e85f50d96e92` |
+| setup: `draw_test_seed()`, K = 16, a = 0, np = 4, h_J = 1, n2 = 0, R = 1.69 KAS | **141,996** | **448,904** | 130,516 | 224,452 | 5 | 0.2246 | accepted | `005e5f10336dc832211a1ddc9049e7c9829363ca6eb9fd9d1faf53d3ef4c60a8` |
+| **`claim()` FINAL on the jackpot pool: K = 16, m = 10, h = 1, prize 10.0000 KAS, payout 10.1300 KAS, pool' 1.6900 KAS (R)** | **47,503** | **152,052** | **24,621** | 76,026 | 3 | 0.0761 | **accepted** | `4a01521f648dbdb14dce63945716f7f3e5b9f9664fe638a9bc2d8771825f251b` |
+
+Round result: round 1, win [10, 13, 15, 17, 28, 1], D_claim 601,722,479, the same four pools as the first run. The draw is +10 / +40 against the first run (141,986 / 448,864), exactly the vault redeem's +10 B; genesis, buy, `close()` and the claim have the same compute and transient as before.
+
+Balance after the RV-1 re-runs: 7,333.81 testnet KAS (7,542.77 before them).
 
 Locked on testnet after the re-runs: for `claim-m4` and `vault-m5`, the round 2 objects, drawer', vault', the pools (and in `vault-m5` the new position and position'); for `buy-m1`, both shard successors and both tickets. Payouts, referrals, refunds and changes are ours. Balance after all M6 runs: 7,542.77 testnet KAS (480.11 KAS locked or paid in fees by `conflict-m6` runs 2 and 3, the two `buy-m1` runs, `claim-m4` and `vault-m5`).

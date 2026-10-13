@@ -352,3 +352,105 @@ Nothing committed. `docs/design.md`, `covenants/`, `docs/DECISIONS.md` and `CLAU
    - `merged()` returns the elapsed time;
    - `conflict-m6` is not in `all` (S4-1).
 6. Locked on testnet: conflict-m6 runs 2 and 3 instances (about 96 + 160 KAS), plus the claim-m4 / vault-m5 / buy-m1 objects.
+
+### Orchestrator decision O-M6-1 (2026-10-13, picked under user delegation: "pick the recommended one")
+**D87 is amended: the fee auction is not a mitigation.** Stage 4 measured 0/11 effective replacements on testnet-10 (the attacker's request is in a block 0.46–0.69 s after submission; a node-accepted replacement was still dropped when the original was mined). The node does accept RBF for covenant spends (fact, kept). Request griefing (U-6) is mitigated by cost only: each slot locks ≥ min(MIN_DEPOSIT, W_MIN_VALUE − π) + R ≈ 11.7 KAS until the next settlement and pays the request fee (D85, D86); it is liveness of requests only (no funds at risk). The residual — an attacker who wins the race at every window opening can delay honest requests indefinitely at ≈ 16,800 KAS locked and ≈ 70 KAS/day in fees — is recorded **OPEN on the release gate** (candidate fixes: request batching, a per-round request queue; out of M6 scope). No code change in M6. Builders still submit through the replacement path when the vault outpoint is spent in the mempool (harmless, occasionally useful).
+
+### Stage 5 review (covenant-reviewer on 06c131f vs 8f46436), summary by the orchestrator
+No must-fix. **Should-fix RV-1:** W4b bounds the withdrawal, not the remainder: a partial w = wmin from a position of wmin + 1 leaves a 1-share position, which the whole-position clause later withdraws at R per slot (≈ 2,434 KAS/day for 1,440 slots, the M5 U-6 figure), so D87/O-M6-1's ≈ 11.7 KAS per slot is false for a prepared attacker. Reviewer test `rv_dust_split` (scratchpad `review/rv_m6.rs`): both steps accepted. Proposed fix (tried in scratch, M5/M6 suites pass): `require(w == ps.shares || (w >= wmin && ps.shares - w >= wmin));`. Settlements cannot create sub-wmin positions (a deposit mints ≥ 1 share worth ≈ D, at least D/2).
+Notes: RV-N1 while total_assets + 1 < W_MIN_VALUE (q = 0, e.g. genesis at V0_MIN = 1 KAS) W4b gives no protection (wmin = 1): document in D86/D87. RV-N2: D87 should say the value bound holds at request time (testnet: a wmin withdrawal converted to 8.46 KAS). RV-N3: design.md:365 still says SHARE_UNIT = 1,000 and U-5 open → DECISIONS proposal at recording.
+Checked sound (with negative controls): W4b arithmetic (400-point engine sweep vs game::w_min, 0 mismatches; W4b removed → 64/64 expected rejects accepted), S2-1 retargets genuine, constants consistent, C1 bound, D84 numbers, smallest genesis runs a full round, 11 template hashes unchanged by crate code, U-M6-1 (`>` per refs), M6-a/M6-b spot checks, D89, D92 conservation, request griefing liveness-only (draw_leg has no age check; settlements never spend the vault).
+
+### Orchestrator decision O-M6-2 (picked under user delegation): apply RV-1's fix
+W4b becomes `w == ps.shares || (w >= wmin && ps.shares - w >= wmin)` (the remainder of a partial withdrawal is also ≥ wmin). No lock-in: a whole withdrawal is always allowed. RV-N1/N2/N3 are documentation (Stage 6).
+
+### Stage 5 fix (RV-1, 2026-10-13): W4b remainder rule (O-M6-2)
+
+Nothing committed. `docs/design.md`, `docs/DECISIONS.md` and `CLAUDE.md` untouched. No D90 stop: the vault compiles, no stack-limit error, every M6-a shape still within 90 %. **Re-review range: the uncommitted working-tree changes vs `06c131f`** in the files listed below (the `docs/figures/**` changes and the earlier sections of this handoff in the working tree are not part of this fix).
+
+**Script (`covenants/vault.sil`, `request_withdraw`, check W4b).** The one-line `require(w >= wmin || w == ps.shares); // mut:M6W4b_min` became:
+```
+if (w != ps.shares) {
+    require(w >= wmin); // mut:M6W4b_min
+    // 1 <= w <= ps.shares (W4), so 0 <= ps.shares - w < ps.shares <= SHARES_MAX.
+    require(ps.shares - w >= wmin); // mut:M6W4b_rest
+}
+```
+This equals `w == ps.shares || (w >= wmin && ps.shares - w >= wmin)` (O-M6-2). The marker is now `// ==== check W4b: the whole position, or w >= wmin and a remainder >= wmin (M6, D86)` (label still `W4b`, outside any if body; ATTRIB truncation unchanged). The comment block states the value bound, the remainder rule, RV-1 / O-M6-2, "no lock-in" and the mirror `game::w4b_ok`; the `||` / OpBoolOr citation was removed (no `||` left). Header label paragraph updated. No underflow: W4 (before W4b) gives 1 <= w <= ps.shares; even without W4, w <= S - pend_wsh <= SHARES_MAX keeps `ps.shares - w` far from overflow.
+
+**Files changed (this fix)**
+- `covenants/vault.sil` (above). Vault redeem 3,422 -> **3,432 B** (+10).
+- `crates/lottery/src/game.rs`: new `pub fn w4b_ok(total_assets, total_shares, shares, w) -> bool` (the full W4b decision; `w_min` unchanged); unit test `rv1_w4b_ok_remainder_rule`.
+- `crates/lottery/src/vault.rs`: `WithdrawCase::policy_ok()` = `game::w4b_ok`; the `checked()` error names "D86, RV-1, vault W4b" and the remainder; module doc; unit test `withdraw_policy_mirrors_w4b` extended (dust split refused, remainder exactly wmin ok, wmin - 1 refused, q = 0 partial leaving 1 share ok).
+- `crates/lottery/tests/common/m5_spec.rs` `withdraw()`: `check(w == ps.shares || (w >= wmin && ps.shares - w >= wmin), "vault:W4b")`, plus the header line.
+- `crates/lottery/tests/common/m6.rs`: bases `wd_whole_wmin_plus_1`, `wd_rest_at_wmin` (2 wmin, w = wmin), `wd_rest_at_wmin_large` (5 x 10^10, w = shares - wmin); `la7()` (LA7a/b/c, expected `vault:W4b`), added to `all_atks6`; module doc.
+- `crates/lottery/tests/m6_attacks.rs`: `la7_partial_withdrawal_remainder_below_wmin` (run5(la7)) and `la7_dust_split_two_steps` (the reviewer's `rv_dust_split`: step 1 must be rejected by input 0, not by an arithmetic error; step 2, the whole withdrawal of a 1-share position, is still accepted: no lock-in); header.
+- `crates/lottery/tests/m6_limits.rs`: LP3 gains 5 RV-1 positives (remainder exactly wmin with w = wmin and w = shares - wmin; whole positions of wmin + 1 and 5 x 10^10 shares; q = 0 partial leaving 1 share), mirror assert via `w4b_ok`. LP4's grid gains the remainder dimension (sizes {5 x 10^10, wmin - 1, wmin + 1, 2 wmin - 1, 2 wmin}, w in {wmin - 1, wmin, shares - wmin, shares - wmin + 1, shares}, clamped and deduplicated; 206 points; asserts that at least one point is rejected by the remainder rule alone); expectation via `w4b_ok`.
+- `crates/lottery/tests/m6_mutants.rs`: see "Mutants"; pin (2 tags, 2 lines).
+- `crates/lottery/tests/m5_mutants.rs`: `w4_shares` -> `w4_shares_redundant` plus an EQUIVALENT entry (S5-1).
+- `docs/costs.md` M6 rows: vault redeem, the four request rows and M6-i, both M6-a draw rows, the M6-b K = 16..19 draw estimates, the M6-d draw rows, the M6-h draw fee rows, the M6-i text, the M6-j slopes table and budget text, the "Against M5" deltas, "Only the vault changed size".
+- `docs/tn10-mass-check.md`: the first M6 `vault-m5` run and `claim-m4`'s draw marked SUPERSEDED; new sections for both RV-1 re-runs.
+
+**Failing first** (scripts as at 06c131f, Rust mirrors already updated): `cargo test -p lottery --release -j 2 --no-fail-fast --test m6_attacks --test m6_limits -- --test-threads=1`:
+- `la7_partial_withdrawal_remainder_below_wmin ... FAILED`: "ATTACK ACCEPTED (LA7a request_withdraw w = wmin from a position of wmin + 1 (remainder 1 < wmin)) by input 0";
+- `la7_dust_split_two_steps ... FAILED`: "ATTACK ACCEPTED (rv_dust_split step 1: w = wmin = 1000000000 from wmin + 1 shares leaves a 1-share position') by input 0";
+- `lp4_w_min_matches_the_script ... FAILED`: "LP4: 206 grid points, 15 rejected by the remainder rule alone, 15 mismatches", all "expected rejected, the vault accepts" (e.g. A = S = 10^15, shares 1,000,000,001, w = 10^9; also at A = ASSETS_MAX and S = SHARES_MAX);
+- everything else in both files passed (LP3's new positives are accepted shapes, so they pass on the old script too).
+
+**Mutants (one tag per line)**
+- `M6W4b_min` (`require(w >= wmin)`): `m6w4b_min` killed by LA2 "w = wmin - 1 (q >= 1)" (unchanged).
+- `M6W4b_rest` (new): killed by LA7a, LA7b and LA7c (`m6w4b_rest_dust_split`, `m6w4b_rest_small_w`, `m6w4b_rest_large_w`).
+- LA2 "w = shares - 1 < wmin (whole position below wmin)" leaves a 1-share remainder, so each line alone rejects it. `m6w4b_min_whole_small` is now killed with BOTH tags removed, plus a `redundant6!` test for each tag alone (`..._min_only`, `..._rest_only`; both print "still rejected at input 0 by VerifyError").
+- `m5w4_shares_with_m6w4b_rest`: M5's "VA6 request_withdraw w = shares + 1" is killed with `M5W4_shares` and `M6W4b_rest` removed together.
+- `every_m6_tag_is_tested`: `M6 tags: {"vault:M6W4b_min", "vault:M6W4b_rest"}, tagged lines: 2`; pin (2, 2).
+
+**Decisions**
+- S5-1: W4b's remainder rule implies W4's `w <= ps.shares` (a partial needs ps.shares - w >= wmin >= 0, and `w_min` >= 0 on the W1 ranges). So `m5_mutants::w4_shares` (killed in M5 and Stage 2 by "VA6 w = shares + 1") was no longer killed. The full suite before this decision had m5_mutants 260/261: "mutant ["vault:M5W4_shares"]: input 0 still rejects `VA6 request_withdraw w = shares + 1`: VerifyError". It is reclassified as `redundant!(w4_shares_redundant, ..)`, which asserts that the mutant still rejects by a `require` (not an arithmetic error) and accepts the base, with an EQUIVALENT entry giving the proof. The pair kill (`m5w4_shares_with_m6w4b_rest`) shows the two lines together still guard it. The W4 line stays in the script: it keeps W4b's subtraction non-negative and keeps W4 first in attribution (ATTRIB for VA6 w = shares + 1 is still `vault:W4`). m5_mutants stays at 261 tests. Reviewer: confirm this reclassification (a Correction for Stage 6).
+- S5-2: each LA7 attack makes one change from a valid base. LA7a: whole position of wmin + 1 -> w = wmin. LA7b: 2 wmin, w = wmin -> wmin + 1. LA7c: fixture 5 x 10^10, w = shares - wmin -> + 1. LA7a is exactly the reviewer's step 1.
+- S5-3: the Rust mirror is a new `game::w4b_ok`. The PREFLIGHT model (`m5_spec`) restates the rule inline, not via `w4b_ok`, so it stays an independent statement of A4.
+- S5-4: `claim-m4` was re-run as well as `vault-m5`, because its `draw()` spends the vault (`draw_leg`) and so carries the vault redeem. `buy-m1` and `conflict-m6` were not re-run: genesis and `buy()` carry no vault script, and the vault hash feeds only the position and request templates (`Templates::compile_sources`), so the shard, ticket, controller and params scripts are byte-identical.
+- Spec text to correct at Stage 6 (not edited here): A4's W4b block and the D86 wording (remainder rule, two tags); A8 LA7 and the LP3/LP4 additions; "Mutants" (two tags; S5-1); RV-N1/N2/N3 from the review.
+
+**Commands (from `crates/`) and results**
+- `cargo test --workspace --release -j 2 --no-fail-fast` (final, after every edit): **exit 0**, 0 failed. harness 0/3/3/5/2/6; lottery lib **36** (+ `rv1_w4b_ok_remainder_rule`); m1 25/14/4/11; m2 40/8/2/5/25/17; m3 22/24/13/7/94; m4 21/25/4/8/211 (+1 ignored); m5_attacks 21, m5_game 10, m5_measure 5, m5_mutants 261, m5_vault 15; m6_attacks **8**, m6_conflict 3, m6_limits 8, m6_measure 10, m6_mutants **9**; tn10 0. Only the two pre-existing `m0_mass.rs:459` warnings. Log: scratchpad `full_rv1_final.txt`. An earlier run, `full_rv1.txt`, had only the S5-1 failure.
+- `M5_ATTRIB=1 cargo test -p lottery --release -j 2 --test m5_attacks --test m6_attacks -- --nocapture --test-threads=1`: 21 + 8 passed; **347 ATTRIB lines (344 + 3 LA7), 0 not OK**. LA7a/b/c: `expected vault:W4b | got vault:W4b | model Some(Err("vault:W4b")) | OK`. LA2 (3) and LA3 are still `vault:W4b` OK; VA6 w = shares + 1 is still `vault:W4` OK. Log `attrib_rv1.txt`.
+- `M5_PREFLIGHT=1 cargo test -p lottery --release -j 2 --test m5_attacks --test m5_vault --test m6_attacks -- --nocapture --test-threads=1`: 21 + 15 + 8 passed; **347 PREFLIGHT lines, 0 not OK** (no model/script disagreement). Log `preflight_rv1.txt`.
+- `cargo test -p lottery --release -j 2 --test m6_mutants --test m5_mutants`: 9 + 261 passed.
+- `cargo build -p tn10 --release -j 2`: ok.
+- `cargo test -p lottery --release -j 2 --test m6_measure -- --nocapture --test-threads=1`: 10 passed; log `m6_measure_rv1.txt`.
+
+**New masses** (diff against `m6_measure.txt`; nothing else changed)
+- Vault redeem 3,432 B (suffix 3,276).
+- `request_deposit`: 178,170 units, 18,901 B sigscript; 23,195 / 77,580 / 24,886.
+- `request_withdraw` whole: 187,456 / 18,876, position leg 26,756; 24,730 / 82,520.
+- `request_withdraw` partial: Schnorr 199,819 units, 25,287 / 82,868 / 48,554; ECDSA 199,756 units; P2SH 199,685 units, 25,322 / 83,008.
+- **M6-i**, partial at w = wmin: 199,805 units, 18,875 B; 25,286 / 82,864 / 48,554 (5.1 / 8.3 / 9.7 %).
+- Draw worst: 208,671 / 531,604 / 71,009 (vault leg 463,933; priority 265,802, 0.26580 KAS). Typical: 141,239 / 448,556 (0.22428 KAS; C_draw covers it from S = 44.86 KAS).
+- M6-b draw estimates: +40 transient each (545,648 / 559,664 / 573,680 at K = 17 / 18 / 19; percentages unchanged).
+- M6-j drawer byte budget to 90 %: transient **91,950 B** (was 91,960), compute 122,154 B; slopes unchanged.
+- Every percentage column is unchanged except `request_withdraw` whole transient, 8.2 -> 8.3 %. The tightest margins are unchanged (close K = 16: 86.8 % transient, 89.9 % storage). The D83 row in DECISIONS (Stage 6) should use 91,950 B.
+
+**Testnet-10** (from `crates/`, `--release`; logs `vault-m5_rv1.txt`, `claim-m4_rv1.txt`; "PRIVATE" grep: 0 hits in both; no retries needed)
+- `probe vault-m5` (node vector-10.kaspa.green): all accepted; the negative D10 case was REJECTED ("595239511 > 595239510").
+  - genesis `7722bd3818521fde39d718b9ed49241187902632cadf0f953aa530802447fa2d`;
+  - request_deposit 23,195 / 77,580 `952e46398dc7cc4129f846c62e4b19c6754f481b5fcfa16af906e20df05bce88`;
+  - request_withdraw w = wmin = 1,000,000,166 of 6,000,000,000 shares (remainder 4,999,999,834 >= wmin; passes `checked()`) 25,286 / 82,864 `d5cea0c1de398fcb49eab623741d9a303f58f0a2385260b019f55ebf22d85ec6`;
+  - draw 142,557 / 449,268 `fa2980bea369105b22fa3f2418b7c9067e9e36376688aca79952763ade7c0839` (mint 1,418,999,053, wc = W, out_c 8.4567 KAS);
+  - settle deposit-convert `e476a247b41b39a0044a77af1378625f73161c35b087d3696d5d58643a1b27c5`; withdrawal FINAL `ff94bba0b31da4eef984f9e437ecfd285598afc21db21543406e7c5568763a22`.
+
+  The requests equal the new M6-a / M6-i rows; the draw is +10 / +40 against the first run.
+- `probe claim-m4` (node electron-10.kaspa.blue): all accepted.
+  - genesis `db4851b9f461b5199e8945ada67fe0db4f280ae377ba2531d31eda15f015b210`;
+  - buy `7c542d4efca73f6e0c5f8e9557c4c44cc2d1f77ac5eddf97ce0fe543ab85754d`;
+  - close `36d369250fb01ee68edea4e7dd13ec04d48bbd3a31d41a9ca373e85f50d96e92`;
+  - draw 141,996 / 448,904 (+10 / +40) `005e5f10336dc832211a1ddc9049e7c9829363ca6eb9fd9d1faf53d3ef4c60a8`;
+  - claim FINAL 47,503 / 152,052 `4a01521f648dbdb14dce63945716f7f3e5b9f9664fe638a9bc2d8771825f251b`.
+- Balance 7,542.77 -> 7,333.81 testnet KAS. The probes also wrote the git-ignored `crates/tn10/results-vault-m5.md` and `results-claim-m4.md`.
+
+**Open items for the re-review and Stage 6**
+1. Reviewer: the new W4b block, S5-1 (M5W4_shares is now redundant/equivalent), the LA7 bases, the LP4 remainder dimension.
+2. Stage 6:
+   - DECISIONS rows for O-M6-2 / RV-1 and S5-1 … S5-4;
+   - D86/D87 text: the remainder rule, so the per-slot cost now holds for prepared positions too; the RV-N1 q = 0 caveat; RV-N2, the request-time price;
+   - the spec Corrections listed above;
+   - the D83 byte budget, 91,950 B.

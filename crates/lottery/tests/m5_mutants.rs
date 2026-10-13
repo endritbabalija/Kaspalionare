@@ -68,6 +68,10 @@ const EQUIVALENT: &[(&str, &str)] = &[
         "v0 = OpTxInputAmount(0) >= 0 always: the opcode converts the u64 amount to i64 and fails with NumberTooBig above i64::MAX (rusty-kaspa v2.1.0 crypto/txscript/src/opcodes/mod.rs:1100-1107); run: s1_value_0_redundant",
     ),
     (
+        "vault:M5W4_shares",
+        "w <= ps.shares whenever W4b passes (M6 Stage 5 RV-1, O-M6-2): w = ps.shares, or ps.shares - w >= wmin >= 0 (game::w_min >= 0 on the W1 ranges); run: w4_shares_redundant",
+    ),
+    (
         "drawer:M5C2_slack",
         "L' <= V' + D_c whenever check 17 passes: L' = x2 + G2' (m - 1) passes Cv = muldiv(V', cap) with cap <= 10^4, so L' <= V' for V' >= 0, and V' < 0 fails D14_nonneg first. The only states that reach it (V' < 0, nothing pending) are killed with D14_nonneg and M5C2_fits removed together (m3_mutants.rs d14_nonneg_nothing_pending, M5 Stage 4 S4-6; with D > 0, D14_nonneg alone guards C1: m3_mutants.rs d14_nonneg, Stage 7 F1); run: c2_slack_redundant",
     ),
@@ -195,7 +199,11 @@ killed!(w3_value, ["vault:M5W3_value"], "VA10 the position's value R + 1");
 fn w4_min() {
     killed_atk(&["vault:M5W4_min"], &common::m6::atk6("VA6 request_withdraw w = 0 at wmin = 0 (M6 rebase)"));
 }
-killed!(w4_shares, ["vault:M5W4_shares"], "VA6 request_withdraw w = shares + 1");
+// M6 Stage 5 RV-1 (O-M6-2, decision S5-1): W4b's remainder rule implies W4's w <= shares
+// (a partial needs shares - w >= wmin >= 0; a whole withdrawal has w = shares), so no
+// transaction tells this line apart any more (EQUIVALENT). It was killed by this attack in
+// M5 and M6 Stage 2; it stays in the script (W4 keeps W4b's subtraction non-negative).
+redundant!(w4_shares_redundant, ["vault:M5W4_shares"], "VA6 request_withdraw w = shares + 1");
 killed!(w4_total, ["vault:M5W4_total"], "VA6 request_withdraw pend_wsh + w > total_shares");
 killed!(w5_idx_0, ["vault:M5W5_idx#0"], "VA10 owner_idx = 0 with a P2SH owner whose script hash is the vault's (fabricated)");
 // owner_idx < inputs: OpTxInputSpk fails on an index past the inputs.

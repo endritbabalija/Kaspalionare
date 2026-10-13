@@ -25,7 +25,7 @@ use harness::covenant_path;
 use lottery::buy::{FUNDING_SK, Final, KAS, OwnerKey, funding_spk};
 use lottery::combo::Combo;
 use lottery::draw::{DrawCase, RoundResult};
-use lottery::game::{ASSETS_MAX, MIN_DEPOSIT, SHARES_MAX, SettleMode, VA, VS, W_MIN_VALUE, w_min};
+use lottery::game::{ASSETS_MAX, MIN_DEPOSIT, SHARES_MAX, SettleMode, VA, VS, W_MIN_VALUE, w_min, w4b_ok};
 use lottery::genesis::{D_FLOOR, GENESIS_FUNDING, GenesisCase, V0_MIN, covenant_id};
 use lottery::ledger::Ledger;
 use lottery::params::xonly;
@@ -140,7 +140,10 @@ fn lp2_min_deposit_converts() {
 /// output: a partial w = wmin (q >= 1, three owner key kinds); a whole position whose
 /// shares are below wmin; at q = 0 (total_assets + VA < W_MIN_VALUE) a partial w = 1; at
 /// q = 1 exactly (total_assets + VA = W_MIN_VALUE: wmin = S + VS > S, so no partial fits
-/// W4) the whole position. LA2 is the rejecting half.
+/// W4) the whole position. Stage 5 RV-1 (O-M6-2, the remainder rule): a partial whose
+/// remainder is exactly wmin (w = wmin and w = shares - wmin); whole positions of wmin + 1
+/// and 5 x 10^10 shares; at q = 0 (wmin = 1) a partial leaving 1 share. LA2 and LA7 are the
+/// rejecting half.
 #[test]
 fn lp3_withdrawal_minimum_edges() {
     for (name, k) in keys() {
@@ -150,11 +153,22 @@ fn lp3_withdrawal_minimum_edges() {
         check_withdraw(&c, &f);
         assert!(c.expected().partial);
     }
-    let cases = [("whole position below wmin", wd_whole_small(owner()), false), ("q = 0: partial w = 1", wd_q0_one(owner()), true), ("q = 1: the whole position", wd_q1_whole(owner()), false)];
+    // Stage 5 RV-1 (O-M6-2): the remainder rule's accepted edges. LA7 is the rejecting half.
+    let mut q0_rest_1 = wd_q0_one(owner());
+    q0_rest_1.w = q0_rest_1.position.shares - 1;
+    let cases = [
+        ("whole position below wmin", wd_whole_small(owner()), false),
+        ("q = 0: partial w = 1", wd_q0_one(owner()), true),
+        ("q = 1: the whole position", wd_q1_whole(owner()), false),
+        ("RV-1: partial w = wmin, remainder exactly wmin", wd_rest_at_wmin(owner()), true),
+        ("RV-1: partial w = shares - wmin, remainder exactly wmin", wd_rest_at_wmin_large(owner()), true),
+        ("RV-1: whole position of wmin + 1 shares", wd_whole_wmin_plus_1(owner()), false),
+        ("RV-1: whole fixture position (5 x 10^10 shares)", wd_whole(owner()), false),
+        ("RV-1: q = 0 (wmin = 1): partial leaving 1 share", q0_rest_1, true),
+    ];
     for (name, c, partial) in cases {
         assert_eq!(c.expected().partial, partial, "{name}");
-        let wm = w_min(c.vault.total_assets, c.vault.total_shares);
-        assert!(c.w >= wm || c.w == c.position.shares, "{name}: the Rust mirror accepts");
+        assert!(w4b_ok(c.vault.total_assets, c.vault.total_shares, c.position.shares, c.w), "{name}: the Rust mirror accepts");
         let f = accept5(&format!("request_withdraw ({name})"), &c.clone().into(), &c.build());
         check_withdraw(&c, &f);
     }
@@ -164,26 +178,39 @@ fn lp3_withdrawal_minimum_edges() {
 
 /// LP4 (script half; the Rust half and the value bound are `game::tests::lp4_*`):
 /// `request_withdraw` on fabricated vaults over A in {0, W_V - 2, W_V - 1, 10^15,
-/// ASSETS_MAX}, S in {0, 10^15, SHARES_MAX}, two position sizes and w in {wmin - 1, wmin,
-/// shares}: the script accepts exactly when 1 <= w <= shares, w <= S - pend_wsh (W4) and
-/// (w >= `game::w_min(A, S)` or w = shares) (W4b), and never rejects by an engine
-/// arithmetic error.
+/// ASSETS_MAX}, S in {0, 10^15, SHARES_MAX}, position sizes {5 x 10^10, wmin - 1, wmin + 1,
+/// 2 wmin - 1, 2 wmin} (clamped to [1, SHARES_MAX]) and w in {wmin - 1, wmin, shares - wmin,
+/// shares - wmin + 1, shares} (the remainder dimension, Stage 5 RV-1): the script accepts
+/// exactly when 1 <= w <= shares, w <= S - pend_wsh (W4) and `game::w4b_ok` (W4b: w =
+/// shares, or w >= wmin and shares - w >= wmin), and never rejects by an engine arithmetic
+/// error.
 #[test]
 fn lp4_w_min_matches_the_script() {
     let mut mismatches = vec![];
-    let mut n = 0;
+    let (mut n, mut rest_only) = (0, 0);
     for a in [0, W_MIN_VALUE - VA - 1, W_MIN_VALUE - VA, 10_000_000 * KAS as i64, ASSETS_MAX] {
         for s in [0, 10_000_000 * KAS as i64, SHARES_MAX] {
             let wm = w_min(a, s);
-            for shares in [50_000_000_000, (wm - 1).clamp(1, SHARES_MAX)] {
-                for w in [wm - 1, wm, shares] {
+            let mut sizes: Vec<i64> = [50_000_000_000, wm.saturating_sub(1), wm.saturating_add(1), wm.saturating_mul(2).saturating_sub(1), wm.saturating_mul(2)].iter().map(|x| (*x).clamp(1, SHARES_MAX)).collect();
+            sizes.sort();
+            sizes.dedup();
+            for shares in sizes {
+                let mut ws = vec![wm - 1, wm, shares - wm, shares - wm + 1, shares];
+                ws.sort();
+                ws.dedup();
+                for w in ws {
                     let mut c = wd(owner());
                     c.vault.total_assets = a;
                     c.vault.total_shares = s;
                     c.vault.liability = 0;
                     c.position.shares = shares;
                     c.w = w;
-                    let expect = w >= 1 && w <= shares && w <= s - c.vault.pend_wsh && (w >= wm || w == shares);
+                    let w4 = w >= 1 && w <= shares && w <= s - c.vault.pend_wsh;
+                    let expect = w4 && w4b_ok(a, s, shares, w);
+                    // Rejected by the remainder rule alone (RV-1): passes W4 and w >= wmin.
+                    if w4 && w != shares && w >= wm && shares - w < wm {
+                        rest_only += 1;
+                    }
                     let f = c.build().finish();
                     let r = f.run_input(VLT0);
                     let v = verdict(&r);
@@ -203,7 +230,9 @@ fn lp4_w_min_matches_the_script() {
     for m in &mismatches {
         println!("LP4 MISMATCH {m}");
     }
-    assert!(mismatches.is_empty(), "LP4: {} of {n} grid points differ from game::w_min; first: {}", mismatches.len(), mismatches[0]);
+    println!("LP4: {n} grid points, {rest_only} rejected by the remainder rule alone, {} mismatches", mismatches.len());
+    assert!(rest_only > 0, "LP4: no grid point exercises the remainder rule alone");
+    assert!(mismatches.is_empty(), "LP4: {} of {n} grid points differ from game::w4b_ok; first: {}", mismatches.len(), mismatches[0]);
 }
 
 // ---------------------------------------------------------------- LP5

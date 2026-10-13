@@ -11,7 +11,8 @@
 //! - vault.sil `request_deposit` D1..D9 (spec A4.1 checks 1-9), then D10 (the vault age,
 //!   M5 Stage 7, user decision U-4: tx.daa >= OpTxInputDaaScore(0) + VAULT_REQ_DELAY);
 //! - vault.sil `request_withdraw` W1..W11 (A4.2 checks 1-11), then W12 (the vault age, U-4);
-//!   spec M6 (D86) adds W4b (the withdrawal minimum) between W4 and W5;
+//!   spec M6 (D86) adds W4b (the withdrawal minimum, with the remainder rule of Stage 5
+//!   RV-1) between W4 and W5;
 //! - position.sil `vault_leg` PO1..PO4; record.sil `request_leg` RL1..RL4;
 //! - request.sil `settle` S1..S13 (A6.1 checks 1-13);
 //! - position.sil, request.sil, record.sil `refresh` A7.1..A7.7 (M4 A6 checks 1-7, D76);
@@ -383,8 +384,10 @@ fn withdraw(tx: &Tx, i: usize) -> Verdict {
     check(position_ranges(prole, &ps) && tx.in_value(1) == Some(r), &l(3))?;
     // W4
     check(w >= 1 && w <= ps.shares && w <= vt.total_shares - vt.pend_wsh, &l(4))?;
-    // W4b (spec M6 A4, D86): w >= wmin of the own state, or the whole position.
-    check(w >= lottery::game::w_min(vt.total_assets, vt.total_shares) || w == ps.shares, "vault:W4b")?;
+    // W4b (spec M6 A4, D86; remainder rule Stage 5 RV-1, O-M6-2): the whole position, or
+    // w >= wmin of the own state and the remainder shares - w >= wmin.
+    let wmin = lottery::game::w_min(vt.total_assets, vt.total_shares);
+    check(w == ps.shares || (w >= wmin && ps.shares - w >= wmin), "vault:W4b")?;
     // W5: the owner input (D67).
     check(owner_idx >= 2 && (owner_idx as usize) < tx.n_in() && *tx.in_spk(owner_idx as usize) == payout_spk(ps.owner_class, &ps.owner_key), &l(5))?;
     // W6

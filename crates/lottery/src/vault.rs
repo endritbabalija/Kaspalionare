@@ -33,10 +33,11 @@
 //! request age: a request's lock_time must be >= the vault's creation DAA + VAULT_REQ_DELAY
 //! (`DepositCase::at_age` / `WithdrawCase::at_age`; `new_with` sets exactly that).
 //!
-//! Withdrawal minimum (spec M6 A7, D86): a partial withdrawal needs w >= `game::w_min` of
-//! the vault state (the script's check W4b). `build_with` does not refuse a smaller w, so
-//! the tests can still force one; a real caller uses `WithdrawCase::checked()` (or
-//! `policy_ok()`) before building.
+//! Withdrawal minimum (spec M6 A7, D86; remainder rule Stage 5 RV-1, O-M6-2): a partial
+//! withdrawal needs w >= `game::w_min` of the vault state and leaves a position of at least
+//! that many shares (the script's check W4b, `game::w4b_ok`); a whole withdrawal always
+//! passes. `build_with` does not refuse other shapes, so the tests can still force one; a
+//! real caller uses `WithdrawCase::checked()` (or `policy_ok()`) before building.
 
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, OwnerKey, Templates, b
 use crate::claim::payout_spk;
 use crate::close::FundingIn;
 use crate::game::{
-    MIN_DEPOSIT, P_MIN, SHARE_UNIT, SettleMode, TOTAL_MAX, VA, VAULT_REQ_DELAY, VS, convert, mulfrac, w_min,
+    MIN_DEPOSIT, P_MIN, SHARE_UNIT, SettleMode, TOTAL_MAX, VA, VAULT_REQ_DELAY, VS, convert, mulfrac, w_min, w4b_ok,
 };
 use crate::params::TEST_RESERVE;
 use crate::state::{KIND_DEPOSIT, KIND_WITHDRAW, Payout, PositionState, RecordState, RequestState, VaultState};
@@ -369,23 +370,25 @@ impl WithdrawCase {
         w_min(self.vault.total_assets, self.vault.total_shares)
     }
 
-    /// Builder policy (spec M6 A7, D86, the mirror of W4b): w >= `w_min` or w is the whole
-    /// position. It does not check the other W4 bounds.
+    /// Builder policy (spec M6 A7, D86, the mirror of W4b, `game::w4b_ok`): w is the whole
+    /// position, or w >= `w_min` and the remainder shares - w >= `w_min` (Stage 5 RV-1,
+    /// O-M6-2). It does not check the other W4 bounds.
     pub fn policy_ok(&self) -> bool {
-        self.w >= self.w_min() || self.w == self.position.shares
+        w4b_ok(self.vault.total_assets, self.vault.total_shares, self.position.shares, self.w)
     }
 
-    /// `self` if `policy_ok()`, else an error naming D86 (a partial withdrawal below wmin,
-    /// which the vault rejects at W4b).
+    /// `self` if `policy_ok()`, else an error naming D86 (a partial withdrawal below wmin, or
+    /// one leaving fewer than wmin shares, which the vault rejects at W4b).
     pub fn checked(self) -> Result<Self, String> {
         if self.policy_ok() {
             Ok(self)
         } else {
             Err(format!(
-                "partial withdrawal w = {} < wmin = {} of a {}-share position (D86, vault W4b)",
+                "partial withdrawal w = {} of a {}-share position: w and the remainder {} must both be >= wmin = {} (D86, RV-1, vault W4b)",
                 self.w,
-                self.w_min(),
-                self.position.shares
+                self.position.shares,
+                self.position.shares - self.w,
+                self.w_min()
             ))
         }
     }
@@ -855,5 +858,19 @@ mod tests {
         assert_eq!(poor.w_min(), 1);
         poor.w = 1;
         assert!(poor.policy_ok());
+        poor.w = poor.position.shares - 1;
+        assert!(poor.policy_ok(), "q = 0: a partial leaving 1 share");
+        // Stage 5 RV-1: the remainder must be >= wmin too.
+        let mut split = base.clone();
+        split.position.shares = wm + 1;
+        split.w = wm;
+        assert!(!split.policy_ok(), "w = wmin from wmin + 1 leaves 1 share");
+        let e = split.clone().checked().err().expect("dust split refused");
+        assert!(e.contains("D86") && e.contains("RV-1") && e.contains("W4b"), "{e}");
+        assert!(split.clone().whole().policy_ok());
+        split.position.shares = 2 * wm;
+        assert!(split.policy_ok(), "remainder exactly wmin");
+        split.w = wm + 1;
+        assert!(!split.policy_ok(), "remainder wmin - 1");
     }
 }

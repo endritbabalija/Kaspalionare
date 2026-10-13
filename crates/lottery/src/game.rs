@@ -776,6 +776,17 @@ pub fn w_min(total_assets: i64, total_shares: i64) -> i64 {
     }
 }
 
+/// The full W4b decision (M6 D86, amended by Stage 5 RV-1 / O-M6-2), the exact mirror of
+/// the script: a whole withdrawal (w = shares) always passes; a partial one needs
+/// w >= wmin and a remainder shares - w >= wmin, with wmin = `w_min(total_assets,
+/// total_shares)`. Without the remainder rule a position of wmin + 1 shares splits into
+/// w = wmin and a 1-share position, whose whole withdrawal later takes a request slot for
+/// about R. W4's other bounds (1 <= w <= shares, w <= S - pend_wsh) are not checked here.
+pub fn w4b_ok(total_assets: i64, total_shares: i64, shares: i64, w: i64) -> bool {
+    let wm = w_min(total_assets, total_shares);
+    w == shares || (w >= wm && shares - w >= wm)
+}
+
 /// mulfrac(a, r, c) = floor(a x r / c) (D73, spec M5 A8) for 0 <= a <= 2^62 and
 /// 0 <= r < c <= 2^62, through u128; `None` outside that domain (the script's
 /// preconditions). The result is <= a.
@@ -1386,5 +1397,29 @@ mod tests {
             n += 1;
         }
         assert!(tight > 0, "the bound is never tight two shares below wmin");
+    }
+
+    /// Stage 5 RV-1 (O-M6-2): `w4b_ok` = whole, or w >= wmin with a remainder >= wmin.
+    #[test]
+    fn rv1_w4b_ok_remainder_rule() {
+        let (a, s) = (10_000_000 * KAS, 10_000_000 * KAS);
+        let wm = w_min(a, s);
+        assert_eq!(wm, 1_000_000_000);
+        // The reviewer's dust split: w = wmin from wmin + 1 leaves 1 share.
+        assert!(!w4b_ok(a, s, wm + 1, wm));
+        assert!(w4b_ok(a, s, wm + 1, wm + 1), "whole");
+        assert!(w4b_ok(a, s, 1, 1), "a whole 1-share position");
+        // Remainder exactly wmin passes, wmin - 1 does not (small and large w).
+        assert!(w4b_ok(a, s, 2 * wm, wm));
+        assert!(!w4b_ok(a, s, 2 * wm, wm + 1));
+        assert!(w4b_ok(a, s, 50 * wm, 49 * wm));
+        assert!(!w4b_ok(a, s, 50 * wm, 49 * wm + 1));
+        // Below wmin is still refused even with a large remainder.
+        assert!(!w4b_ok(a, s, 50 * wm, wm - 1));
+        // q = 0: wmin = 1, a partial leaving 1 share passes.
+        assert_eq!(w_min(W_MIN_VALUE - 2, s), 1);
+        assert!(w4b_ok(W_MIN_VALUE - 2, s, 10, 9));
+        // wmin = 0 (q > S + VS): every w passes W4b (W4's w >= 1 is the floor).
+        assert!(w4b_ok(ASSETS_MAX, 0, 10, 10 - 1));
     }
 }

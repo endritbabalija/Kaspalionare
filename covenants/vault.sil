@@ -22,7 +22,8 @@ pragma silverscript ^0.1.0;
 //
 // Each check of a request entry starts at a "// ==== check <label>" line (labels D1..D9,
 // W1..W11, handoff S2-6, then the Stage 7 age checks D10 and W12, then the M6 withdrawal
-// minimum W4b between W4 and W5, spec M6 A4, D86), in spec order, outside any if/for body.
+// minimum W4b between W4 and W5, spec M6 A4, D86, with the remainder rule of the Stage 5
+// review RV-1 / O-M6-2), in spec order, outside any if/for body.
 // `// mut:M5<ID>` and `// mut:M6<ID>` tags mark the requires the mutation tests remove one
 // at a time (handoff S2-8).
 contract Vault(
@@ -312,12 +313,15 @@ contract Vault(
         require(w <= ps.shares); // mut:M5W4_shares
         require(w <= total_shares - pend_wsh); // mut:M5W4_total
 
-        // ==== check W4b: w >= wmin or the whole position (M6, D86)
+        // ==== check W4b: the whole position, or w >= wmin and a remainder >= wmin (M6, D86)
         // q = (A + VA) / W_MIN_VALUE, wmin = (S + VS) / q if q >= 1, else 1 (own state, no
-        // argument; = game::w_min). At the request-time price pi = (A + 1) / (S + VS), any
-        // w >= wmin is worth w x pi >= W_MIN_VALUE - pi (spec M6 A4). `||` evaluates both
-        // operands (OpBoolOr, no short-circuit: SilverScript v1.0.0 silverscript-lang
-        // src/compiler/compile/expression.rs:408-410); both are plain comparisons.
+        // argument; = game::w_min). Value bound: at the request-time price
+        // pi = (A + 1) / (S + VS), any w >= wmin is worth w x pi >= W_MIN_VALUE - pi (spec M6
+        // A4). Remainder rule (Stage 5 review RV-1, orchestrator decision O-M6-2): a partial
+        // withdrawal must also leave shares - w >= wmin, so it never creates a position below
+        // wmin (without it, w = wmin from wmin + 1 shares leaves a 1-share position whose
+        // whole withdrawal takes a request slot for about R). A whole withdrawal (w = shares)
+        // always passes: no lock-in. The decision equals game::w4b_ok.
         {
             // total_assets <= ASSETS_MAX (W1): A + VA <= 2^62.
             int q = (total_assets + VA) / W_MIN_VALUE;
@@ -326,7 +330,11 @@ contract Vault(
                 // total_shares <= SHARES_MAX (W1): S + VS <= 2^62; divisor q >= 1.
                 wmin = (total_shares + VS) / q;
             }
-            require(w >= wmin || w == ps.shares); // mut:M6W4b_min
+            if (w != ps.shares) {
+                require(w >= wmin); // mut:M6W4b_min
+                // 1 <= w <= ps.shares (W4), so 0 <= ps.shares - w < ps.shares <= SHARES_MAX.
+                require(ps.shares - w >= wmin); // mut:M6W4b_rest
+            }
         }
 
         // ==== check W5: the owner input (D67): 2 <= owner_idx < inputs, with the owner's script

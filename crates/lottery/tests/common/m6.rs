@@ -1,6 +1,6 @@
-//! M6 Stage 1: the M6 attacks LA1-LA5 (spec M6 A8) as data (`Atk5`, the M5 method), and the
-//! fabricated bases they and `m6_limits.rs` share, so Stage 2's `m6_mutants.rs` can re-run
-//! LA2 under the mutant without the W4b `require`.
+//! M6 Stage 1: the M6 attacks LA1-LA5 (spec M6 A8; LA7 added by the Stage 5 fix RV-1) as
+//! data (`Atk5`, the M5 method), and the fabricated bases they and `m6_limits.rs` share, so
+//! `m6_mutants.rs` can re-run LA2 and LA7 under the mutants without a W4b `require`.
 //!
 //! Check labels as M5 (`<file>:<label>`, `common::m5` module doc); the new vault check is
 //! `vault:W4b` (spec M6 A4, D86). A strike: the bad transaction is rejected by `input` with
@@ -214,8 +214,50 @@ pub fn m5_rebased() -> Vec<Atk5> {
     ]
 }
 
+// ---------------------------------------------------------------- LA7 (RV-1, O-M6-2)
+
+/// LA7a base: a whole position of wmin + 1 shares at the fixture vault (wmin = 10^9),
+/// withdrawn whole (accepted by W4b's whole-position clause).
+pub fn wd_whole_wmin_plus_1(key: OwnerKey) -> WithdrawCase {
+    let mut c = wd(key);
+    c.position.shares = wmin_of(&c) + 1;
+    c.w = c.position.shares;
+    c
+}
+
+/// LA7b base / LP3 positive: a partial w = wmin from a position of 2 x wmin shares, so the
+/// remainder is exactly wmin (the smallest remainder W4b accepts).
+pub fn wd_rest_at_wmin(key: OwnerKey) -> WithdrawCase {
+    let mut c = wd(key);
+    let wm = wmin_of(&c);
+    c.position.shares = 2 * wm;
+    c.w = wm;
+    c
+}
+
+/// LA7c base / LP3 positive: the fixture position (5 x 10^10 shares) with the largest
+/// partial withdrawal W4b accepts, w = shares - wmin (remainder exactly wmin).
+pub fn wd_rest_at_wmin_large(key: OwnerKey) -> WithdrawCase {
+    let mut c = wd(key);
+    c.w = c.position.shares - wmin_of(&c);
+    assert!(c.w > wmin_of(&c), "large partial: w = {} > wmin", c.w);
+    c
+}
+
+/// LA7 (Stage 5 RV-1, O-M6-2): a partial withdrawal whose remainder (position' shares) is
+/// below wmin. Without the remainder rule, a prepared position of wmin + 1 shares splits
+/// into w = wmin and a 1-share position', whose whole withdrawal later takes a request slot
+/// for 1 share plus R (the U-6 griefing cost D87 / O-M6-1 assume away).
+pub fn la7() -> Vec<Atk5> {
+    vec![
+        Atk5::new("LA7a request_withdraw w = wmin from a position of wmin + 1 (remainder 1 < wmin)", VLT0, "vault:W4b", wd_whole_wmin_plus_1(owner())).wd(|c| c.w = wmin_of(c)),
+        Atk5::new("LA7b request_withdraw w = wmin + 1 from 2 x wmin (remainder wmin - 1, w >= wmin)", VLT0, "vault:W4b", wd_rest_at_wmin(owner())).wd(|c| c.w += 1),
+        Atk5::new("LA7c request_withdraw w = shares - wmin + 1 (remainder wmin - 1, large w)", VLT0, "vault:W4b", wd_rest_at_wmin_large(owner())).wd(|c| c.w += 1),
+    ]
+}
+
 pub fn all_atks6() -> Vec<Atk5> {
-    [la1(), la2(), la3(), la4(), la5(), m5_rebased()].into_iter().flatten().collect()
+    [la1(), la2(), la3(), la4(), la5(), la7(), m5_rebased()].into_iter().flatten().collect()
 }
 
 pub fn atk6(id: &str) -> Atk5 {
