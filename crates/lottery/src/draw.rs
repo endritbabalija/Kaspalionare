@@ -138,6 +138,12 @@ pub struct Lie {
     /// draw mode the seed follows bytes 0..32 (the claimed X.hash) when there are at least
     /// 32; the mode itself follows `DrawCase::void`, not this length.
     pub anchor: Option<Vec<u8>>,
+    /// Spec M7 SA7 (Stage 1b hook): in a void, the pools a draw would create from these
+    /// (h_J, n2) (`game::pool_set`, lower tiers by their budgets) and the vault and boost pot
+    /// that follow them: V' = total_assets - J_house [jp] - n2 G2 [sp] (no H), O' = O + b_r +
+    /// J_boost [not jp] + sum B_t [not lp_t] + sum Q + H; the pools carry win5 (0 unless
+    /// `win5` lies) and bonus 0. Ignored in draw mode.
+    pub void_pools: Option<(i64, i64)>,
     // Spec M5 (stage 2 attacks). Each changes the conversion the builder writes; vault',
     // the record and controller' v_rec follow it.
     /// The withdrawal witness wc instead of the reference's; out_c = out(wc) follows (VA5).
@@ -601,10 +607,10 @@ impl DrawCase {
             win5 = self.lie.win5.unwrap_or([0; 5]);
             (leaves, siblings) = (vec![], vec![]);
             counts = vec![];
-            (h_j, n2) = self.lie.counts.unwrap_or((0, 0));
-            pools = void_pool_set(&amounts.b, mk.m);
-            v_prime = vault_settle(self.vault.total_assets, 0, j_house, false, mk.g2, 0, false).expect("V' >= 0 (check 14)") + self.lie.v_delta;
-            o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, false, &amounts.b, &pools.lp, &q)
+            (h_j, n2) = self.lie.void_pools.or(self.lie.counts).unwrap_or((0, 0));
+            pools = if self.lie.void_pools.is_some() { pool_set(h_j, n2, mk.jackpot, mk.g2, &amounts.b, mk.m) } else { void_pool_set(&amounts.b, mk.m) };
+            v_prime = vault_settle(self.vault.total_assets, 0, j_house, pools.jp, mk.g2, n2, pools.sp).expect("V' >= 0 (check 14)") + self.lie.v_delta;
+            o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, pools.jp, &amounts.b, &pools.lp, &q)
                 .and_then(|o| guarded_add(o, amounts.h))
                 .expect("O' guards (check 15)")
                 + self.lie.o_delta;

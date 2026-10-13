@@ -51,7 +51,9 @@ pub struct Template {
 }
 
 impl Template {
-    pub(crate) fn from(art: SilAbiArtifact) -> Self {
+    /// Public since M7 Stage 1b: SA10 (`tests/m7_attacks.rs`) compiles the pre-M7 marker
+    /// (with `seed_ref`) from a test fixture to build a marker output under the old template.
+    pub fn from(art: SilAbiArtifact) -> Self {
         let c = &art.contracts.values().next().unwrap().compiled;
         let (p, _, s) = c.script_parts(&c.bytecode).expect("state span");
         let (prefix, suffix, hash) = (p.to_vec(), s.to_vec(), c.template_hash);

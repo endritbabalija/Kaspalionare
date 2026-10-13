@@ -17,8 +17,10 @@
 //! - request.sil `settle` S1..S13 (A6.1 checks 1-13);
 //! - position.sil, request.sil, record.sil `refresh` A7.1..A7.7 (M4 A6 checks 1-7, D76);
 //! - drawer.sil `draw`: only the checks M5 and M7 add or change (spec M5 A5, M7 A4): 1 (the
-//!   anchor length, M7), 5, 7 (mk_daa, D and the lock, M7), 8 (the anchor proof and the seed,
-//!   or the void's zero win5 and empty proofs, M7), 13, 14, 17, C1, C2, 20, 21, 22, 23, 24,
+//!   anchor length, M7), 3 (the controller's role, round and drawn = 0; M7 Stage 1b, SA8), 5,
+//!   7 (mk_daa, D and the lock, M7), 8 (the anchor proof and the seed, or the void's zero
+//!   win5 and empty proofs, M7), 9 (the leaves and siblings at the seed's rank, draw mode; M7
+//!   Stage 1b, SA6), 13, 14, 17, C1, C2, 20, 21, 22, 23, 24,
 //!   25, 26 in that order (C3 computes and has no require; the unchanged M3 checks are
 //!   assumed to pass, which holds for M5 attacks: they change only the vault, the record and
 //!   the conversion). Check 8's two `OpChainblockSeqCommit` calls are modelled on the
@@ -577,6 +579,12 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     let mut tc = case.clone();
     tc.lie = Lie::default();
     let t = tx.b.templates.clone();
+    // Check 3 (M3 A4; added to the model in M7 Stage 1b for SA8): the round r + 1 controller
+    // at input 3 with role 1, round = the drawer's round + 1 and drawn = 0 (a second draw or
+    // void of a round finds drawn = 1, spec M7 A6 item 7).
+    let ctrl = need(tx.own_state(3), &l("3"))?;
+    let round = need(tx.own_state(0).as_ref().and_then(|s| int(s, "round")), &l("3"))?;
+    check(byte(&ctrl, "role") == Some(1) && int(&ctrl, "round") == Some(round + 1) && byte(&ctrl, "drawn") == Some(0), &l("3"))?;
     // Check 5: the vault input, A3.1 ranges (extended) and value.
     let (role, vt) = need(tx.own_state(2).as_ref().and_then(vault_of), &l("5"))?;
     check(vault_ranges(role, &vt, tx.in_value(2)) == Some(tc.reserve() as i64) && vt.round == tc.drawer.round - 1, &l("5"))?;
@@ -613,6 +621,11 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
         check(win5 == sn.main, &l("8"))?;
     }
     let x = tc.expected();
+    // Check 9 (M3 A4; added to the model in M7 Stage 1b for SA6): in draw mode the leaves and
+    // siblings are the K count leaves at the seed's rank with their proofs (the truth's).
+    if !is_void {
+        check(tx.arg_bytes(0, ARG_LEAVES).as_deref() == Some(&x.leaves[..]) && tx.arg_bytes(0, ARG_SIBLINGS).as_deref() == Some(&x.siblings[..]), &l("9"))?;
+    }
     let rec = vt.pend_dep > 0 || vt.pend_wsh > 0;
     let n_cov = 3 + x.np() + rec as usize;
     let cov = tx.in_id(0);
