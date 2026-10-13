@@ -68,3 +68,71 @@ Update `.claude/agents/covenant-reviewer.md:43` ("Randomness must stay a test-on
 - Whether `kaspa_hashes`' hashers are usable from the harness without pulling std-only deps (they are; `kaspa-hashes` is already a dep).
 - The exact consensus mergeset order for `mpr` (verified at runtime by the `payload_and_ctx_digest` self-check).
 - The SilverScript name/arity of `blake3WithKey(data, byte[32] key)` (builtin_types.rs:143) — confirmed by the Stage 0 smoke contract.
+
+## Progress log (implementation session, 2026-10-13)
+
+Each stage agent appends one section here before it stops: what was done, files changed, the exact test commands run and their results (pass/fail counts, the failing tests and why), deviations from the spec or plan with their reason (as draft DECISIONS rows, marked PENDING until the orchestrator records them), and what the next stage must know. Handoff completeness beats brevity.
+
+### Stage 0 — Harness: fabricated chain (done)
+
+**What was done.** `harness::ChainSim` (spec A7), `harness::execute_on_chain`, the SP11 pins, and a SilverScript smoke contract that runs `OpChainblockSeqCommit` + `blake3WithKey` through the pinned v2.1.0 engine. No change to `crates/lottery`, `covenants/` or other docs. Nothing committed.
+
+**Files changed.**
+- `crates/Cargo.toml`: workspace dep `kaspa-seq-commit` (git rusty-kaspa, rev `01b532e8b553523216471682649693af92f0fd16`, the same rev as the other kaspa crates). `crates/Cargo.lock` updated (adds kaspa-seq-commit and its deps kaspa-merkle, kaspa-smt from the same rev).
+- `crates/harness/Cargo.toml`: `[dev-dependencies] kaspa-seq-commit.workspace = true` (dev only; `ChainSim` computes commitments with the `kaspa_hashes` hashers at runtime).
+- `crates/harness/src/chain.rs` (new): `SimBlock`, `ChainSim`, free fns `seq_commit_with_parent`, `mergeset_context`, `block_fields_bytes`, `default_finality_depth`; constants `K_SEQ`, `K_MC`, `BLOCK_PROOF_LEN = 152`, `ANCHOR_LEN = 304`; 8 unit tests.
+- `crates/harness/src/lib.rs`: `pub mod chain;` and re-exports `ChainSim, SimBlock, K_SEQ, K_MC, ANCHOR_LEN, BLOCK_PROOF_LEN`; `SeqCommitAccessor` re-exported from `kaspa_txscript`; `execute` now delegates to a private `execute_with(.., None)` (behaviour unchanged: no accessor, so the opcode fails with `InvalidOpcode`); new `execute_on_chain(tx, entries, idx, enforce_budget, &ChainSim)` = the same with `.with_seq_commit_accessor_opt(Some(sim))`.
+- `crates/harness/tests/m7_chain.rs` (new): 8 tests (SP11 pins, proof layout, smoke contract).
+
+**Verified against refs (not from memory).**
+- Opcode `OpChainblockSeqCommit` 0xd4 (`crypto/txscript/src/opcodes/mod.rs:1389-1404`): no accessor → `InvalidOpcode`; `is_chain_ancestor_from_pov` None → `BlockAlreadyPruned`, Some(false) → `BlockNotSelected`; `seq_commitment_within_depth` None → `BlockIsTooDeep`; else pushes the 32-byte commitment. Trait `kaspa_txscript::SeqCommitAccessor: Sync` (`seq_commit_accessor.rs:3-6`, re-exported at `crypto/txscript/src/lib.rs:66`). Matches spec A0.
+- Real accessor window: `low_blue_score + threshold > high_blue_score` (`consensus/src/model/services/seq_commit_accessor.rs:8-10, 36-44`), threshold = `self.finality_depth` (`consensus/src/pipeline/virtual_processor/utxo_validation.rs:373, 445`). `ChainSim` uses the same strict inequality.
+- F: `MAINNET_PARAMS.finality_depth()` returns `blockrate.finality_depth` (`consensus/core/src/config/params.rs:424-426`) = BPS × FINALITY_DURATION (`bps.rs:92-93`; `constants.rs:70` = 43,200) = **432,000** (pinned by a unit test).
+- Hasher keys: `blake3_hasher!` zero-pads the tag into a 32-byte BLAKE3 key (`crypto/hashes/src/hashers.rs:120-138`); `SeqCommitMerkleBranch => b"SeqCommitmentMerkleBranchHash"` (:40), `SeqCommitMergesetContext => b"SeqCommitMergesetContext"` (:47). **Equal to spec A2 K_SEQ / K_MC.**
+- Formula: `consensus/seq-commit/src/hashing.rs:80-84` (`H_mc(le64 ts ‖ le64 daa ‖ le64 bs)`), `:152-157` (`payload_and_context_digest = H_seq(ctx ‖ payload_root)`), `:160-165` (`seq_state_root = H_seq(activity_root ‖ pcd)`), `:168-173` (`seq_commit = H_seq(parent ‖ state_root)`). **Equal to spec D95.** KIP-21: `SeqCommit(genesis)` = ZERO_HASH (`refs/kips/kip-0021.md:365`).
+- `OpBlake3WithKey` 0xda (`opcodes/mod.rs:1465-1475`) pops `[data, key]`; the key must be exactly 32 bytes (`MalformedPush` otherwise); result `blake3::keyed_hash(key, data)`.
+
+**Confirmed SilverScript names and arity** (`refs/silverscript` rev 3ed97333, `silverscript-lang/src/compiler/builtin_types.rs`):
+- `OpChainblockSeqCommit(byte[32] block) -> byte[32]` (:97, :180; emitted as the opcode in `compile/expression/builtin.rs:77`).
+- `blake3WithKey(byte[] data, byte[32] key) -> byte[32]` (:93, :143; two arguments, data first; `builtin.rs:226-231`). The plan's `builtin_types.rs:143` reference is correct.
+- Working pattern from the probe (copy into `drawer.sil` check 8; `blk` = the 152-byte X or P slice of `anchor`):
+  ```
+  byte[32] kSeq = byte[32](0x536571436f6d6d69746d656e744d65726b6c654272616e636848617368000000);
+  byte[32] kMc  = byte[32](0x536571436f6d6d69744d65726765736574436f6e746578740000000000000000);
+  byte[32] ctx = blake3WithKey(blk.slice(128, 152), kMc);
+  byte[32] pcd = blake3WithKey(byte[](ctx) + blk.slice(96, 128), kSeq);
+  byte[32] sr  = blake3WithKey(blk.slice(64, 96) + byte[](pcd), kSeq);
+  byte[32] c   = blake3WithKey(blk.slice(32, 64) + byte[](sr), kSeq);
+  require(OpChainblockSeqCommit(byte[32](blk.slice(0, 32))) == c);
+  ```
+  The two hex constants are K_SEQ and K_MC (the probe formats them from the Rust constants; `key_constants_are_the_spec_bytes` pins the bytes). The probe compiles to a 162-byte redeem and uses 2,410 script units per block (inside the free per-input allowance, budget 0).
+
+**Commands and results** (run from `crates/`):
+- `cargo test -p harness --lib --test m7_chain -j 2`: lib 8 passed, m7_chain 8 passed.
+- `cargo test -p harness -j 2`: **35 passed, 0 failed** (lib 8, covenant_smoke 3, m0_limits 3, m0_mass 5, m0_merkle 2, m0_shapes 6, m7_chain 8; doctests 0).
+- `cargo build --tests -j 2` and `cargo build --workspace --tests -j 2` (includes `tn10`): both finish; only the pre-existing `m0_mass` unused-variable warnings.
+
+**Tests added.**
+- `chain::tests` (lib): `chain_sim_is_send_sync` (also `Arc<ChainSim>`), `default_f_is_mainnet_finality_depth` (432,000), `key_constants_are_the_spec_bytes`, `anchored_has_x_and_p`, `anchor_for_picks_first_chain_block_at_or_after_d` (jump of 248; equal-DAA chain blocks pick the lowest blue score; no anchor → `None`), `accessor_unknown_and_side_block` (unknown → None; side block → Some(false)), `accessor_depth_boundary` (admitted at pov = bs + f − 1, None at bs + f), `reorg_moves_the_chain`.
+- `tests/m7_chain.rs`: `sp11_k_seq_pins_seq_commit_merkle_branch` (hasher = `blake3::Hasher::new_keyed(&K_SEQ)` on 4 inputs, plus the golden vector of `hashing.rs` `test_seq_commit_golden` recomputed with the raw key), `sp11_k_mc_pins_seq_commit_mergeset_context` (also `mergeset_context` = `kaspa_seq_commit::hashing::mergeset_context_hash`), `sp11_seq_commit_equals_kaspa_seq_commit` (fixed blocks incl. u64::MAX fields × 3 parent commitments, and every block of a sim with a jump, an equal-DAA block and a side block, against the `kaspa_seq_commit` composition), `proof_bytes_layout` (A3 offsets), `smoke_probe_verifies_x_and_p_on_chain` (X and P of `anchored`, also with `enforce_budget = true` under the committed budget; every block of a line with a jump), `smoke_probe_fails_without_accessor` (`execute` → `InvalidOpcode`), `smoke_probe_rejects_each_altered_field` (one bit in each of parent_commit, activity_root, mpr, ts, daa, bs → `EvalFalse`/`VerifyError`; altered hash → `BlockAlreadyPruned`), `smoke_probe_accessor_failure_modes` (side block → `BlockNotSelected`; pov = bs + f − 1 passes, bs + f → `BlockIsTooDeep`; after `reorg_to` the old tip → `BlockNotSelected`).
+
+**API for Stage 1** (`use harness::*;` brings `ChainSim`, `SimBlock`, `ANCHOR_LEN`, `BLOCK_PROOF_LEN`, `K_SEQ`, `K_MC`, `execute_on_chain`; the free functions are under `harness::chain::`).
+- `SimBlock { hash, parent, blue_score, daa_score, sp_timestamp, activity_root, miner_payload_root }` (`Copy`). `parent == ZERO_HASH` marks a root of the sim, whose parent commitment is ZERO_HASH.
+- Constructors: `ChainSim::anchored(d, x_hash)` — P = root at daa d − 1 / blue d − 1, X = `x_hash` at daa d / blue d, both on the chain, pov = X's blue score (requires d ≥ 1); `ChainSim::line(daa_start, blue_start, n)` — n ≥ 1 chain blocks, +1 daa and +1 blue each, pov = tip; `ChainSim::default()` — empty (every hash unknown), mainnet F.
+- Chain growth (each moves the pov to the new tip): `push_chain(daa_delta, blue_delta) -> Hash`, `push_chain_with_hash(Some(hash), daa_delta, blue_delta) -> Hash` (to place a chosen X.hash, e.g. for SP3 seed searches), `extend(n) -> &mut Self`; fluent `with_jump(delta) -> Self` (one chain block with daa + delta, blue + 1; delta 0 = an equal-DAA chain block), `with_extend(n) -> Self`.
+- Off-chain blocks: `add_side_block(parent, daa) -> Hash` (blue = parent's + 1; fluent `with_side_block(parent, daa)` drops the hash), `fork(from, n) -> Hash` (n off-chain descendants, returns the last); `reorg_to(tip) -> &mut Self` (chain := ancestors of `tip` inclusive, pov := tip's blue score; the old chain's blocks stay known, so they now give `BlockNotSelected`).
+- Point of view and depth: `set_pov(bs) -> &mut Self`, `with_pov(bs) -> Self`, `set_finality_depth(f)`, `finality_depth()`, `pov_blue_score()`. `set_pov` moves only the depth threshold; it does not shrink the chain set (spec A7 literal: `is_chain_ancestor_from_pov` = `chain.contains`). To model a pov whose chain ends earlier, `reorg_to` the earlier block.
+- Queries: `tip()`, `block(h) -> Option<&SimBlock>`, `on_chain(h)`, `chain_blocks()` (sorted by blue score), `commit_of(h) -> Option<Hash>`, `seq_commit(&SimBlock)` (parent commitment looked up in the sim).
+- Anchor: `anchor_for(d) -> (X, P)` (first chain block with daa ≥ d — lowest blue score among equals — and its selected parent; panics if none), `try_anchor_for(d) -> Option<(X, P)>`, `block_bytes(&b) -> [u8; 152]`, `proof_bytes(&x, &p) -> Vec<u8>` (304 B, A3), `anchor_proof(d)` = `proof_bytes(anchor_for(d))`. For forged proofs (SA1, SA2, SA4) edit the bytes, or use `harness::chain::block_fields_bytes(&b, &parent_commit)` with any `SimBlock`/commitment and `seq_commit_with_parent(&parent_commit, &b)` to compute a commitment off the sim.
+- Blocks are immutable once inserted (commitments are computed at insertion, parents first), so a built sim is read-only; share it as `Arc<ChainSim>` (`Send + Sync` is pinned by a test). For SP7 reorgs: `let mut b = (*arc).clone(); b.reorg_to(..); Arc::new(b)`.
+- Execution: `harness::execute_on_chain(&tx, &entries, idx, enforce_budget, &*sim)` — identical to `execute` plus the accessor; `execute` keeps no accessor (the SA3 "opcode disabled" control returns `TxScriptError::InvalidOpcode`). Fabricated hashes and roots are deterministic (blake3 of a per-sim counter), so rebuilding the same fixture gives the same bytes.
+
+**Deviations (draft DECISIONS rows, PENDING).**
+- PENDING S0-1 (mechanical, API naming): spec A7 lists `.with_jump(at, delta)` and `.reorg_to(other_chain)`. Implemented as `with_jump(delta)` (appends one chain block at tip.daa + delta; position it with `line`/`extend` first, so "at" is the tip) and `reorg_to(tip: Hash)` (the other chain is built in the same sim with `fork`/`add_side_block` and selected by its tip). Added `push_chain`, `push_chain_with_hash`, `extend`, `with_extend`, `fork`, `add_side_block`, `try_anchor_for`, `anchor_proof`, `with_pov`, `set_finality_depth`. Reason: builders must return hashes for the attack tests, and keeping every block known makes the old chain's blocks side blocks (BlockNotSelected), as in consensus. No security effect.
+- PENDING S0-2 (mechanical): `seq_commit` exists both as `ChainSim::seq_commit(&SimBlock)` (spec form) and as the free `harness::chain::seq_commit_with_parent(&parent_commit, &SimBlock)`. Stage 1's `lottery::anchor::seq_commit(&BlockFields)` can either duplicate the 4-hash function (then pin it equal to `kaspa_seq_commit` like SP11) or convert to a `SimBlock` and call `seq_commit_with_parent` (lottery and tn10 already depend on harness).
+- No deviation in the formula, the key bytes or the opcode semantics: all three match spec A2/D95/A0 as cited above.
+
+**What Stage 1 must know.**
+- With the fixture `marker_daa = 1_000_000 + (r−1)·10⁶`, `ChainSim::anchored(D, x_hash)` puts X's blue score at D, so the pov is far from any window edge. Use `sim.anchor_proof(D)` for the `anchor` argument (304 B).
+- In the probe a wrong preimage fails as `EvalFalse`/`VerifyError` from `require(... == c)`; in the drawer, attack tests should match on the input index and the `M7A_*` label as for other checks.
+- Cost data point for the drawer budget/stack work: one block's recomputation (4 × `blake3WithKey` + the opcode, each hashed message ≤ 64 B) plus the length check and slices is ~2,410 script units; the drawer does it twice.

@@ -6,6 +6,9 @@
 
 use std::path::PathBuf;
 
+pub mod chain;
+pub use chain::{ANCHOR_LEN, BLOCK_PROOF_LEN, ChainSim, K_MC, K_SEQ, SimBlock};
+
 pub use kaspa_consensus_core::{
     Hash,
     config::params::MAINNET_PARAMS,
@@ -18,7 +21,7 @@ pub use kaspa_consensus_core::{
     },
 };
 pub use kaspa_txscript::{
-    EngineCtx, EngineFlags, TxScriptEngine, caches::Cache, covenants::CovenantsContext, pay_to_script_hash_script,
+    EngineCtx, EngineFlags, SeqCommitAccessor, TxScriptEngine, caches::Cache, covenants::CovenantsContext, pay_to_script_hash_script,
     script_builder::ScriptBuilder,
 };
 pub use kaspa_txscript_errors::TxScriptError;
@@ -99,12 +102,37 @@ pub fn engine_flags() -> EngineFlags {
 /// Run input `idx` through the engine and return the script units used.
 /// `enforce_budget = true` limits execution to the input's committed compute
 /// budget plus the free allowance, as consensus does; `false` is unlimited (for measuring).
+/// No sequencing-commitment accessor is attached, so `OpChainblockSeqCommit` fails with
+/// `InvalidOpcode` (`crypto/txscript/src/opcodes/mod.rs:1390-1393`); use `execute_on_chain` for it.
 pub fn execute(tx: &Transaction, entries: &[UtxoEntry], idx: usize, enforce_budget: bool) -> Result<u64, TxScriptError> {
+    execute_with(tx, entries, idx, enforce_budget, None)
+}
+
+/// `execute` with `sim` as the `SeqCommitAccessor` of `OpChainblockSeqCommit`
+/// (`EngineCtx::with_seq_commit_accessor_opt`, `crypto/txscript/src/engine_context.rs:32-35`),
+/// as consensus attaches one for block and mempool validation (`utxo_validation.rs:372-373, 445`).
+pub fn execute_on_chain(
+    tx: &Transaction,
+    entries: &[UtxoEntry],
+    idx: usize,
+    enforce_budget: bool,
+    sim: &ChainSim,
+) -> Result<u64, TxScriptError> {
+    execute_with(tx, entries, idx, enforce_budget, Some(sim))
+}
+
+fn execute_with(
+    tx: &Transaction,
+    entries: &[UtxoEntry],
+    idx: usize,
+    enforce_budget: bool,
+    accessor: Option<&dyn SeqCommitAccessor>,
+) -> Result<u64, TxScriptError> {
     let populated = PopulatedTransaction::new(tx, entries.to_vec());
     let cov = CovenantsContext::from_tx(&populated).map_err(TxScriptError::from)?;
     let cache = Cache::new(10_000);
     let reused = SigHashReusedValuesUnsync::new();
-    let ctx = EngineCtx::new(&cache).with_reused(&reused).with_covenants_ctx(&cov);
+    let ctx = EngineCtx::new(&cache).with_reused(&reused).with_covenants_ctx(&cov).with_seq_commit_accessor_opt(accessor);
     let input = &tx.inputs[idx];
     let limit = if enforce_budget { input.compute_commit.allowed_script_units() } else { ScriptUnits(u64::MAX) };
     let mut vm = TxScriptEngine::from_transaction_input_with_script_units_limit(

@@ -14,3 +14,6 @@ silverscript-lang.workspace = true
 silverscript-abi.workspace = true
 blake2b_simd.workspace = true
 blake3.workspace = true
+
+[dev-dependencies]
+kaspa-seq-commit.workspace = true

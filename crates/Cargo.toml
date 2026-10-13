@@ -15,6 +15,8 @@ kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = 
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+# KIP-21 sequencing-commitment hashing (consensus/seq-commit); pins harness::ChainSim in tests (M7 SP11).
+kaspa-seq-commit = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 # SilverScript compiler v1.0.0. It links its own rusty-kaspa revision internally;
 # only compiled bytecode crosses into the v2.1.0 engine above.
 silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
