@@ -141,7 +141,7 @@ Done when:
 - if the controller or marker script changed, `close()` at K = 16 is re-measured; stop and ask if any mass exceeds 90 %.
 
 ## M6 — K shards and limits
-Status: todo
+Status: done (2026-10-13, spec `docs/specs/6.md`; d = 0.13 KAS final, closes U2 (D80, D81); B_MAX = 4 final; K = 16, m_max = 50 and R = 1.69 KAS provisional pending the real-seed milestone (D83: largest K for `close()` 16 within 90 % and 18 within 100 % of transient, R bound by the `close()` storage worst case at 89.9 %, drawer byte budget about 91,950 B and 4 free stack slots); P_MIN = 0.05 KAS kept, claim fees under load documented (D82: PAY at P_MIN ≈ 7.55 × P_MIN at the priority floor); SHARE_UNIT = 1 and V₀ ≥ 1 KAS, closes U-5 (D84); MIN_DEPOSIT = W_MIN_VALUE = 10 KAS with vault check W4b and its remainder rule (D85, D86, review RV-1, O-M6-2); request griefing mitigated by cost only, the RBF fee auction refuted on testnet-10 (D87, O-M6-1); purchase conflict rate measured (D88: τ_chain 0.919 s, τ_merge 1.655 s); genesis exempt from the 90 % margin and refused above 100 % (U-M6-1); dead M4 draw branch removed (D89); `close()` K = 16 unchanged at 86.8 % transient; O-M6-1…O-M6-3 were picked by the orchestrator under the user's delegation and can be overturned; open on the release gate: residual deposit lock-out (D84), request griefing residual (D87), q = 0 small-vault withdrawals (O-M6-3); see `docs/DECISIONS.md` and `docs/costs.md`)
 
 Done when:
 - the largest workable K for `close()`, b_max and m_max are measured with the real scripts;
@@ -157,6 +157,14 @@ Done when:
   - request throughput: at most one request per VAULT_REQ_DELAY = 600 DAA (about 1,440 per day) by construction; revisit δ with the batching choice;
   - drawer stack headroom: 4 free slots at check 24 (M5 S4-1); any drawer change that keeps a value live across check 24 must re-measure it;
   - cleanup: the dead M4 draw branch in `crates/lottery/src/draw.rs` (`SIG_DRAW_M4`, `args_m4`, the 22-push path of `RoundResult::from_tx`; M5 S4-9).
+
+**Proposal (your decision): done criterion for the next milestone (real seed), from M6 (D83, spec 6 A5a).** No entry for that milestone exists yet; when it is written, it should include: K, R and m_max count as final only after these M6 measurements are re-run with that milestone's final `draw()` (and `close()`, if it changes) and stay within 90 %:
+- the M6-a `draw()` rows (worst and typical) and the dependent M6-h fee rows;
+- the M6-a `close()` rows, M6-b (K frontier) and M6-c (B_MAX frontier), if `close()` changes (for example the R1 fix);
+- the M6-b `draw()` estimates at the K_MAX variants;
+- the M6-d `draw()` rows with the M_DRAW variants (they set m_max);
+- M6-g: the `close()` storage worst case if `close()` gains or loses an output, and the `draw()` storage supremum if `draw()` gains an output (for example a seed-proof object);
+- M6-j: the drawer sensitivity and byte budget (about 91,950 B before the worst `draw()` reaches 90 % of transient), and the drawer's stack headroom (4 free slots at check 24) whenever a value stays live across check 24.
 
 ## M7 — Testnet-10 end to end
 Status: todo
@@ -179,4 +187,5 @@ Release gate (not a milestone):
 - the `close()` caller can no longer choose seed_ref (review R1, M2), fixed as part of the real seed design;
 - `draw()` caps the next round's G2 at G2_MAX (O-S5-1, M3);
 - the toolchain check is done: SilverScript's rusty-kaspa rev `a41a333` is an ancestor of the pinned release and `crypto/txscript` is diffed (DECISIONS pins row, 2026-10-09).
+- the vault items left open by M6 (DECISIONS 2026-10-13 OPEN rows) are resolved or accepted: the residual deposit lock-out at 10⁹× the genesis price (D84), the request griefing residual, mitigated by cost only (D87, O-M6-1; candidates: request batching, a per-round request queue), and partial withdrawals while the vault holds less than 10 KAS (q = 0, O-M6-3; reviewer's option: whole withdrawals only);
 - the missed-draw item is resolved, including the claim-window gaps it causes (M4): a late `draw()` whose caller uses old inputs can create pools whose claim deadline has already passed (U4; tripwire test `parked_u4_late_draw_creates_already_expired_pools`), and a `close()` later than T + D_RET − (seed_offset + draw_window + claim_window) lets `return_deposit_after` forfeit winning tickets before their pool deadline (U6).

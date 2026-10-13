@@ -473,7 +473,7 @@ Source: `crates/lottery/tests/m6_measure.rs` (`cargo test -p lottery --release -
 | position (`vault_leg`, `refresh`) | 1 | 1,137 | 56 | 1,194 |
 | request (`settle`, `refresh`) | 1 | 15,420 | 58 | 15,479 |
 
-Only the vault changed size (+52 B, check W4b: +42 B for wmin, then +10 B for the Stage 5 RV-1 remainder rule, O-M6-2). MIN_DEPOSIT 10⁸ → 10⁹ is a 4-byte script number either way, so the drawer and request sizes are unchanged.
+Only the vault changed size (+52 B, check W4b: +42 B for wmin, then +10 B for the remainder rule after review RV-1, O-M6-2). MIN_DEPOSIT 10⁸ → 10⁹ is a 4-byte script number either way, so the drawer and request sizes are unchanged.
 
 **M6-a / M6-h / M6-i: every transition** (one funding input unless stated; "leg" = the units of the named delegate input):
 
@@ -672,7 +672,7 @@ Round sales S at which C_close = s_C·S and C_draw = s_D·S (s_C = s_D = 50 bp) 
 
 The `draw()` storage supremum with the record at F_MIN_FLOOR (417,684, M6-g) means a priority fee of at most 0.41768 KAS when storage dominates; C_draw covers it from S = 83.54 KAS. Below these sales the caller pays part of the fee (D19 liveness note).
 
-**M6-i: vault request sizes.** Vault redeem 3,432 B (+52 B for W4b vs M5: +42 B for wmin, +10 B for the Stage 5 RV-1 remainder rule). `request_withdraw` partial at the W4b boundary (w = wmin = 10⁹ at the fixture vault, remainder 4.9 × 10¹⁰ ≥ wmin): leader 199,805 units, sigscript 18,875 B, position leg 26,756 units; 25,286 / 82,864 / 48,554 (5.1 / 8.3 / 9.7 %), the same masses as any partial withdrawal (rows above).
+**M6-i: vault request sizes.** Vault redeem 3,432 B (+52 B for W4b vs M5: +42 B for wmin, +10 B for the remainder rule after review RV-1, O-M6-2). `request_withdraw` partial at the W4b boundary (w = wmin = 10⁹ at the fixture vault, remainder 4.9 × 10¹⁰ ≥ wmin): leader 199,805 units, sigscript 18,875 B, position leg 26,756 units; 25,286 / 82,864 / 48,554 (5.1 / 8.3 / 9.7 %), the same masses as any partial withdrawal (rows above).
 
 **M6-j: drawer sensitivity and byte budget, for the seed milestone.** Drawer-only variants run as full worst draws (K = 16, a = 7, np = 7, 8 funding inputs, cap binding, record), with marker, vault and pool committing to the variant drawer's hash:
 
@@ -709,7 +709,7 @@ Worst `draw()` at the committed drawer (65,234 B): compute 208,671 (41.7 %), tra
 **τ measured on testnet-10** (`probe conflict-m6`, 2026-10-13, public node, real shard script; results in `docs/tn10-mass-check.md` M6): **τ_chain = 0.919 s** (median, n = 10: start of the parent buy's submission → a buy chained on its unaccepted successor shard accepted by the mempool; mean 0.920, max 0.925; that is two RPC round trips to the public node, the node accepted every chained buy on the first attempt) and **τ_merge = 1.655 s** (median, n = 10: start of the submission → a chain block accepted the buy; mean 1.650, max 1.962; the virtual chain was polled about every 0.6 s, so this is an upper bound by one poll). Source: `crates/lottery/tests/m6_conflict.rs` (`cargo test -p lottery --release --test m6_conflict -- --nocapture --test-threads=1`, `TAU_CHAIN` / `TAU_MERGE` = these medians), a seeded discrete-event model (no network), 2026-10-13.
 
 Model: K shards; buys arrive as a Poisson process at rate λ and pick a shard uniformly (research F1). An accepted buy makes its shard busy for τ (τ_chain: until a chained buy on the unaccepted successor is accepted; τ_merge: until the successor is merged by a chain block). A buy that finds its shard busy conflicts (the mempool rejects it as a double spend; it does not restart the busy time) and retries after a rebuild delay ρ on a shard drawn uniformly from the other K − 1. Reported: first-attempt conflict rate, mean attempts, P(≥ 3 attempts), saturation throughput K/τ. With a = λτ/K:
-- **Correction to spec A7 (S3b-2):** as ρ → ∞ each shard is a one-server loss system, so the first-attempt rate is **a / (1 + a)** (Erlang B with one server). The spec's 1 − e^(−a) holds only if every arrival, rejected ones included, restarts the busy time; under the protocol semantics it misses by more than 0.01 in 26 of 45 grid cells. Sanity grid (K ∈ {4, 8, 16}, λ ∈ {0.1, 0.5, 1, 2, 5}/s, τ ∈ {1, 2, 5} s): the simulation is within 0.00107 of a/(1 + a) (≤ 2.15 SE) and, with restart semantics, within 0.00136 of 1 − e^(−a).
+- **Correction to spec A7 and A8 (S3b-2):** as ρ → ∞ each shard is a one-server loss system, so the first-attempt rate is **a / (1 + a)** (Erlang B with one server). The spec's 1 − e^(−a) holds only if every arrival, rejected ones included, restarts the busy time; under the protocol semantics it misses by more than 0.01 in 26 of 45 grid cells. Sanity grid (K ∈ {4, 8, 16}, λ ∈ {0.1, 0.5, 1, 2, 5}/s, τ ∈ {1, 2, 5} s): the simulation is within 0.00107 of a/(1 + a) (≤ 2.15 SE) and, with restart semantics, within 0.00136 of 1 − e^(−a).
 - **At a finite ρ below saturation (S3b-5)** every buy eventually succeeds, so a fresh buy finds its shard busy with probability exactly **a** (shard utilisation), independent of ρ and the retry rule (max deviation 0.00337). This is the practical first-attempt rate.
 - λ ≥ K/τ has no steady state; those cells run as a 600 s burst from idle and are marked SAT (their numbers depend on the burst length).
 
@@ -728,7 +728,7 @@ Table at the measured τ, K = 16, ρ = 1 s (K = 4 and 8 are printed by the test)
 | τ_merge = 1.655 s | 2.0 | 9.668 | 0.207 | 0.2070 | 0.1714 | 0.1869 | 1.264 | 0.0444 | 9 | steady |
 | τ_merge = 1.655 s | 5.0 | 9.668 | 0.517 | 0.5171 | 0.3409 | 0.4038 | 2.099 | 0.2702 | 20 | steady |
 
-Reading: τ_chain applies to wallets that build on the pending successor (the probe shows the mempool accepts such a buy at once, research F3); τ_merge to wallets that wait for a chain block. Saturation is K/τ = 17.4 buys/s (chained) or 9.7 buys/s (waiting for the merge) at K = 16. The probe also measured that a racing buy on the same shard state is always rejected (10/10), and that a higher-feerate replacement through `submit_transaction_replacement` did not displace a pending buy on chain in any attempt (D87 input; `docs/tn10-mass-check.md` M6).
+Reading: τ_chain applies to wallets that build on the pending successor (the probe shows the mempool accepts such a buy at once, research F3); τ_merge to wallets that wait for a chain block. Saturation is K/τ = 17.4 buys/s (chained) or 9.7 buys/s (waiting for the merge) at K = 16. The probe also measured that a racing buy on the same shard state is always rejected (10/10), and that a higher-feerate replacement through `submit_transaction_replacement` did not displace a pending buy on chain in any attempt (D87 as amended by O-M6-1: the fee auction is not a mitigation; `docs/tn10-mass-check.md` M6).
 
 ## Scripts (M0 probes)
 
