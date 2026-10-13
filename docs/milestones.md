@@ -8,7 +8,7 @@ Proposals in `docs/DECISIONS.md` marked "confirm in spec Mx" are settled in that
 
 Out of scope until later: economic tuning beyond the starting values, ticket transfer, any front end, mainnet.
 
-Seed: the seed source is the anchor block's hash (M7); the miner-withholding bias is OPEN on the release gate (D100, amended 2026-10-13).
+Seed: the seed source is the anchor block's hash (M7); the miner-withholding bias is OPEN on the release gate (D100, amended 2026-10-13). Mainnet fairness is on-chain only (D108, 2026-10-13): no VDF, no house secret, no oracle. The whale-margin floor goes to 1.5 as the first task of M8 (D109); the hashrate gate and a possible better floor are settled by the research session on the release gate.
 
 ---
 
@@ -194,8 +194,21 @@ Done when:
 - the verdict is recorded: fits as is, fits only with a split `draw()` (and what that costs), or does not fit;
 - the margin-floor question of the amended D100 row (ε = 0 at margin 1.0 for a self-referring caller) is answered or handed to the owner as a decision.
 
+## Research — on-chain-only seed fairness (release gate, after M8)
+Status: todo (fresh chat, any time before mainnet; does not block M8; brief in `docs/research/seed-fairness-brief.md`; decisions D108 and D109, 2026-10-13)
+
+No code, no testnet. The owner chose plan A (D108): the seed stays the anchor block's hash and nothing off chain is added. Measured on 13 Oct 2026, the two largest Kaspa pools hold about 27 % each (the largest 28–34 % depending on the source), which is at or above the break-even α ≈ ε that a 1.5 margin floor gives, and a 1.5 floor already costs ordinary players about 10 points of expected return. The session searches, with several agents and the literature, for a covenant-only mechanism or a tighter bound that makes the anchor miner's re-roll unprofitable for a 30–35 % pool operator without pricing the game that way, or shows none exists under the non-negotiables.
+
+Done when:
+- every candidate is checked against the non-negotiables (CLAUDE.md), the Kaspa facts in `refs/` (never from memory) and the manipulation model of spec 7 A6 / D100 amended, with its residual attacker and cost stated in the same terms (α against ε, gain per round as a fraction of the attacker's ticket stake);
+- the ruled-out list in D108 is either confirmed or overturned with a reason;
+- the whale-margin floor value and the hashrate-gate threshold are proposed as a decision for the owner, with the player-loss and jackpot effect of each candidate floor from `docs/costs.md` "Margin floor";
+- the outcome is recorded in `docs/DECISIONS.md`; if a mechanism is found it gets its own milestone spec before any code; if none is found, the release-gate item below is reworded as an accepted residual with its measured size.
+
 ## M8 — Testnet-10 end to end
-Status: todo
+Status: todo (next milestone; D109: starts with the margin-floor change below, then runs on the M7 drawer with that change; the research session above is on the release gate and does not block it)
+
+**First task (plan A, D108/D109): raise the whale-margin floor to MARGIN_MIN = 15,000 bp (1.5).** Attack tests first (a `close()`, a `draw()` and a genesis with margin 14,999 bp are each refused; 15,000 accepted; the `set_params()` range check if it covers the margin), then the constants in `covenants/controller.sil:236`, `covenants/drawer.sil:407` and the genesis range check in `crates/lottery/src/genesis.rs:295`, the fixture margin (1.17 today) raised to 1.5 in every test that must keep passing, the M2 mutant for `margin >= BP` updated, and a check that `fix_jackpot` reaches EV = q at 1.5 (the margin-floor table assumed it; D100 amended showed it at 1.17 only). Record the result as a DECISIONS row with the re-measured worst `close()` and `draw()` masses if any script byte changed, and run `covenant-reviewer` on the change. The floor is provisional until the research session reports; a later change is one constant again.
 
 Done when several consecutive rounds run on testnet-10, including:
 - an m change, a duplicated jackpot combination and a held second prize;
@@ -217,4 +230,4 @@ Release gate (not a milestone):
 - the toolchain check is done: SilverScript's rusty-kaspa rev `a41a333` is an ancestor of the pinned release and `crypto/txscript` is diffed (DECISIONS pins row, 2026-10-09).
 - the vault items left open by M6 (DECISIONS 2026-10-13 OPEN rows) are resolved or accepted: the residual deposit lock-out at 10⁹× the genesis price (D84), the request griefing residual, mitigated by cost only (D87, O-M6-1; candidates: request batching, a per-round request queue), and partial withdrawals while the vault holds less than 10 KAS (q = 0, O-M6-3; reviewer's option: whole withdrawals only);
 - ~~the missed-draw item is resolved, including the claim-window gaps it causes (M4): a late `draw()` whose caller uses old inputs can create pools whose claim deadline has already passed (U4; tripwire test `parked_u4_late_draw_creates_already_expired_pools`), and a `close()` later than T + D_RET − (seed_offset + draw_window + claim_window) lets `return_deposit_after` forfeit winning tickets before their pool deadline (U6)~~ **closed in M7** (void mode, D96, with the on-chain floor `draw_window >= VOID_MIN`; U4 closed by D98, the tripwire inverted into SP6; U6 bounded by D102);
-- **OPEN (M7, D100 amended 2026-10-13):** the anchor miner's withholding bias. The profit condition α > ε must use the minimum ε the game-size rule allows (where the whale check binds ε is far below 0.27, and about 0 at margin = 1.0 for a player who also takes the referral and both caller rewards), α is rentable burst hashrate (the anchor time is predictable to within seconds), and leaving an honest candidate out of a block's parents is a cheaper lever than withholding. Items: a feasibility spike for the candidate fix (seed = H(VDF(X.hash)) proven with `OpZkPrecompile`) and a measurement of rentable burst hashrate against that ε. The genesis builder refuses mainnet until this is resolved.
+- **OPEN (M7, D100 amended 2026-10-13):** the anchor miner's withholding bias. The profit condition α > ε must use the minimum ε the game-size rule allows (where the whale check binds ε is far below 0.27, and about 0 at margin = 1.0 for a player who also takes the referral and both caller rewards), α is rentable burst hashrate (the anchor time is predictable to within seconds), and leaving an honest candidate out of a block's parents is a cheaper lever than withholding. Items: a feasibility spike for the candidate fix (seed = H(VDF(X.hash)) proven with `OpZkPrecompile`) and a measurement of rentable burst hashrate against that ε. The genesis builder refuses mainnet until this is resolved. **Update 2026-10-13 (D108):** the spike is done (D106, D107) and the VDF path is closed by the owner (no house-run prover, key or ceremony). Mainnet rests on plan A: a raised whale-margin floor (provisionally 1.5, ε ≈ 0.27 for the worst attacker) and a hashrate gate (largest pool and rentable burst share each below about half of ε). Measured 13 Oct 2026: the two largest pools hold about 27 % each, the largest 28–34 % by source, so the gate is **not met**; the research session before M8 looks for a covenant-only mechanism or a tighter bound, after which the floor and the threshold are fixed.
