@@ -730,6 +730,126 @@ Table at the measured τ, K = 16, ρ = 1 s (K = 4 and 8 are printed by the test)
 
 Reading: τ_chain applies to wallets that build on the pending successor (the probe shows the mempool accepts such a buy at once, research F3); τ_merge to wallets that wait for a chain block. Saturation is K/τ = 17.4 buys/s (chained) or 9.7 buys/s (waiting for the merge) at K = 16. The probe also measured that a racing buy on the same shard state is always rejected (10/10), and that a higher-feerate replacement through `submit_transaction_replacement` did not displace a pending buy on chain in any attempt (D87 as amended by O-M6-1: the fee auction is not a mitigation; `docs/tn10-mass-check.md` M6).
 
+## M7: real seed (anchor proof, void; D83 re-confirmation)
+
+Source: `crates/lottery/tests/m7_measure.rs` (`cargo test -p lottery --release --test m7_measure -- --nocapture --test-threads=1`; 7 passed), real scripts after M7 Stage 2 (commit 3eeb154: drawer `draw()` with the 304-byte anchor proof and the void mode, marker without `seed_ref` and `refresh()`, controller check 20 without the seed reference), 2026-10-13. Same constants, limits, mass calculator and fee formulas as M6 (above). Every row is measured unless marked "estimate"; the M6 column is the value in the M6 section that the M7 value replaces. Coverage is the milestone M7 entry ("K, R and m_max are re-confirmed") = the M6 A5a rows marked "re-run", plus the void rows (spec M7-b).
+
+**Stop rules (D104): none fires.** Every final shape is ≤ 90 % of compute, transient and storage (genesis exempt, U-M6-1); `close()` at K = 16 is ≤ 90 %; the drawer's stack headroom at check 24 is 4 slots (floor 4) and the drawer compiles. The tests assert all of these.
+
+**Rows not re-run here are unchanged.** `m6_measure` on the same tree (10 passed) gives byte-identical masses for every row M6 A5a marks "valid": genesis, `buy()`, `set_params()`, `claim()`, returns, ticket/pool/position/request/record refreshes, vault requests and settlements, the M6-d `buy()` and `claim()` rows, M6-e and M6-f. The `refresh` marker row is gone (the marker has no `refresh()`, D99).
+
+**M7-a: redeem sizes.**
+
+| Object | Prefix B | Suffix B | State B | Redeem B | M6 redeem B | Δ |
+|---|---|---|---|---|---|---|
+| drawer (`draw`: anchor proof and void; M6: `draw_test_seed`) | 1 | 64,505 | 137 | **64,643** | 65,234 | −591 |
+| marker (`draw_leg` only, no `seed_ref`; M6: `draw_leg`, `refresh`, `seed_ref`) | 1 | 682 | 706 | **1,389** | 2,104 | −715 (state −9, code −706) |
+| controller (`close`, `draw_leg`) | 1 | 27,196 | 427 | **27,624** | 27,694 | −70 |
+
+The drawer shrank although it gained the anchor proof: check 19's unrolled 19-input `own` loop is gone (D98), and it was larger than the new check 7/8 code. Every other template is unchanged.
+
+**M7-a / M7-b / M7-c: `draw()`, void and `close()`** (fees at 100 sompi per gram; "leg" = the vault's units, input 2):
+
+| Transition | Input 0 units / sigscript B | Leg units | Outputs | Compute | Transient | Storage | % c / t / s | Relay floor (KAS) | Priority fee (KAS) | M6 % c / t / s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `draw()` worst (DP21: K = 16, m = 50, a = 7, np = 7, 8 funding inputs, cap binding, record, anchor 304 B) | 1,809,407 / 78,733 | 459,796 | 21 | 206,569 | 527,196 | 71,009 | **41.3 / 52.7 / 14.2** | 0.26360 | 0.26360 | 41.7 / 53.2 / 14.2 |
+| `draw()` typical (K = 16, m = 10, a = 0, np = 3, no record) | 1,505,121 / 77,446 | 459,796 | 9 | 139,937 | 444,148 | 93,028 | 28.0 / 44.4 / 18.6 | 0.22207 | 0.22207 | 28.2 / 44.9 / 18.6 |
+| void worst (K = 16, a = 7, 8 funding inputs, cap binding, record, fee paid) — **new** | 1,097,028 / 67,607 | 459,796 | 14 | 185,144 | 480,256 | 71,005 | **37.0 / 48.0 / 14.2** | 0.24013 | 0.24013 | — |
+| void typical (K = 16, a = 0, nothing pending) — **new** | 949,459 / 67,600 | 459,796 | 6 | 123,120 | 403,720 | 33,685 | 24.6 / 40.4 / 6.7 | 0.20186 | 0.20186 | — |
+| `close()` K = 16, sales in every shard (M2-a shape) | 3,372,030 / 28,364 | — | 20 | 293,743 | 864,612 | 402,301 | 58.7 / **86.5** / 80.5 | 0.43231 | 0.43231 | 58.9 / 86.8 / 80.5 |
+| `close()` K = 16, storage worst case (M2-c grid: zero sales, O = J_boost = A = 0, caller 1,000,000 KAS) | 3,370,973 / 28,364 | — | 20 | 293,743 | 864,612 | **449,692** | 58.7 / 86.5 / **89.9** | 0.43231 | 0.44969 | 58.9 / 86.8 / 89.9 |
+
+Against M6: the worst `draw()` is −2,102 compute and −4,408 transient grams (−1,102 B: the drawer's sigscript −317 B, that is its redeem −591 B and the 304-byte anchor in place of the 32-byte test seed; the marker input −715 B; the controller input −70 B); the vault leg runs 4,137 fewer units. `close()` is −876 compute / −3,104 transient (−776 B in the controller's sigscript: its redeem −70 B and the marker template code it carries −706 B) with the same 20 outputs and storage; its transient headroom to 90 % is now 35,388 grams (M6: 32,284). A void has no pools, leaves or siblings, so it is below the draw on every mass; with the same 8 funding inputs and record its storage (71,005) is 4 grams below the worst draw's.
+
+**Tightest margins after M7 (genesis excluded, U-M6-1):** compute 58.7 % and transient **86.5 %** (`close()` K = 16, M2-a), storage **89.9 %** (`close()` K = 16 storage worst case, unchanged: it depends only on output count and values), then 84.5 % (`buy()` b = 1, referral 0.1 KAS, unchanged).
+
+**M7-a / M7-c (M6-h rows): fees.** Round sales S at which C_close = s_C·S and C_draw = s_D·S (s_C = s_D = 50 bp) cover the transaction's fee:
+
+| Transaction | Priority mass | Priority fee (KAS) | S covering it (KAS) | Relay floor (KAS) | S covering the relay floor (KAS) | M6: S covering the priority fee |
+|---|---|---|---|---|---|---|
+| `close()` K = 16 (M2-a shape) | 432,306 | 0.43231 | 86.46 | 0.43231 | 86.46 | 86.77 |
+| `close()` K = 16, storage worst case | 449,692 | 0.44969 | 89.94 | 0.43231 | 86.46 | 89.94 |
+| `draw()` worst | 263,598 | 0.26360 | 52.72 | 0.26360 | 52.72 | 53.16 |
+| `draw()` typical | 222,074 | 0.22207 | 44.41 | 0.22207 | 44.41 | 44.86 |
+| void worst — new | 240,128 | 0.24013 | 48.03 | 0.24013 | 48.03 | — |
+| void typical — new | 201,860 | 0.20186 | 40.37 | 0.20186 | 40.37 | — |
+
+The `draw()` storage supremum with the record at F_MIN_FLOOR (417,684, M7-e) still means a priority fee of at most 0.41768 KAS when storage dominates; C_draw covers it from S = 83.54 KAS (unchanged). The claim fee rows of M6-h are unchanged (valid rows).
+
+**M7-c (M6-b): K frontier for `close()`** (in-memory K_MAX variants of controller, marker, drawer, pool and ticket, D91; M2-a shape; the K = 16 variant is hash-identical to the committed templates, asserted):
+
+| K_MAX = K | Controller redeem B | Controller units / sigscript B | Compute | Transient | Storage at R = 1.69 | % c / t / s | R(K) (KAS, 0.01 up) | Storage at R(K) | M6 % c / t / s |
+|---|---|---|---|---|---|---|---|---|---|
+| **16** | 27,624 | 3,372,030 / 28,364 | 293,743 | 864,612 | 402,301 | 58.7 / **86.5** / 80.5 | 1.69 | 402,301 (80.5 %) | 58.9 / 86.8 / 80.5 |
+| 17 | 28,965 | 3,576,184 / 29,705 | 312,868 | 916,032 | 425,961 | 62.6 / **91.6** / 85.2 | 1.78 | 404,415 (80.9 %) | 62.7 / 91.9 / 85.2 |
+| 18 | 30,301 | 3,780,372 / 31,041 | 332,288 | 967,432 | 449,622 | 66.5 / 96.7 / 89.9 | 1.87 | 406,340 (81.3 %) | 66.6 / 97.1 / 89.9 |
+| 19 | 31,637 | 3,984,624 / 32,377 | 351,808 | 1,018,832 | 473,282 | 70.4 / **101.9** / 94.7 | 1.96 | 408,082 (81.6 %) | 70.5 / 102.2 / 94.7 |
+
+| Limit | Largest K within 90 % | Largest K within 100 % | M6 |
+|---|---|---|---|
+| transient (binding) | **16** | **18** | 16 / 18 |
+| compute | ≥ 19 (largest measured) | ≥ 19 | same |
+| storage, this shape at R = 1.69 | 18 | 19 | same |
+
+Each shard still adds about 51,400 transient grams; K = 17 misses 90 % by 16,032 grams. **K = 16 stays the largest K within 90 %.**
+
+**M7-c (M6-c): B_MAX frontier at K = 16:**
+
+| B_MAX | `close()` K = 16: compute | transient | storage | % c / t / s | `buy()` b = B_MAX, referral: % c / t / s | M6 `close()` % c / t / s |
+|---|---|---|---|---|---|---|
+| 3 | 256,967 | 739,108 | 402,301 | 51.4 / 73.9 / 80.5 | 8.7 / 14.9 / 28.8 | 51.6 / 74.2 / 80.5 |
+| **4** | 293,743 | 864,612 | 402,301 | 58.7 / **86.5** / 80.5 | 9.3 / 15.9 / 21.7 | 58.9 / 86.8 / 80.5 |
+| 5 | 332,019 | 990,116 | 402,301 | 66.4 / **99.0** / 80.5 | 9.9 / 16.9 / 17.4 | 66.6 / 99.3 / 80.5 |
+
+The `buy()` columns are unchanged (the shard does not change). **B_MAX = 4 stays final**; 5 would put `close()` at 99.0 % of transient.
+
+**M7-d (M6-b, M6-d): `draw()` with the anchor at the drawer variants** (worst draw: a = 7, np = 7, 8 funding inputs, cap binding, record; drawer-only variants, marker/vault/pool commit to the variant's hash):
+
+| Drawer | K | m | Compute | Transient | Storage | % c / t / s | M6 % c / t / s |
+|---|---|---|---|---|---|---|---|
+| committed (K_MAX 16, M_DRAW 50) | 16 | 10 | 204,889 | 522,076 | 71,009 | 41.0 / 52.2 / 14.2 | 41.4 / 52.6 / 14.2 |
+| committed (K_MAX 16, M_DRAW 50) | 16 | 25 | 205,469 | 523,996 | 71,009 | 41.1 / 52.4 / 14.2 | 41.5 / 52.8 / 14.2 |
+| committed (K_MAX 16, M_DRAW 50) | 16 | **50** | 206,569 | 527,196 | 71,009 | **41.3 / 52.7 / 14.2** | 41.7 / 53.2 / 14.2 |
+| M_DRAW 25 (variant) | 16 | 10 | 201,914 | 514,176 | 71,009 | 40.4 / 51.4 / 14.2 | 40.6 / 51.8 / 14.2 |
+| M_DRAW 25 (variant) | 16 | 25 | 202,494 | 516,096 | 71,009 | 40.5 / 51.6 / 14.2 | 40.7 / 52.0 / 14.2 |
+| K_MAX 17 (variant, K = 16 drawn) | 16 | 50 | 208,806 | 532,144 | 71,009 | 41.8 / 53.2 / 14.2 | — |
+
+Drawer code: 62,531 B at M_DRAW = 25, 64,506 B at M_DRAW = 50 (M6: 63,047 / 65,097). **m = 50 is within 90 % for `draw()` (asserted)**; with the unchanged `buy()` and `claim()` rows of M6-d it stays m_max.
+
+`draw()` and `claim()` at K_MAX variants — **estimates** (M6-b method: transient only, 4 grams per byte, `refs/rusty-kaspa-v2.1.0/consensus/core/src/constants.rs:31`; baselines measured at K = 16 with the M7 drawer):
+
+| K_MAX | Drawer code B (Δ) | Ticket code B (Δ) | `draw()` extra B | Worst `draw()` transient | % | `claim()` PAY F_MAX extra B | `claim()` transient | % | M6 `draw()` % |
+|---|---|---|---|---|---|---|---|---|---|
+| 16 | 64,506 (+0) | 25,360 (+0) | 0 | 527,196 (measured) | 52.7 | 0 | 160,880 (measured) | 16.1 | 53.2 |
+| 17 | 65,741 (+1,235) | 26,581 (+1,221) | 3,508 | 541,228 (estimate) | 54.1 | 1,929 | 168,596 (estimate) | 16.9 | 54.6 |
+| 18 | 66,974 (+2,468) | 27,799 (+2,439) | 7,009 | 555,232 (estimate) | 55.5 | 3,855 | 176,300 (estimate) | 17.6 | 56.0 |
+| 19 | 68,207 (+3,701) | 29,017 (+3,657) | 10,510 | 569,236 (estimate) | 56.9 | 5,781 | 184,004 (estimate) | 18.4 | 57.4 |
+
+`draw()` and `claim()` remain far from binding K; `close()` transient binds.
+
+**M7-e (M6-g): R re-check** at R = 1.69 KAS, K = 16 (`close()` keeps K + 3 outputs; the anchor is an argument, not an output; a void has fewer outputs than a draw, and the measured worst below is the maximum over both modes):
+
+| Transition | Measured worst | % | Supremum | % | M6 |
+|---|---|---|---|---|---|
+| `close()` (M2-c grid; worst: zero sales, O = J_boost = A = 0, caller 1,000,000 KAS) | 449,692 | 89.9 | 449,692 = (K + 3)·4C/R | **89.9** | 449,692 (89.9 %) |
+| `draw()` / void with the record, f_min = F_MIN = 1 KAS | 317,481 | 63.5 | 327,684 | 65.5 | 327,684 (65.5 %) |
+| `draw()` / void with the record, f_min = F_MIN_FLOOR = 0.1 KAS | 407,481 | 81.5 | 417,684 | 83.5 | 417,684 (83.5 %) |
+
+R = 4C(K + 3)/(0.9 L) = 168,888,889 sompi at K = 16, rounded up to **1.69 KAS**; `draw()` alone needs R ≥ 152,941,177 sompi (1.529 KAS). Binding transition: `close()` (89.9 %, 308 grams below 90 %). **R = 1.69 KAS stays.**
+
+**M7-f (M6-j): drawer sensitivity, byte budget and stack headroom.**
+
+| Pair | m | Drawer redeem B (a / b) | Δ B | Compute (a / b) | Transient (a / b) | Δ compute per B | Δ transient per B | M6 slopes |
+|---|---|---|---|---|---|---|---|---|
+| M_DRAW 25 vs 50 | 25 | 62,668 / 64,643 | 1,975 | 202,494 / 205,469 | 516,096 / 523,996 | 1.506 | 4.000 | 1.976 / 4.000 |
+| K_MAX 16 vs 17 | 50 | 64,643 / 65,878 | 1,235 | 206,569 / 208,806 | 527,196 / 532,144 | 1.811 | 4.006 | 1.648 / 4.006 |
+
+Worst `draw()` at the committed drawer (64,643 B): compute 206,569 (41.3 %), transient 527,196 (52.7 %). With the larger slope of each (1.811 compute, 4.006 transient grams per drawer byte) **the drawer can grow by about 93,050 B before the worst `draw()` reaches 90 % of transient** (134,393 B for compute); transient binds (M6: 91,950 B / 122,154 B).
+
+**Stack headroom at check 24 (measured, replaces M6's fixed sentence):** drawer variants with n extra `int` locals declared before check 1 and used after check 24 compile for n ≤ **4**; n = 5 fails with "entrypoint 'draw' reaches 245 combined stack items … exceeding the consensus limit of 244". **4 free slots, exactly the D104 floor** (M5 Fact S4-1 and M6: 4). The new `isVoid` bool costs one slot; dropping `seed_ref` from the marker struct and the `own` loop freed one. Any further drawer value live across check 24 fires D104.
+
+**D83 re-confirmation (milestone M7 criterion; spec 7 A10 item 8).** Every row of the milestone list is re-run with the final M7 `draw()` and `close()` and stays within 90 %: **K = 16, m_max = M_DRAW = M_CLAIM = 50, B_MAX = 4 and R = 1.69 KAS are final.** Tightest: `close()` storage worst case 89.9 % (sets R), `close()` K = 16 transient 86.5 % (sets K), the drawer stack at its 4-slot floor (sets how much more can go into `draw()`).
+
 ## Scripts (M0 probes)
 
 | Script | Redeem B | Sigscript B | Script units | Compute budget | Source test |
