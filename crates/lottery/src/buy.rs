@@ -134,11 +134,13 @@ pub fn void_min_line() -> String {
 /// TEST-ONLY (spec M7 D103, `probe void-m7`): the line that replaces `void_min_line()` in the
 /// short-void drawer variant, so a void can be shown on testnet without waiting 24 h. Only
 /// `GenesisCase::templates()` with `allow_short_void_window` (refused off testnet/devnet by
-/// `validate`) selects it; never deploy it.
+/// `validate`) selects it; never deploy it. Compiled out of a `mainnet` build (SP12).
+#[cfg(not(feature = "mainnet"))]
 pub const SHORT_VOID_LINE: &str = "int constant VOID_MIN = 0; // TEST-ONLY short void window (probe void-m7, D103): never deploy";
 
 /// TEST-ONLY: the drawer source with the void floor removed (`void_min_line()` replaced by
 /// `SHORT_VOID_LINE`). Panics unless the line occurs exactly once, as a whole line.
+#[cfg(not(feature = "mainnet"))]
 pub fn short_void_drawer_source(src: &str) -> String {
     let line = void_min_line();
     assert_eq!(src.matches(line.as_str()).count(), 1, "drawer source: `{line}` must occur exactly once");
@@ -171,6 +173,7 @@ impl Sources {
 
     /// TEST-ONLY (spec M7 D103): the committed sources with the short-void drawer variant
     /// (`short_void_drawer_source`). Reached through `Templates::test_only_short_void`.
+    #[cfg(not(feature = "mainnet"))]
     pub fn test_only_short_void(b_max: usize) -> Self {
         let c = Self::committed(b_max);
         Self { drawer: short_void_drawer_source(&c.drawer), ..c }
@@ -202,7 +205,9 @@ pub struct Templates {
     pub drawer: Arc<Template>,
     /// TEST-ONLY marker (spec M7 D103): the drawer is the short-void variant (no void floor,
     /// `SHORT_VOID_LINE`). `GenesisCase::validate_with` accepts such templates only with
-    /// `allow_short_void_window`, and that flag only on testnet or devnet.
+    /// `allow_short_void_window`, and that flag only on testnet or devnet. Absent from a
+    /// `mainnet` build (SP12).
+    #[cfg(not(feature = "mainnet"))]
     pub short_void_window: bool,
 }
 
@@ -261,6 +266,7 @@ impl Templates {
             position: Arc::new(position),
             request: Arc::new(request),
             drawer: Arc::new(drawer),
+            #[cfg(not(feature = "mainnet"))]
             short_void_window: src.drawer.contains(SHORT_VOID_LINE),
         }
     }
@@ -283,7 +289,9 @@ impl Templates {
 
     /// TEST-ONLY (spec M7 D103, `probe void-m7`): the template set with the short-void drawer
     /// variant (every template that commits to the drawer hash differs from `get`'s). Use it
-    /// only through `GenesisCase::templates()` with `allow_short_void_window`.
+    /// only through `GenesisCase::templates()` with `allow_short_void_window`. Compiled out
+    /// of a `mainnet` build (SP12).
+    #[cfg(not(feature = "mainnet"))]
     pub fn test_only_short_void(b_max: usize) -> Arc<Templates> {
         static CACHE: OnceLock<Mutex<HashMap<usize, Arc<Templates>>>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));

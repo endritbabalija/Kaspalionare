@@ -86,7 +86,9 @@ pub struct GenesisCase {
     /// can be shown on testnet without waiting 24 h. Refused unless the network is testnet
     /// or devnet; never set it for a deployment. It selects the TEST-ONLY short-void drawer
     /// variant (`templates()`): the production drawer rejects draw_window < VOID_MIN in
-    /// check 1, so such an instance could neither draw nor void under it.
+    /// check 1, so such an instance could neither draw nor void under it. Absent from a
+    /// `mainnet` build, with the variant itself (SP12).
+    #[cfg(not(feature = "mainnet"))]
     pub allow_short_void_window: bool,
     /// Funding inputs: outpoint (e.g. from a `Ledger`) and entry.
     pub funding: Vec<(TransactionOutpoint, UtxoEntry)>,
@@ -138,6 +140,7 @@ impl GenesisCase {
             drawer,
             position,
             network: NetworkType::Testnet,
+            #[cfg(not(feature = "mainnet"))]
             allow_short_void_window: false,
             funding,
             change: true,
@@ -226,7 +229,9 @@ impl GenesisCase {
     /// window, and point the instance constants that name templates (the drawer's pool_tpl,
     /// vault_tpl and ticket_tpl, the vault's record_tpl, request_tpl and position_tpl) at the
     /// short-void template set `templates()` now returns (they all commit, directly or not,
-    /// to the drawer hash). `validate` still refuses it off testnet/devnet.
+    /// to the drawer hash). `validate` still refuses it off testnet/devnet. Not in a
+    /// `mainnet` build (SP12).
+    #[cfg(not(feature = "mainnet"))]
     pub fn set_test_only_short_void_window(&mut self, draw_window: i64) {
         self.allow_short_void_window = true;
         self.drawer.draw_window = draw_window;
@@ -243,7 +248,11 @@ impl GenesisCase {
     /// `allow_short_void_window` the TEST-ONLY short-void drawer variant (spec M7 D103; the
     /// only route to it, and `validate` refuses the flag off testnet/devnet).
     pub fn templates(&self) -> Arc<Templates> {
-        if self.allow_short_void_window { Templates::test_only_short_void(self.b_max) } else { Templates::get(self.b_max) }
+        #[cfg(not(feature = "mainnet"))]
+        if self.allow_short_void_window {
+            return Templates::test_only_short_void(self.b_max);
+        }
+        Templates::get(self.b_max)
     }
 
     /// `validate()` with the drawer's route checked against the templates `t`.
@@ -389,17 +398,25 @@ impl GenesisCase {
         // window from every point of view (A5), so a void and a draw are never both valid.
         // The drawer's check 1 enforces the same floor (Stage 5 fix A); the TEST-ONLY
         // short-void variant drops it and goes only with the TEST-ONLY flag (D103).
-        if t.short_void_window && !self.allow_short_void_window {
-            return Err("the TEST-ONLY short-void drawer variant requires allow_short_void_window (D103)".into());
-        }
-        if self.allow_short_void_window {
-            if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
-                return Err(format!("network {:?}: allow_short_void_window is TEST-ONLY, allowed only on testnet or devnet (D103)", self.network));
+        // A `mainnet` build has neither the flag nor the variant (SP12): the floor always applies.
+        #[cfg(feature = "mainnet")]
+        let short = false;
+        #[cfg(not(feature = "mainnet"))]
+        let short = {
+            if t.short_void_window && !self.allow_short_void_window {
+                return Err("the TEST-ONLY short-void drawer variant requires allow_short_void_window (D103)".into());
             }
-            if !t.short_void_window {
-                return Err("allow_short_void_window needs the TEST-ONLY short-void drawer variant (GenesisCase::templates()): the production drawer requires draw_window >= VOID_MIN (check 1)".into());
+            if self.allow_short_void_window {
+                if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
+                    return Err(format!("network {:?}: allow_short_void_window is TEST-ONLY, allowed only on testnet or devnet (D103)", self.network));
+                }
+                if !t.short_void_window {
+                    return Err("allow_short_void_window needs the TEST-ONLY short-void drawer variant (GenesisCase::templates()): the production drawer requires draw_window >= VOID_MIN (check 1)".into());
+                }
             }
-        } else if d.draw_window < VOID_MIN {
+            self.allow_short_void_window
+        };
+        if !short && d.draw_window < VOID_MIN {
             return Err(format!("draw_window = {} < VOID_MIN = {VOID_MIN} (2F, D97): a void could overlap a valid draw", d.draw_window));
         }
         if d.draw_window + d.claim_window > WINDOWS_MAX {
@@ -810,6 +827,7 @@ mod tests {
     /// Spec M7 D97, D103: draw_window < VOID_MIN is refused unless the TEST-ONLY
     /// `allow_short_void_window` flag is set, and the flag is refused off testnet/devnet.
     #[test]
+    #[cfg(not(feature = "mainnet"))]
     fn m7_void_window_floor_and_test_only_flag() {
         let good = case();
         assert_eq!(good.drawer.draw_window, VOID_MIN);
@@ -845,6 +863,7 @@ mod tests {
     /// line replaced) is reached only through `GenesisCase::templates()` with the TEST-ONLY
     /// flag, and `validate_with` refuses it without the flag.
     #[test]
+    #[cfg(not(feature = "mainnet"))]
     fn m7_void_floor_in_production_drawer_and_variant_only_via_flag() {
         use crate::buy::{SHORT_VOID_LINE, Sources, short_void_drawer_source, void_min_line};
         assert_eq!(VOID_MIN, 864_000);

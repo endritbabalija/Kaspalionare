@@ -628,6 +628,75 @@ fn sp12_test_seed_feature_is_gone() {
     assert!(main.status.success(), "mainnet must build:\n{}", String::from_utf8_lossy(&main.stderr));
 }
 
+/// The TEST-ONLY short-void drawer variant (D103, `probe void-m7`) and its genesis flag, as a
+/// downstream crate names them. A `mainnet` build of `lottery` must not have any of them.
+const SHORT_VOID_SYMBOLS: [&str; 7] = [
+    "SHORT_VOID_LINE",
+    "short_void_drawer_source",
+    "test_only_short_void",
+    "short_void_window",
+    "allow_short_void_window",
+    "set_test_only_short_void_window",
+    "Sources::test_only_short_void",
+];
+
+/// SP12 (M7 Stage 6, re-review note 2): the TEST-ONLY short-void drawer variant is compiled
+/// out of a `mainnet` build, as the old `test-seed` path was (DP22). A probe crate (written
+/// under `crates/target/sp12-probe`, its own workspace, sharing `crates/target/sp12`) names
+/// every variant symbol: with `lottery`'s default features it builds (positive control), with
+/// `--no-default-features --features mainnet` each symbol fails to resolve.
+#[test]
+fn sp12_short_void_variant_absent_from_mainnet() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let probe = crates.join("target").join("sp12-probe");
+    std::fs::create_dir_all(probe.join("src")).unwrap();
+    let lottery = crates.join("lottery").display().to_string().replace('\\', "/");
+    let manifest = format!(
+        "[package]\nname = \"sp12-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[workspace]\n\n\
+         [features]\nmainnet = [\"lottery/mainnet\"]\n\n\
+         [dependencies]\nlottery = {{ path = \"{lottery}\", default-features = false }}\n"
+    );
+    std::fs::write(probe.join("Cargo.toml"), manifest).unwrap();
+    // The same pinned versions as the workspace (rusty-kaspa v2.1.0 by git rev).
+    std::fs::copy(crates.join("Cargo.lock"), probe.join("Cargo.lock")).unwrap();
+    let main_rs = "#![allow(unused)]\n\
+         use lottery::buy::{Sources, Templates};\n\
+         use lottery::genesis::GenesisCase;\n\
+         fn main() {\n\
+         \x20   let a = lottery::buy::SHORT_VOID_LINE;\n\
+         \x20   let b = lottery::buy::short_void_drawer_source;\n\
+         \x20   let c = Templates::test_only_short_void;\n\
+         \x20   let d = Sources::test_only_short_void;\n\
+         \x20   let e = |t: &Templates| t.short_void_window;\n\
+         \x20   let f = |g: &GenesisCase| g.allow_short_void_window;\n\
+         \x20   let g = GenesisCase::set_test_only_short_void_window;\n\
+         }\n";
+    std::fs::write(probe.join("src").join("main.rs"), main_rs).unwrap();
+    let target = crates.join("target").join("sp12");
+    let check = |features: &[&str]| {
+        let mut args = vec!["check", "--manifest-path"];
+        let m = probe.join("Cargo.toml").display().to_string();
+        let t = target.display().to_string();
+        args.push(&m);
+        args.extend(["--target-dir", &t]);
+        args.extend(features);
+        std::process::Command::new(env!("CARGO")).args(&args).output().expect("run cargo")
+    };
+    let dev = check(&[]);
+    assert!(dev.status.success(), "positive control: the probe must build without `mainnet`:\n{}", String::from_utf8_lossy(&dev.stderr));
+    let main = check(&["--features", "mainnet"]);
+    let err = String::from_utf8_lossy(&main.stderr);
+    assert!(!main.status.success(), "a mainnet build of lottery still has the TEST-ONLY short-void variant");
+    for sym in SHORT_VOID_SYMBOLS {
+        let name = sym.rsplit("::").next().unwrap();
+        // Sources::test_only_short_void and Templates::test_only_short_void share a name:
+        // count the errors that name it.
+        let want = if sym == "Sources::test_only_short_void" { 2 } else { 1 };
+        let lines = err.lines().filter(|l| l.starts_with("error") && l.contains(&format!("`{name}`"))).count();
+        assert!(lines >= want, "mainnet build: `{sym}` still resolves ({lines} error lines name it):\n{err}");
+    }
+}
+
 /// Every file under `dir` (recursive) containing one of `needles`: (path, line number, line).
 fn grep(dir: &std::path::Path, needles: &[&str]) -> Vec<String> {
     let mut hits = vec![];

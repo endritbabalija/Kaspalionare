@@ -6,7 +6,9 @@ Every covenant milestone checks value conservation for its transitions (5.5). It
 
 Proposals in `docs/DECISIONS.md` marked "confirm in spec Mx" are settled in that milestone's spec before any code.
 
-Out of scope until later: a real seed source (randomness is parked), economic tuning beyond the starting values, ticket transfer, any front end, mainnet.
+Out of scope until later: economic tuning beyond the starting values, ticket transfer, any front end, mainnet.
+
+Seed: the seed source is the anchor block's hash (M7); the miner-withholding bias is OPEN on the release gate (D100, amended 2026-10-13).
 
 ---
 
@@ -159,7 +161,7 @@ Done when:
   - cleanup: the dead M4 draw branch in `crates/lottery/src/draw.rs` (`SIG_DRAW_M4`, `args_m4`, the 22-push path of `RoundResult::from_tx`; M5 S4-9).
 
 ## M7 — Real seed
-Status: in progress (design session done 2026-10-13: spec `docs/specs/7.md` approved, plan `docs/specs/7-handoff.md` approved, decisions D93–D105 recorded; the implementation session follows the handoff. "Randomness is parked" is lifted in `CLAUDE.md` and above when the implementation session ends)
+Status: done (2026-10-13, spec `docs/specs/7.md` with its implementation amendments; the seed is the hash of the anchor block X, the first selected-chain block with DAA ≥ D = the marker's creation DAA + seed_offset, authenticated in `draw()` by one `OpChainblockSeqCommit` call and a 272-byte KIP-21 preimage proof (D93–D95, amended: the P opcode call and P.hash dropped); closes R1 (D93, SP5); void mode as the missed-draw fallback, valid from D + 2F (D96), with the floor `draw_window >= VOID_MIN` enforced in drawer check 1 and `seed_offset >= 1` in `close()`; U4 closed (D98), U6 bounded (D102); marker without `seed_ref` and `refresh()` (D99); the TEST-ONLY seed and the `test-seed` feature deleted (D101, SP12); K = 16, m_max = 50, B_MAX = 4 and R = 1.69 KAS final (D83 re-confirmed: `close()` K = 16 at 86.5 % transient, `close()` storage worst case 89.9 %, worst `draw()` 41.3 / 52.7 / 14.2 %, drawer stack headroom 4 = the D104 floor); `draw-m7` and `void-m7` accepted on testnet-10 (KIP-21 live; the void ran under a TEST-ONLY short-void drawer variant that a `mainnet` build does not contain); two covenant-reviewer passes, no must-fix; open on the release gate: the miner-withholding bias (D100 amended: ε far below 0.27 where the whale check binds, rentable burst hashrate, the parent-omission lever; candidate fix VDF+ZK); see `docs/DECISIONS.md` and `docs/costs.md`)
 
 Replaces the TEST-ONLY seed of `draw()` with a real seed source, following the direction in `docs/research/randomness-sources-on-kaspa.md` (§4, M. Sutton: a PoW chain block fixed in advance at a predetermined blue-score offset, read through `OpChainblockSeqCommit`, no menu for the miner or the caller) and its three open items (blue-score anchoring, miner-withholding cost, missed-draw fallback; DECISIONS 2026-10-13), and fixes review R1 (the `close()` caller must no longer choose seed_ref). Two sessions: a design session that writes `docs/specs/7.md` with the owner's decisions and no covenant code, then an implementation session (attack tests first, then the scripts, then `covenant-reviewer`, then the re-measurements below).
 
@@ -181,6 +183,17 @@ Done when (the spec sets the details):
   - M6-g: the `close()` storage worst case if `close()` gains or loses an output, and the `draw()` storage supremum if `draw()` gains an output (for example a seed-proof object);
   - M6-j: the drawer sensitivity and byte budget (about 91,950 B before the worst `draw()` reaches 90 % of transient), and the drawer's stack headroom (4 free slots at check 24) whenever a value stays live across check 24.
 
+## Spike — VDF+ZK seed feasibility (before M8)
+Status: todo (user decision 2026-10-13, DECISIONS row "VDF+ZK feasibility spike")
+
+Local only, no testnet. Answers whether the candidate fix for the anchor miner's withholding bias (D100, amended) fits in `draw()`: seed = H(VDF(X.hash)) with the VDF evaluation proven by `OpZkPrecompile`. Starts with a short spec approved by the owner.
+
+Done when:
+- a drawer variant verifies a real Groth16 proof (and, for comparison, a RISC Zero succinct proof) inside the worst M7 `draw()` in the local engine;
+- compute, transient and storage mass and the stack use at check 24 are measured against D104 (lower bound from the precompile alone: about 69 % compute with Groth16, about 91 % with RISC Zero);
+- the verdict is recorded: fits as is, fits only with a split `draw()` (and what that costs), or does not fit;
+- the margin-floor question of the amended D100 row (ε = 0 at margin 1.0 for a self-referring caller) is answered or handed to the owner as a decision.
+
 ## M8 — Testnet-10 end to end
 Status: todo
 
@@ -199,8 +212,9 @@ Release gate (not a milestone):
 - no mainnet value until the SilverScript/rusty-kaspa revision check is resolved and the mass-limit result (feasibility Q7) has been re-run against the release in use;
 - the reviewer checklist passes on every shape;
 - an independent audit is scheduled.
-- the `close()` caller can no longer choose seed_ref (review R1, M2), fixed as part of the real seed design;
+- ~~the `close()` caller can no longer choose seed_ref (review R1, M2), fixed as part of the real seed design~~ **closed in M7** (D93: no seed reference is stored or chosen; the anchor follows from the marker's creation DAA; SP5);
 - `draw()` caps the next round's G2 at G2_MAX (O-S5-1, M3);
 - the toolchain check is done: SilverScript's rusty-kaspa rev `a41a333` is an ancestor of the pinned release and `crypto/txscript` is diffed (DECISIONS pins row, 2026-10-09).
 - the vault items left open by M6 (DECISIONS 2026-10-13 OPEN rows) are resolved or accepted: the residual deposit lock-out at 10⁹× the genesis price (D84), the request griefing residual, mitigated by cost only (D87, O-M6-1; candidates: request batching, a per-round request queue), and partial withdrawals while the vault holds less than 10 KAS (q = 0, O-M6-3; reviewer's option: whole withdrawals only);
-- the missed-draw item is resolved, including the claim-window gaps it causes (M4): a late `draw()` whose caller uses old inputs can create pools whose claim deadline has already passed (U4; tripwire test `parked_u4_late_draw_creates_already_expired_pools`), and a `close()` later than T + D_RET − (seed_offset + draw_window + claim_window) lets `return_deposit_after` forfeit winning tickets before their pool deadline (U6).
+- ~~the missed-draw item is resolved, including the claim-window gaps it causes (M4): a late `draw()` whose caller uses old inputs can create pools whose claim deadline has already passed (U4; tripwire test `parked_u4_late_draw_creates_already_expired_pools`), and a `close()` later than T + D_RET − (seed_offset + draw_window + claim_window) lets `return_deposit_after` forfeit winning tickets before their pool deadline (U6)~~ **closed in M7** (void mode, D96, with the on-chain floor `draw_window >= VOID_MIN`; U4 closed by D98, the tripwire inverted into SP6; U6 bounded by D102);
+- **OPEN (M7, D100 amended 2026-10-13):** the anchor miner's withholding bias. The profit condition α > ε must use the minimum ε the game-size rule allows (where the whale check binds ε is far below 0.27, and about 0 at margin = 1.0 for a player who also takes the referral and both caller rewards), α is rentable burst hashrate (the anchor time is predictable to within seconds), and leaving an honest candidate out of a block's parents is a cheaper lever than withholding. Items: a feasibility spike for the candidate fix (seed = H(VDF(X.hash)) proven with `OpZkPrecompile`) and a measurement of rentable burst hashrate against that ε. The genesis builder refuses mainnet until this is resolved.
