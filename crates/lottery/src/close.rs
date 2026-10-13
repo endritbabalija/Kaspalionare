@@ -25,7 +25,6 @@ use crate::state::{ControllerState, K_MAX, MarkerState, ParamsState, Payout, Sha
 /// Instance values of the tests (spec M2 D17-D23).
 pub const TEST_ROUND_LEN: i64 = 864_000;
 pub const TEST_D_MIN: i64 = 72_000;
-pub const TEST_SEED_OFFSET: i64 = 600;
 /// Round 1 deadline T in the fixtures.
 pub const TEST_DEADLINE: i64 = 1_000_000;
 /// The fixture fee address.
@@ -147,7 +146,8 @@ impl CloseCase {
             cap: 2_000,
             round_len: TEST_ROUND_LEN,
             d_min: TEST_D_MIN,
-            seed_offset: TEST_SEED_OFFSET,
+            // Spec M7 D93, D97: the offset from the marker's creation DAA score to D.
+            seed_offset: crate::game::SEED_OFFSET,
         };
         let params = ParamsState {
             round: 1,
@@ -305,7 +305,6 @@ impl CloseCase {
             s_c: c.s_c,
             s_d: c.s_d,
             st: c.st,
-            seed_ref: math.seed_ref,
             funder_class: 0,
             funder_key: [0; 33],
         };
@@ -415,6 +414,7 @@ impl CloseCase {
             budget_delta: 0,
             outpoints,
             funding_sk: self.funding_sk,
+            sim: None,
         }
     }
 }

@@ -147,6 +147,7 @@ fn built(t: Arc<Templates>, inputs: Vec<In>, outputs: Vec<TransactionOutput>, lo
         budget_delta,
         outpoints,
         funding_sk: sk,
+        sim: None,
     }
 }
 
@@ -736,10 +737,10 @@ impl ReturnCase {
 
 // ------------------------------------------------------------------------ refresh()
 
-/// The object `refresh()` re-creates (A6, D59).
+/// The object `refresh()` re-creates (A6, D59). Spec M7 D99: the marker has no `refresh()`
+/// (a refreshed marker would have a new creation DAA score, so a new anchor: a re-roll).
 #[derive(Clone, Debug)]
 pub enum RefreshObj {
-    Marker(MarkerState),
     Pool(PoolState),
     Ticket(TicketState),
     /// Spec M5 A7 (D76): the share position, the vault request and the settlement record.
@@ -751,7 +752,6 @@ pub enum RefreshObj {
 impl RefreshObj {
     pub fn template(&self, t: &Templates) -> Arc<Template> {
         match self {
-            RefreshObj::Marker(_) => t.marker.clone(),
             RefreshObj::Pool(_) => t.pool.clone(),
             RefreshObj::Ticket(_) => t.ticket.clone(),
             RefreshObj::Position(_) => t.position.clone(),
@@ -762,7 +762,6 @@ impl RefreshObj {
 
     pub fn redeem(&self, t: &Templates) -> Vec<u8> {
         match self {
-            RefreshObj::Marker(s) => t.marker_redeem(s),
             RefreshObj::Pool(s) => t.pool_redeem(s),
             RefreshObj::Ticket(s) => t.ticket.redeem(&s.values()),
             RefreshObj::Position(s) => t.position_redeem(s),
@@ -775,10 +774,9 @@ impl RefreshObj {
         harness::pay_to_script_hash_script(&self.redeem(t))
     }
 
-    /// The object's name (`marker`, `pool`, `ticket`, `position`, `request`, `record`).
+    /// The object's name (`pool`, `ticket`, `position`, `request`, `record`).
     pub fn name(&self) -> &'static str {
         match self {
-            RefreshObj::Marker(_) => "marker",
             RefreshObj::Pool(_) => "pool",
             RefreshObj::Ticket(_) => "ticket",
             RefreshObj::Position(_) => "position",

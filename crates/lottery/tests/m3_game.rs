@@ -211,12 +211,13 @@ fn dp18_seed_mapping() {
         let m = r.range(2, M_DRAW);
         let s = seed_numbers(&cov, round, &seed, m);
         // Independent recomputation of h.
-        let mut msg = b"KLOT/test-seed".to_vec();
-        assert_eq!(msg.len(), 14);
+        // Spec M7 D94: the tag is "KLOT/seed" and the source X.hash.
+        let mut msg = b"KLOT/seed".to_vec();
+        assert_eq!(msg.len(), 9);
         msg.extend_from_slice(&cov);
         msg.extend_from_slice(&round.to_le_bytes());
         msg.extend_from_slice(&seed);
-        assert_eq!(msg.len(), 86);
+        assert_eq!(msg.len(), 81);
         let h = blake2b_simd::Params::new().hash_length(32).hash(&msg);
         assert_eq!(&s.h[..], h.as_bytes());
         assert!(s.rank < RANKS && (1..=m as u8).contains(&s.bonus));
@@ -301,7 +302,6 @@ fn marker(sales: i64, ref_paid: i64, m: i64, jackpot: i64, j_boost: i64, g2: i64
         s_c: 50,
         s_d: 50,
         st: [400, 300, 300, 0, 0],
-        seed_ref: 0,
         funder_class: 0,
         funder_key: [0; 33],
     }
@@ -396,20 +396,18 @@ fn fee_split_d41() {
 
 #[test]
 fn claim_deadline_d39() {
-    // DP19: a fresh funding input: own + CLAIM_WINDOW.
-    let seed_ref = 1_000_600;
-    let own = seed_ref + DRAW_WINDOW + 5_000;
-    assert_eq!(claim_deadline(own, seed_ref, DRAW_WINDOW, CLAIM_WINDOW), Some(own + CLAIM_WINDOW));
-    // Only old inputs: seed_ref + DRAW_WINDOW + CLAIM_WINDOW.
-    assert_eq!(claim_deadline(seed_ref - 10, seed_ref, DRAW_WINDOW, CLAIM_WINDOW), Some(seed_ref + DRAW_WINDOW + CLAIM_WINDOW));
+    // Spec M7 D98: D_claim = D + draw_window + claim_window, a constant of the round (no own).
+    let d = 1_000_600;
+    assert_eq!(claim_deadline(d, DRAW_WINDOW, CLAIM_WINDOW), Some(d + DRAW_WINDOW + CLAIM_WINDOW));
     // A6 bounds.
-    assert_eq!(claim_deadline(DAA_MAX, 0, 0, 0), None);
-    assert_eq!(claim_deadline(0, DAA_MAX - DRAW_WINDOW, DRAW_WINDOW, 0), None);
-    assert_eq!(claim_deadline(DAA_MAX - 1, 0, 0, 1), None);
-    assert_eq!(claim_deadline(DAA_MAX - 2, 0, 0, 1), Some(DAA_MAX - 1));
-    // Constants (D39): 7 days and 12 h at 10 BPS.
+    assert_eq!(claim_deadline(DAA_MAX, 0, 0), None);
+    assert_eq!(claim_deadline(-1, 0, 0), None);
+    assert_eq!(claim_deadline(DAA_MAX - DRAW_WINDOW, DRAW_WINDOW, 0), None);
+    assert_eq!(claim_deadline(DAA_MAX - 1, 0, 1), None);
+    assert_eq!(claim_deadline(DAA_MAX - 2, 0, 1), Some(DAA_MAX - 1));
+    // Constants (D39, spec M7 D97): 7 days and 2F = 24 h at 10 BPS.
     assert_eq!(CLAIM_WINDOW, 7 * 24 * 3600 * 10);
-    assert_eq!(DRAW_WINDOW, 12 * 3600 * 10);
+    assert_eq!(DRAW_WINDOW, 24 * 3600 * 10);
 }
 
 #[test]

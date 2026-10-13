@@ -721,8 +721,13 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     let cn = cs.tx.outputs.len() - 1;
     let caller = merged(ctx, c_start, Op::new(cid, cn as u32), &cs.tx.outputs[cn].script_public_key).await?.0;
     let cdaa = caller.entry.block_daa_score;
-    let seed_ref = x.marker.seed_ref;
-    println!("close {cid} at DAA {cdaa}; seed_ref {seed_ref}");
+    // M7 Stage 1a (minimal, so the workspace builds): D = the marker's creation DAA score +
+    // seed_offset (spec M7 D93) replaces the marker's removed seed_ref. STAGE 4: the draw
+    // below still uses a fabricated anchor (DrawCase's default ChainSim with X.hash =
+    // TEST_ONLY_SEED), which the local engine accepts but testnet-10 rejects at drawer check
+    // 8; Stage 4 replaces it with `anchor_from_rpc` (D103).
+    let seed_ref = lottery::game::anchor_daa(cdaa as i64, x.controller.seed_offset);
+    println!("close {cid} at DAA {cdaa}; D {seed_ref}");
 
     // ---- draw_test_seed()
     let mut d = DrawCase::new_with(K, &t);
@@ -739,7 +744,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     let roots = d.marker.roots.clone();
     d.sync_roots();
     assert_eq!(d.marker.roots, roots, "the marker roots are the shard trees' roots");
-    d.test_only_seed = TEST_ONLY_SEED;
+    d.x_hash = TEST_ONLY_SEED; // STAGE 4: the real anchor X.hash from RPC.
     d.cov = cov;
     d.funder = me;
     d.funding_sk = ctx.sk;

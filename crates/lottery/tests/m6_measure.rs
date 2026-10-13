@@ -31,13 +31,13 @@ mod common;
 use std::sync::Arc;
 
 use common::m2::{accept_draw, accept_m4, tpl};
-use common::m4::{refresh_marker, refresh_pool, refresh_ticket};
+use common::m4::{refresh_pool, refresh_ticket};
 use common::m5::{Case5, accept5, dep, keys, refresh5_bases, wd, wd_whole};
 use common::m6::wd_at_wmin;
 use common::measure::*;
 use harness::{Masses, masses, priority_fee};
 use lottery::buy::{BuyCase, Built, Final, KAS, M_REF, TEST_DEPOSIT, Template, Templates, b_max, funding_spk, relay_floor_fee};
-use lottery::claim::{ClaimCase, RefreshCase, RefreshObj, ReturnCase};
+use lottery::claim::{ClaimCase, RefreshObj, ReturnCase};
 use lottery::close::{CloseCase, MIN_CALLER_OUTPUT};
 use lottery::draw::DrawCase;
 use lottery::game::{A_MAX, ClaimMode, F_MIN, F_MIN_FLOOR, M_CLAIM, M_DRAW, P_MIN, muldiv, w_min};
@@ -270,8 +270,8 @@ fn m6a_redeem_sizes() {
     row("ticket (claim, return x2, refresh)", &t.ticket, t.ticket.redeem(&claim.ticket.values()).len());
     row("controller (close, draw_leg)", &t.controller, t.controller_redeem(&close.controller).len());
     row("params (set_params, close_leg)", &t.params, t.params_redeem(&close.params).len());
-    row("marker (draw_leg, refresh)", &t.marker, t.marker_redeem(&close.expected().marker).len());
-    row("drawer (draw_test_seed, TEST-ONLY seed)", &t.drawer, t.drawer_redeem(&draw.drawer).len());
+    row("marker (draw_leg)", &t.marker, t.marker_redeem(&close.expected().marker).len());
+    row("drawer (draw, anchor proof)", &t.drawer, t.drawer_redeem(&draw.drawer).len());
     row("vault (draw_leg, request_deposit, request_withdraw with W4b)", &t.vault, t.vault_redeem(&draw.vault).len());
     row("pool (absorb_leg, ticket_leg, refresh)", &t.pool, t.pool_redeem(&claim.pool).len());
     row("record (request_leg, refresh)", &t.record, t.record_redeem(&st.record).len());
@@ -343,15 +343,10 @@ fn m6a_rows() -> Vec<Row> {
     rows.push(Row::new("return_deposit_after (b = 2 ticket)", &accept_m4("M6-a return", &ReturnCase::after().build()), None));
     rows.push(Row::new("return_deposit_with_pool (b = 2 ticket, K = 1 pool)", &accept_m4("M6-a return pool", &ReturnCase::with_pool().build()), Some(1)));
 
-    for (name, r) in [("ticket", refresh_ticket()), ("pool (K = 4)", refresh_pool()), ("marker (K = 4)", refresh_marker())] {
+    // Spec M7 D99: the marker's refresh rows are removed (the marker has no `refresh()`).
+    for (name, r) in [("ticket", refresh_ticket()), ("pool (K = 4)", refresh_pool())] {
         rows.push(Row::new(format!("refresh {name}"), &accept_m4("M6-a refresh", &r.build()), None));
     }
-    let mut c = CloseCase::new(K_FINAL);
-    for i in 0..K_FINAL {
-        c.shards[i].state.root = [0x20 + i as u8; 32];
-    }
-    let r = RefreshCase::new(RefreshObj::Marker(c.expected().marker), 50 * KAS, 1_500_000);
-    rows.push(Row::new(format!("refresh marker (K = {K_FINAL})"), &accept_m4("M6-a refresh marker 16", &r.build()), None));
     for (name, r) in refresh5_bases() {
         let case: Case5 = r.into();
         rows.push(Row::new(format!("refresh {name}"), &accept5("M6-a refresh", &case, &case.build()), None));

@@ -127,7 +127,7 @@ fn funding_inputs(funding: &[FundingIn], sk: &[u8; 32]) -> Vec<In> {
 
 fn built(t: Arc<Templates>, inputs: Vec<In>, outputs: Vec<TransactionOutput>, lock_time: u64, budget_delta: i32, sk: [u8; 32]) -> Built {
     let outpoints = (0..inputs.len() as u32).map(outpoint).collect();
-    Built { templates: t, args: vec![], inputs, outputs, genesis: vec![], lock_time, shard_budget: None, budget_delta, outpoints, funding_sk: sk }
+    Built { templates: t, args: vec![], inputs, outputs, genesis: vec![], lock_time, shard_budget: None, budget_delta, outpoints, funding_sk: sk, sim: None }
 }
 
 fn total(funding: &[FundingIn]) -> u64 {

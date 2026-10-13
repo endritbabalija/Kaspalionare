@@ -140,7 +140,6 @@ fn cp1_genesis_buys_close() {
         s_c: ctrl.s_c,
         s_d: ctrl.s_d,
         st: ctrl.st,
-        seed_ref: own + ctrl.seed_offset,
         funder_class: 0,
         funder_key: [0; 33],
     };

@@ -16,10 +16,13 @@
 //! - position.sil `vault_leg` PO1..PO4; record.sil `request_leg` RL1..RL4;
 //! - request.sil `settle` S1..S13 (A6.1 checks 1-13);
 //! - position.sil, request.sil, record.sil `refresh` A7.1..A7.7 (M4 A6 checks 1-7, D76);
-//! - drawer.sil `draw_test_seed`: only the checks M5 adds or changes (spec A5): 5, 13, 14,
-//!   17, C1, C2, 20, 21, 22, 23, 24, 25, 26 in that order (C3 computes and has no require; the
-//!   unchanged M3 checks are assumed to pass, which holds for M5 attacks: they change only
-//!   the vault, the record and the conversion).
+//! - drawer.sil `draw`: only the checks M5 and M7 add or change (spec M5 A5, M7 A4): 1 (the
+//!   anchor length, M7), 5, 7 (mk_daa, D and the lock, M7), 8 (the anchor proof and the seed,
+//!   or the void's zero win5 and empty proofs, M7), 13, 14, 17, C1, C2, 20, 21, 22, 23, 24,
+//!   25, 26 in that order (C3 computes and has no require; the unchanged M3 checks are
+//!   assumed to pass, which holds for M5 attacks: they change only the vault, the record and
+//!   the conversion). Check 8's two `OpChainblockSeqCommit` calls are modelled on the
+//!   `ChainSim` the transaction runs against (`Final::sim`).
 //!
 //! Interpretations the model makes (handoff S2-*, O-S2-*): the request, position and
 //! settle entries take the template bytes of their foreign outputs as arguments (S2-1); the
@@ -31,10 +34,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use harness::{ArtifactValue, ScriptPublicKey, pay_to_script_hash_script};
+use harness::{ANCHOR_LEN, ArtifactValue, Hash, ScriptPublicKey, pay_to_script_hash_script};
+use lottery::anchor::AnchorProof;
 use lottery::buy::{Built, Final, InKind, Template, Templates};
 use lottery::claim::{SIG_REFRESH, payout_spk};
-use lottery::draw::{ARG_RECORD_PREFIX, ARG_RECORD_SUFFIX, ARG_WC, ARG_X1, ARG_X2, ARG_Y, DrawCase, Lie, SIG_DRAW_M5};
+use lottery::draw::{
+    ARG_ANCHOR, ARG_LEAVES, ARG_MK_DAA, ARG_RECORD_PREFIX, ARG_RECORD_SUFFIX, ARG_SIBLINGS, ARG_WC, ARG_WIN5, ARG_X1, ARG_X2, ARG_Y, DrawCase, Lie, SIG_DRAW,
+};
 use lottery::game::{
     ASSETS_MAX, D_IDLE, DAA_MAX, MIN_DEPOSIT, P_MIN, SHARES_MAX, TOTAL_MAX, VAULT_REQ_DELAY, guarded_add, record_in_range, request_in_range, wc_witness_ok,
     witness_ok,
@@ -305,7 +311,7 @@ pub fn check_input(tx: &Tx, i: usize, draw: Option<&DrawCase>) -> Option<Verdict
         e if e == SIG_REFRESH && (is(&ts.position) || is(&ts.request) || is(&ts.record) || ["Position", "Request", "Record"].contains(&name.as_str())) => {
             refresh(tx, i, &name.to_lowercase())
         }
-        e if e == SIG_DRAW_M5 => drawer(tx, i, draw?),
+        e if e == SIG_DRAW => drawer(tx, i, draw?),
         _ => return None,
     })
 }
@@ -544,19 +550,68 @@ fn refresh(tx: &Tx, i: usize, file: &str) -> Verdict {
 
 // ---------------------------------------------------------------- the drawer (A5)
 
-/// The drawer's M5 checks. The truth is the case without its `Lie` (fabricated case edits
-/// stay); the claims are read from the transaction.
+/// `OpChainblockSeqCommit(h)` on the transaction's chain (spec M7 A0): the commitment iff `h`
+/// is a known selected-chain block within the window (blue_score + F > pov), else `None`
+/// (the opcode fails: no accessor, unknown, not selected or too deep).
+fn chainblock_seq_commit(tx: &Tx, h: [u8; 32]) -> Option<[u8; 32]> {
+    let sim = tx.f.sim.as_deref()?;
+    let h = Hash::from_bytes(h);
+    let b = sim.block(h)?;
+    if !sim.on_chain(h) || b.blue_score + sim.finality_depth() <= sim.pov_blue_score() {
+        return None;
+    }
+    sim.commit_of(h).map(|c| c.as_bytes())
+}
+
+/// The drawer's M5 and M7 checks. The truth is the case without its `Lie` (fabricated case
+/// edits stay); the claims are read from the transaction.
 fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     let l = |n: &str| format!("drawer:{n}");
     if i != 0 {
         return Err(l("1"));
     }
+    // Spec M7 check 1: the anchor is empty (void) or ANCHOR_LEN bytes.
+    let anchor = need(tx.arg_bytes(0, ARG_ANCHOR), &l("1"))?;
+    check(anchor.is_empty() || anchor.len() == ANCHOR_LEN, &l("1"))?;
+    let is_void = anchor.is_empty();
     let mut tc = case.clone();
     tc.lie = Lie::default();
     let t = tx.b.templates.clone();
     // Check 5: the vault input, A3.1 ranges (extended) and value.
     let (role, vt) = need(tx.own_state(2).as_ref().and_then(vault_of), &l("5"))?;
     check(vault_ranges(role, &vt, tx.in_value(2)) == Some(tc.reserve() as i64) && vt.round == tc.drawer.round - 1, &l("5"))?;
+    // Spec M7 check 7: mkDaa = OpTxInputDaaScore(1) in [0, DAA_MAX), the mk_daa argument
+    // equal to it, D = mkDaa + seed_offset < DAA_MAX; draw: tx.daa >= D; void: tx.daa >= D +
+    // draw_window (< DAA_MAX).
+    let mk_daa = tx.daa(1);
+    check((0..DAA_MAX).contains(&mk_daa) && tx.arg_int(0, ARG_MK_DAA) == Some(mk_daa), &l("7"))?;
+    let seed_offset = need(tx.own_state(3).as_ref().and_then(|s| int(s, "seed_offset")), &l("7"))?;
+    let d = mk_daa + seed_offset;
+    check(d < DAA_MAX, &l("7"))?;
+    if is_void {
+        let v = d as i128 + tc.drawer.draw_window as i128;
+        check(v < DAA_MAX as i128 && tx.tx_daa() as i128 >= v, &l("7"))?;
+    } else {
+        check(tx.tx_daa() >= d, &l("7"))?;
+    }
+    // Spec M7 check 8: draw: both preimages recomputed and equal to the opcode's commitment,
+    // P is X's selected parent (pc == x_pc), dX >= D, dP < D, win5 = the seed's main numbers
+    // from X.hash (the rank and bonus are not separately modelled: the M3 checks 9-10 follow);
+    // void: win5 = 0, no leaves and no siblings.
+    let win5 = need(tx.arg_bytes(0, ARG_WIN5), &l("8"))?;
+    if is_void {
+        let empty = |n| tx.arg_bytes(0, n).is_some_and(|b| b.is_empty());
+        check(win5 == [0u8; 5] && empty(ARG_LEAVES) && empty(ARG_SIBLINGS), &l("8"))?;
+    } else {
+        let a = need(AnchorProof::from_bytes(&anchor).ok(), &l("8"))?;
+        check(chainblock_seq_commit(tx, a.x.hash) == Some(a.x.seq_commit()), &l("8"))?;
+        check(chainblock_seq_commit(tx, a.p.hash) == Some(a.p.seq_commit()), &l("8"))?;
+        check(a.p.seq_commit() == a.x.parent_commit, &l("8"))?;
+        let (dx, dp) = (a.x.daa_score as i64, a.p.daa_score as i64);
+        check(dx >= d && dp < d, &l("8"))?;
+        let sn = lottery::game::seed_numbers(&tx.in_id(0), tc.marker.round, &a.x.hash, tc.marker.m);
+        check(win5 == sn.main, &l("8"))?;
+    }
     let x = tc.expected();
     let rec = vt.pend_dep > 0 || vt.pend_wsh > 0;
     let n_cov = 3 + x.np() + rec as usize;
@@ -564,7 +619,9 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     // Check 13.
     check(cov_outputs(tx, 0, n_cov, cov), &l("13"))?;
     // Check 14 (U-2): V + H <= ASSETS_MAX, so V' <= ASSETS_MAX before any price is formed.
-    check(vt.total_assets as i128 + x.amounts.h as i128 <= ASSETS_MAX as i128, &l("14"))?;
+    // Spec M7 D96: a void pays H to the boost pot (hAmt = 0).
+    let h_amt = if is_void { 0 } else { x.amounts.h };
+    check(vt.total_assets as i128 + h_amt as i128 <= ASSETS_MAX as i128, &l("14"))?;
     // Check 17: the witness with the rules of V' (J fixed before any conversion, D71).
     let (x1, y, x2) = (need(tx.arg_int(0, ARG_X1), &l("17"))?, need(tx.arg_int(0, ARG_Y), &l("17"))?, need(tx.arg_int(0, ARG_X2), &l("17"))?);
     check(witness_ok(&x.rule, x.v_prime, x.o_prime, tc.controller.j, x1, y, x2) && x1 <= TOTAL_MAX && x2 <= TOTAL_MAX, &l("17"))?;

@@ -7,8 +7,8 @@
 //! under the mutant (the mutant is killed). Other inputs may still reject (layered checks);
 //! the claim is about the named input only.
 //!
-//! Mutants of an assignment line (D10_n2, D14_jp, D14_sp, D15_jboost, D15_lower, D15_q,
-//! D19_max, and the weakened D16) change what the script computes: under them the valid
+//! Mutants of an assignment line (D10_n2, D14_jp, D14_sp, D15_jboost, D15_lower, D15_q and the
+//! weakened D16; D19_max retired in M7) change what the script computes: under them the valid
 //! draw is rejected (every positive test fails) and the attack is accepted
 //! (`killed_assign`).
 //!
@@ -228,10 +228,7 @@ fn d6_pot() {
 
 // ================================================================ drawer: checks 7-10
 
-#[test]
-fn d7() {
-    killed(D, &["D7"], early_lock()); // DA12
-}
+// d7 (tag D7, early_lock) is retired: replaced by M7D_lock / SA5 (m7_mutants.rs).
 
 #[test]
 fn d8_canon() {
@@ -491,15 +488,8 @@ fn d18_class() {
     killed(D, &["D18_class"], pool_class3()); // DA9 (Stage 4)
 }
 
-#[test]
-fn d19_own() {
-    killed(D, &["D19_own"], own_lie()); // DA17 (and its negative control)
-}
-
-#[test]
-fn d19_max() {
-    killed_assign(D, &["D19_max"], deadline_without_draw_window()); // DA13 (Stage 4)
-}
+// d19_own (tag D19_own, own_lie) and d19_max (tag D19_max) are retired: replaced by
+// M7D_mk / SA5 and M7C_claim / SP6 (m7_mutants.rs; spec M7 D98).
 
 #[test]
 fn d20_count() {
@@ -714,10 +704,10 @@ fn every_m3_tag_is_tested() {
             tags.retain(|t| !t.starts_with("RF"));
         }
         // drawer.sil, vault.sil: the M5 tags (prefix "M5", spec M5 A10 mutants, Stage 6's
-        // m5_mutants.rs; M5 Stage 2 decision S2-8) and the M6 tags (prefix "M6",
-        // m6_mutants.rs) are not M3's.
+        // m5_mutants.rs; M5 Stage 2 decision S2-8), the M6 tags (prefix "M6",
+        // m6_mutants.rs) and the M7 tags (prefix "M7", m7_mutants.rs) are not M3's.
         if f == "drawer.sil" || f == "vault.sil" {
-            tags.retain(|t| !t.starts_with("M5") && !t.starts_with("M6"));
+            tags.retain(|t| !t.starts_with("M5") && !t.starts_with("M6") && !t.starts_with("M7"));
         }
         tags.sort();
         tags.dedup();
@@ -729,7 +719,9 @@ fn every_m3_tag_is_tested() {
             n += 1;
         }
     }
-    // 66 drawer tags and 22 leg tags (Stage 4: 63 + 22; Stage 5 added D1_fmin, D12_jp,
-    // D12_sp).
-    assert_eq!(n, 88, "M3 tag count changed: update this test and the handoff table");
+    // 63 drawer tags and 22 leg tags (Stage 4: 63 + 22; Stage 5 added D1_fmin, D12_jp,
+    // D12_sp; spec M7 retired D7, D19_own and D19_max, replaced by M7D_lock, M7D_mk and
+    // M7C_claim). Until the M7 Stage 2 drawer.sil lands, the committed drawer still carries
+    // the three retired tags and this test fails on "tag D7 has no mutant test".
+    assert_eq!(n, 85, "M3 tag count changed: update this test and the handoff table");
 }

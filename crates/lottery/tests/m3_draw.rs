@@ -1,5 +1,7 @@
-//! M3 positive tests for `draw()` (spec M3 A8: DP1-DP16, DP19, DP20, DP22, and the script
-//! halves of DP17 and DP18; DP17/DP18 Rust halves are in m3_game.rs, DP21 in m3_measure.rs).
+//! M3 positive tests for `draw()` (spec M3 A8: DP1-DP16, DP20, and the script half of DP17;
+//! the DP17 Rust half is in m3_game.rs, DP21 in m3_measure.rs). Spec M7: every draw runs
+//! against a `ChainSim` with the anchor proof; DP18, DP19 and DP22 are replaced by SP3, SP6
+//! and SP12 (m7_seed.rs).
 //!
 //! Every transaction runs every input in the v2.1.0 engine under committed budgets
 //! (`accept_draw`: the legs and funding inputs first, then the drawer at input 0). Every
@@ -14,8 +16,7 @@ mod common;
 use common::m2::*;
 use harness::CovenantBinding;
 use lottery::buy::{Final, KAS};
-use lottery::close::FundingIn;
-use lottery::combo::{Combo, unrank};
+use lottery::combo::Combo;
 use lottery::draw::{DrawCase, DrawExpected, RoundResult};
 use lottery::game::{A_MAX, CLAIM_WINDOW, DRAW_WINDOW, F_MIN, F_MIN_FLOOR, TOTAL_MAX, muldiv, witness_ok};
 use lottery::smt::{Tree, empty_hashes};
@@ -113,7 +114,8 @@ fn dp1_genesis_buys_close_draw() {
     let (cc, ops) = ch.close_case(900_000);
     ch.close(&cc, ops, lottery::close::TEST_DEADLINE as u64 + 10);
     let mk = ch.marker.clone().unwrap().1;
-    let fund_daa = (mk.seed_ref + DRAW_WINDOW + 1_000) as u64;
+    let d = ch.anchor_d();
+    let fund_daa = (d + DRAW_WINDOW + 1_000) as u64;
     let (c, ops) = ch.draw_case(seed, &[], fund_daa);
     let x = c.expected();
     let vault0 = c.vault.clone();
@@ -145,12 +147,13 @@ fn dp1_genesis_buys_close_draw() {
     assert!(witness_ok(&x.rule, x.v_prime, x.o_prime, ctrl0.j, x.fix.x1, x.fix.y, x.fix.x2));
     // Drawer' round 2.
     assert_eq!(x.drawer.round, 2);
-    // Pools: J, G2 x 1, B_1..3 (+ R each); win = main || bonus; deadline = own + CLAIM_WINDOW.
+    // Pools: J, G2 x 1, B_1..3 (+ R each); win = main || bonus; deadline = D + DRAW_WINDOW +
+    // CLAIM_WINDOW (spec M7 D98).
     assert_eq!(f.tx.outputs[3].value, mk.jackpot as u64 + r);
     assert_eq!(f.tx.outputs[4].value, mk.g2 as u64 + r);
     for p in &x.new_pools {
         assert_eq!(p.win, [w.main[0], w.main[1], w.main[2], w.main[3], w.main[4], w.bonus]);
-        assert_eq!(p.deadline, fund_daa as i64 + CLAIM_WINDOW);
+        assert_eq!(p.deadline, d + DRAW_WINDOW + CLAIM_WINDOW);
         assert_eq!(p.roots, mk.roots);
         // Spec M4 A7 check 25 (D54, D55).
         assert_eq!(p.ticket_tpl, t.ticket.hash);
@@ -364,8 +367,8 @@ fn two_round_chain_with(seed1: [u8; 32], st: Option<[i64; 5]>, np: usize) -> Cha
     ch.buy(1, &b, ops, 310_000);
     let (cc, ops) = ch.close_case(900_000);
     ch.close(&cc, ops, lottery::close::TEST_DEADLINE as u64 + 10);
-    let seed_ref = ch.marker.as_ref().unwrap().1.seed_ref;
-    let (c, ops) = ch.draw_case(seed1, &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
+    let d = ch.anchor_d();
+    let (c, ops) = ch.draw_case(seed1, &[], (d + DRAW_WINDOW + 1_000) as u64);
     assert_eq!(c.expected().np(), np, "round 1 creates {np} pools");
     ch.draw(&c, ops, c.lock_time + 10);
     // Round 2: one buy, close at T2.
@@ -430,8 +433,8 @@ fn dp16_two_full_rounds() {
     assert_eq!(mk2.round, 2);
     assert_eq!(mk2.jackpot - mk2.j_boost + mk2.g2 * (mk2.m - 1), drawn2, "marker 2 carries J(2), J_boost(2), G2(2) with L(2) = the vault's");
     assert_eq!(ch.controller.1.round, 3);
-    let seed_ref = mk2.seed_ref;
-    let (c, ops) = ch.draw_case([3u8; 32], &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
+    let d = ch.anchor_d();
+    let (c, ops) = ch.draw_case([3u8; 32], &[], (d + DRAW_WINDOW + 1_000) as u64);
     let f = ch.draw(&c, ops, c.lock_time + 10);
     check_draw(&c, &f);
     assert_eq!(ch.drawer.1.round, 3);
@@ -485,50 +488,11 @@ fn dp17_script_accepts_reference_witnesses() {
     }
 }
 
-/// DP18 (script half): Rust = script for the seeds giving rank 0, rank 142,505, bonus 1 and
-/// bonus m (round 1, m = 10, cov = COV; seeds from m3_game `dp18_seed_search`).
-#[test]
-fn dp18_script_seed_mapping() {
-    for (i, want) in [(70_922u64, "rank 0"), (36_808, "rank max"), (15, "bonus 1"), (2, "bonus m")] {
-        let mut c = sold();
-        c.test_only_seed = [0; 32];
-        c.test_only_seed[..8].copy_from_slice(&i.to_le_bytes());
-        let s = c.seed();
-        match want {
-            "rank 0" => assert_eq!(s.rank, 0),
-            "rank max" => assert_eq!(s.rank, lottery::combo::RANKS - 1),
-            "bonus 1" => assert_eq!(s.bonus, 1),
-            _ => assert_eq!(s.bonus as i64, c.marker.m),
-        }
-        c.hold_jackpot(0, 1);
-        let x = c.expected();
-        assert_eq!(x.new_pools[0].win, [s.main[0], s.main[1], s.main[2], s.main[3], s.main[4], s.bonus]);
-        assert_eq!(s.main, unrank(s.rank));
-        run(&c);
-    }
-}
+// DP18 (script half) is replaced by SP3 (m7_seed.rs, spec M7 A8): the seed source is X.hash.
 
 // ---------------------------------------------------------------- DP19
 
-/// DP19: claim deadline (D39): a fresh funding input gives own + CLAIM_WINDOW; only old
-/// inputs give seed_ref + DRAW_WINDOW + CLAIM_WINDOW.
-#[test]
-fn dp19_claim_deadline() {
-    let mut c = sold();
-    c.hold_jackpot(0, 1);
-    let own = c.own() as i64;
-    assert!(own > c.marker.seed_ref + DRAW_WINDOW);
-    let x = c.expected();
-    assert_eq!(x.d_claim, own + CLAIM_WINDOW);
-    assert!(x.new_pools.iter().all(|p| p.deadline == own + CLAIM_WINDOW));
-    run(&c);
-    let mut c = c.clone();
-    c.funding = vec![FundingIn { value: 100 * KAS, daa: 900_000 }];
-    assert!((c.own() as i64) < c.marker.seed_ref + DRAW_WINDOW);
-    let x = c.expected();
-    assert_eq!(x.d_claim, c.marker.seed_ref + DRAW_WINDOW + CLAIM_WINDOW);
-    run(&c);
-}
+// DP19 is replaced by SP6 (m7_seed.rs, spec M7 D98): D_claim = D + draw_window + claim_window.
 
 // ---------------------------------------------------------------- DP20
 
@@ -585,8 +549,8 @@ fn dp23_zero_sales_round_at_f_min_floor() {
     let mut ch0 = Chain::genesis_with(4, edit(0), false);
     let (c, ops) = ch0.close_case(900_000);
     ch0.close(&c, ops, lottery::close::TEST_DEADLINE as u64 + 10);
-    let seed_ref = ch0.marker.as_ref().unwrap().1.seed_ref;
-    let (d0, _) = ch0.draw_case([4u8; 32], &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
+    let d_ref = ch0.anchor_d();
+    let (d0, _) = ch0.draw_case([4u8; 32], &[], (d_ref + DRAW_WINDOW + 1_000) as u64);
     let x0 = d0.expected();
     assert_eq!(x0.fee.t_f, 0);
     assert_eq!(x0.fee_output().map(|i| x0.values[i]), Some(0), "f_min = 0: zero-value fee output");
@@ -596,8 +560,8 @@ fn dp23_zero_sales_round_at_f_min_floor() {
     ch.close(&c, ops, lottery::close::TEST_DEADLINE as u64 + 10);
     let mk = ch.marker.as_ref().unwrap().1.clone();
     assert_eq!((mk.sales, ch.controller.1.acc), (0, 0), "zero sales, A = 0");
-    let seed_ref = mk.seed_ref;
-    let (d, ops) = ch.draw_case([4u8; 32], &[], (seed_ref + DRAW_WINDOW + 1_000) as u64);
+    let d_ref = ch.anchor_d();
+    let (d, ops) = ch.draw_case([4u8; 32], &[], (d_ref + DRAW_WINDOW + 1_000) as u64);
     let x = d.expected();
     assert_eq!(x.fee.t_f, 0);
     assert!(!x.fee.paid && x.fee_output().is_none(), "T_F = 0 < f_min: carried");
@@ -629,25 +593,4 @@ fn dp24_zero_prizes_held() {
 
 // ---------------------------------------------------------------- DP22
 
-/// DP22 (D43): `cargo check -p lottery --no-default-features --features mainnet,test-seed`
-/// fails with the gate's compile_error, and `--no-default-features --features mainnet`
-/// builds (without a drawer). Shells out to the same cargo with a separate target directory
-/// (`crates/target/dp22`) so it does not wait on this test run's build lock; the first run
-/// checks the dependencies once (a few minutes), later runs are fast.
-#[test]
-fn dp22_seed_gate() {
-    let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
-    let target = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/dp22");
-    let check = |features: &str| {
-        std::process::Command::new(env!("CARGO"))
-            .args(["check", "-p", "lottery", "--no-default-features", "--features", features, "--manifest-path", manifest, "--target-dir", target])
-            .output()
-            .expect("run cargo")
-    };
-    let gated = check("mainnet,test-seed");
-    let err = String::from_utf8_lossy(&gated.stderr);
-    assert!(!gated.status.success(), "mainnet + test-seed must not build");
-    assert!(err.contains("TEST-ONLY seed cannot be built for mainnet"), "gate message missing:\n{err}");
-    let main = check("mainnet");
-    assert!(main.status.success(), "mainnet without test-seed must build:\n{}", String::from_utf8_lossy(&main.stderr));
-}
+// DP22 is replaced by SP12 (m7_seed.rs, spec M7 D101): the `test-seed` feature and its gate are deleted.

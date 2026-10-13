@@ -408,7 +408,8 @@ pub struct Chain {
     pub marker_trees: Vec<Tree>,
     /// Live prize pools: (outpoint, state, remaining = value - R, creation DAA).
     pub pools: Vec<(TransactionOutpoint, PoolState, u64, u64)>,
-    /// Creation DAA of the marker in `marker` (its close; a `refresh()` moves it, M4).
+    /// Creation DAA of the marker in `marker` (its close; spec M7 D99: the marker has no
+    /// `refresh()`, so nothing moves it). D = marker_daa + seed_offset.
     pub marker_daa: u64,
     /// Live tickets (M4): (outpoint, state, value = d b + accrued, creation DAA).
     pub tickets: Vec<(TransactionOutpoint, TicketState, u64, u64)>,
@@ -558,24 +559,26 @@ impl Chain {
         f
     }
 
-    /// The winning numbers the TEST-ONLY seed gives the current controller's round (call it
-    /// before `close()`: the marker takes the controller's round and m).
+    /// The winning numbers the anchor hash X.hash = `seed` gives the current controller's
+    /// round (spec M7 D94; call it before `close()`: the marker takes the controller's round
+    /// and m).
     pub fn winning(&self, seed: &[u8; 32]) -> lottery::game::SeedNumbers {
         let c = &self.controller.1;
         lottery::game::seed_numbers(&self.cov.as_bytes(), c.round, seed, c.m)
     }
 
     /// A draw case over the chain's drawer, marker, vault and controller, absorbing the live
-    /// pools at `absorb` (indices into `self.pools`), lock time max(seed_ref, deadlines),
-    /// one funding input of 100 KAS created at `funding_daa`; and the outpoints in input order.
+    /// pools at `absorb` (indices into `self.pools`), lock time max(D, deadlines), one funding
+    /// input of 100 KAS created at `funding_daa`; and the outpoints in input order. The
+    /// anchor is X.hash = `seed` on `ChainSim::anchored(D, seed)` (spec M7 A7; `DrawCase::sim`
+    /// left `None`, which derives exactly that chain from the case's D and x_hash).
     pub fn draw_case(&mut self, seed: [u8; 32], absorb: &[usize], funding_daa: u64) -> (DrawCase, Vec<TransactionOutpoint>) {
         let (mop, mk) = self.marker.clone().expect("a closed round to draw");
         let mut c = DrawCase::new_with(self.marker_trees.len(), &self.t);
         c.drawer = self.drawer.1.clone();
         c.drawer_daa = self.drawer.2;
         c.marker = mk;
-        // The marker was created by the close that created the current controller (or by
-        // a later `refresh()`, M4).
+        // The marker was created by the close that created the current controller.
         c.marker_daa = self.marker_daa;
         c.vault = self.vault.1.clone();
         c.vault_daa = self.vault.2;
@@ -583,7 +586,8 @@ impl Chain {
         c.pot = self.pot;
         c.controller_daa = self.controller.2;
         c.trees = self.marker_trees.clone();
-        c.test_only_seed = seed;
+        c.x_hash = seed;
+        c.sim = None;
         c.cov = self.cov;
         c.absorbed = absorb.iter().map(|&i| PoolIn { state: self.pools[i].1.clone(), remaining: self.pools[i].2, daa: self.pools[i].3 }).collect();
         c.fix_lock_time();
@@ -628,11 +632,35 @@ impl Chain {
         f
     }
 
+    /// D of the closed round: the marker's creation DAA score + the controller's seed_offset
+    /// (spec M7 D93).
+    pub fn anchor_d(&self) -> i64 {
+        assert!(self.marker.is_some(), "a closed round");
+        lottery::game::anchor_daa(self.marker_daa as i64, self.controller.1.seed_offset)
+    }
+
     /// Draw the closed round with `seed` and no absorption: one fresh funding input created
-    /// at seed_ref + DRAW_WINDOW + 1,000, applied at lock_time + 10 (as DP16).
+    /// at D + DRAW_WINDOW + 1,000, applied at lock_time + 10 (as DP16).
     pub fn draw_round(&mut self, seed: [u8; 32]) -> Final {
-        let seed_ref = self.marker.as_ref().expect("a closed round to draw").1.seed_ref;
-        let (c, ops) = self.draw_case(seed, &[], (seed_ref + lottery::game::DRAW_WINDOW + 1_000) as u64);
+        let d = self.anchor_d();
+        let (c, ops) = self.draw_case(seed, &[], (d + lottery::game::DRAW_WINDOW + 1_000) as u64);
+        self.draw(&c, ops, c.lock_time + 10)
+    }
+
+    /// A void case (spec M7 D96) over the chain's objects: `draw_case` with an empty anchor
+    /// and lock time max(D + draw_window, deadlines).
+    pub fn void_case(&mut self, absorb: &[usize], funding_daa: u64) -> (DrawCase, Vec<TransactionOutpoint>) {
+        let (mut c, ops) = self.draw_case(lottery::draw::TEST_X_HASH, absorb, funding_daa);
+        c.set_void(true);
+        (c, ops)
+    }
+
+    /// Void the closed round with no absorption: one funding input created at D +
+    /// DRAW_WINDOW + 1,000, applied at lock_time + 10. The chain advances as after a draw
+    /// (no pools are created).
+    pub fn void(&mut self) -> Final {
+        let d = self.anchor_d();
+        let (c, ops) = self.void_case(&[], (d + lottery::game::DRAW_WINDOW + 1_000) as u64);
         self.draw(&c, ops, c.lock_time + 10)
     }
 
@@ -765,13 +793,7 @@ impl Chain {
         f
     }
 
-    /// `refresh()` of the current marker, at lock_time = its creation + D_IDLE.
-    pub fn refresh_marker_case(&mut self, funding_daa: u64) -> (RefreshCase, Vec<TransactionOutpoint>) {
-        let (mop, mk) = self.marker.clone().expect("a closed round's marker");
-        let value = self.ledger.get(&mop).expect("marker UTXO").amount;
-        let daa = self.marker_daa;
-        self.refresh_case(RefreshObj::Marker(mk), mop, value, daa, funding_daa)
-    }
+    // Spec M7 D99: `refresh_marker_case` removed (the marker has no `refresh()`; SP10).
 
     /// `refresh()` of pool `pi`.
     pub fn refresh_pool_case(&mut self, pi: usize, funding_daa: u64) -> (RefreshCase, Vec<TransactionOutpoint>) {
@@ -801,7 +823,6 @@ impl Chain {
         let mut b = c.build_with(self.t.clone());
         b.outpoints = ops.clone();
         let step = match c.obj {
-            RefreshObj::Marker(_) => "refresh (marker)",
             RefreshObj::Pool(_) => "refresh (pool)",
             RefreshObj::Ticket(_) => "refresh (ticket)",
             _ => panic!("Chain::refresh is the M4 step; M5 objects use Chain::refresh5 (common::m5)"),
@@ -809,10 +830,6 @@ impl Chain {
         let f = accept_m4(step, &b);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("refresh applies");
         match &c.obj {
-            RefreshObj::Marker(mk) => {
-                self.marker = Some((outs[0], mk.clone()));
-                self.marker_daa = daa;
-            }
             RefreshObj::Pool(_) => {
                 let pi = self.pools.iter().position(|p| p.0 == ops[0]).expect("refreshed pool tracked");
                 self.pools[pi].0 = outs[0];

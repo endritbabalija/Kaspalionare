@@ -235,7 +235,6 @@ pub struct CloseMath {
     /// Max creation DAA score over all inputs.
     pub own: i64,
     pub deadline: i64,
-    pub seed_ref: i64,
 }
 
 /// T' = max(T + round_len, own + d_min) (A4 check 20); the script requires T' < DAA_MAX.
@@ -243,9 +242,12 @@ pub fn next_deadline(t: i64, round_len: i64, own: i64, d_min: i64) -> i64 {
     (t + round_len).max(own + d_min)
 }
 
-/// seed_ref = own + seed_offset (A4 check 20; randomness parked, the offset is a placeholder).
-pub fn seed_ref(own: i64, seed_offset: i64) -> i64 {
-    own + seed_offset
+/// The anchor reference D = mk_daa + seed_offset (spec M7 D93, drawer check 7): mk_daa is the
+/// marker's creation DAA score (`OpTxInputDaaScore(1)` in `draw()`), seed_offset the
+/// controller's committed constant. Replaces the M2-M6 `seed_ref(own, offset)`; `close()`
+/// no longer forms a seed reference.
+pub fn anchor_daa(mk_daa: i64, seed_offset: i64) -> i64 {
+    mk_daa + seed_offset
 }
 
 /// Reference computation of a `close()`: `shards` are (S_i, P_R,i), `controller_value` is
@@ -277,7 +279,6 @@ pub fn close_math(c: &ControllerState, p: &ParamsState, shards: &[(i64, i64)], c
         m_next: rule.choose(),
         own,
         deadline: next_deadline(c.deadline, c.round_len, own, c.d_min),
-        seed_ref: seed_ref(own, c.seed_offset),
     }
 }
 
@@ -309,10 +310,17 @@ pub const F_MIN_FLOOR: i64 = 10_000_000;
 pub const G2_MAX: i64 = TOTAL_MAX / 254;
 /// Claim window, 7 days at 10 BPS (D39).
 pub const CLAIM_WINDOW: i64 = 6_048_000;
-/// Seed-validity window, 12 h at 10 BPS (D39, design 11).
-pub const DRAW_WINDOW: i64 = 432_000;
-/// Domain tag of the TEST-ONLY seed hash (D42), 14 bytes.
-pub const SEED_TAG: &[u8; 14] = b"KLOT/test-seed";
+/// Offset from the marker's creation DAA score to the anchor reference D, about 1 minute at
+/// 10 BPS (spec M7 D93, D97; the controller's `seed_offset`).
+pub const SEED_OFFSET: i64 = 600;
+/// Draw window, 2F = 24 h at 10 BPS (spec M7 D97): the void delay after D and the
+/// claim-deadline offset (the drawer's `draw_window`).
+pub const DRAW_WINDOW: i64 = 864_000;
+/// Genesis floor of draw_window (spec M7 D97): at tx.daa >= D + 2F the anchor is outside the
+/// opcode window from every point of view (A5), so void and draw are never both valid.
+pub const VOID_MIN: i64 = DRAW_WINDOW;
+/// Domain tag of the seed hash (spec M7 D94, A2), 9 bytes.
+pub const SEED_TAG: &[u8; 9] = b"KLOT/seed";
 
 impl Shares {
     /// The round-r shares frozen in a marker (spec M3 check 11).
@@ -394,6 +402,13 @@ pub fn pool_set(h_j: i64, n2: i64, jackpot: i64, g2: i64, b: &[i64; 5], m: i64) 
         }
     }
     PoolSet { jp, sp, lp, slices, pools }
+}
+
+/// The void mode's pool set (spec M7 D96, check 12): h_J = n2 = 0 and every lp_t forced to 0,
+/// so jp = sp = 0 and np = 0. The slices are still floor(B_t / W_t) (informational).
+pub fn void_pool_set(b: &[i64; 5], m: i64) -> PoolSet {
+    let w = tier_w(m);
+    PoolSet { jp: false, sp: false, lp: [false; 5], slices: std::array::from_fn(|t| b[t] / w[t]), pools: vec![] }
 }
 
 /// a + b for money amounts with the A6 guard a <= TOTAL_MAX - b (`None` = script rejects).
@@ -573,7 +588,7 @@ pub fn witness_ok(rule: &JackpotRule, v_prime: i64, o_prime: i64, j: i64, x1: i6
         && !rule.pass(x2 + 1, y)
 }
 
-/// The TEST-ONLY seed mapping (D42).
+/// The seed mapping (D42, source changed by spec M7 D94).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeedNumbers {
     pub h: [u8; 32],
@@ -592,33 +607,37 @@ pub fn u56_le(b: &[u8]) -> i64 {
     b.iter().rev().fold(0i64, |acc, &x| (acc << 8) | x as i64)
 }
 
-/// h = blake2b("KLOT/test-seed" || cov || round (8 B LE) || test_only_seed); rank =
-/// u56(h[0..7]) mod N; bonus = u56(h[7..14]) mod m + 1 (D42).
-pub fn seed_numbers(cov: &[u8; 32], round: i64, test_only_seed: &[u8; 32], m: i64) -> SeedNumbers {
+/// h = blake2b("KLOT/seed" || cov || round (8 B LE) || x_hash); rank = u56(h[0..7]) mod N;
+/// bonus = u56(h[7..14]) mod m + 1 (D42; spec M7 D94: x_hash is the anchor block's hash).
+pub fn seed_numbers(cov: &[u8; 32], round: i64, x_hash: &[u8; 32], m: i64) -> SeedNumbers {
     assert!(m >= 2);
-    let mut msg = Vec::with_capacity(86);
+    let mut msg = Vec::with_capacity(81);
     msg.extend_from_slice(SEED_TAG);
     msg.extend_from_slice(cov);
     msg.extend_from_slice(&round.to_le_bytes());
-    msg.extend_from_slice(test_only_seed);
+    msg.extend_from_slice(x_hash);
     let h = crate::params::blake2b(&msg);
     let rank = (u56_le(&h[0..7]) % N) as u32;
     let bonus = (u56_le(&h[7..14]) % m + 1) as u8;
     SeedNumbers { h, rank, bonus, main: crate::combo::unrank(rank) }
 }
 
-/// D_claim = max(own, seed_ref + draw_window) + claim_window (D39, check 19); `None` where
-/// the script rejects (own or the sums reach DAA_MAX).
-pub fn claim_deadline(own: i64, seed_ref: i64, draw_window: i64, claim_window: i64) -> Option<i64> {
-    if !(0..DAA_MAX).contains(&own) {
+/// D_claim = D + draw_window + claim_window (spec M7 D98, drawer check 19): a constant of
+/// the round, no input loop and no `own`. `None` where the script rejects (D outside
+/// [0, DAA_MAX) or the sum reaching DAA_MAX).
+pub fn claim_deadline(d: i64, draw_window: i64, claim_window: i64) -> Option<i64> {
+    if !(0..DAA_MAX).contains(&d) {
         return None;
     }
-    let s = seed_ref.checked_add(draw_window)?;
-    if s >= DAA_MAX {
-        return None;
-    }
-    let d = own.max(s) + claim_window;
-    (d < DAA_MAX).then_some(d)
+    let s = d.checked_add(draw_window)?.checked_add(claim_window)?;
+    (s < DAA_MAX).then_some(s)
+}
+
+/// The void lock D + draw_window (spec M7 D96, drawer check 7): the earliest lock_time of a
+/// void. `None` where the script rejects (the sum reaching DAA_MAX).
+pub fn void_lock(d: i64, draw_window: i64) -> Option<i64> {
+    let s = d.checked_add(draw_window)?;
+    (0..DAA_MAX).contains(&s).then_some(s)
 }
 
 // ------------------------------------------------------------------------ M4: claim()
@@ -1331,7 +1350,12 @@ mod tests {
     fn deadline_and_seed() {
         assert_eq!(next_deadline(1_000_000, 864_000, 1_500_000, 72_000), 1_864_000);
         assert_eq!(next_deadline(1_000_000, 864_000, 1_900_000, 72_000), 1_972_000);
-        assert_eq!(seed_ref(1_900_000, 600), 1_900_600);
+        assert_eq!(anchor_daa(1_900_000, SEED_OFFSET), 1_900_600);
+        assert_eq!(claim_deadline(1_900_600, DRAW_WINDOW, CLAIM_WINDOW), Some(1_900_600 + 864_000 + 6_048_000));
+        assert_eq!(claim_deadline(DAA_MAX - DRAW_WINDOW - CLAIM_WINDOW, DRAW_WINDOW, CLAIM_WINDOW), None);
+        assert_eq!(claim_deadline(-1, DRAW_WINDOW, CLAIM_WINDOW), None);
+        assert_eq!(void_lock(1_900_600, DRAW_WINDOW), Some(2_764_600));
+        assert_eq!(void_lock(DAA_MAX - DRAW_WINDOW, DRAW_WINDOW), None);
     }
 
     /// The value bound of W4b (spec M6 A4) in u128: at the price pi = (A + VA) / (S + VS),

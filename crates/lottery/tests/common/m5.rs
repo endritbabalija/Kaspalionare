@@ -786,11 +786,11 @@ impl Chain {
         self.close(&c, ops, t + 10);
     }
 
-    /// A draw case of the closed round (seed, no absorption), funding fresh after
-    /// seed_ref + DRAW_WINDOW; applied by `draw` at lock_time + 10.
+    /// A draw case of the closed round (X.hash = seed, no absorption), funding created at
+    /// D + DRAW_WINDOW + 1,000; applied by `draw` at lock_time + 10.
     pub fn draw_now(&mut self, seed: [u8; 32]) -> (DrawCase, Final) {
-        let seed_ref = self.marker.as_ref().expect("a closed round to draw").1.seed_ref;
-        let (c, ops) = self.draw_case(seed, &[], (seed_ref + lottery::game::DRAW_WINDOW + 1_000) as u64);
+        let d = self.anchor_d();
+        let (c, ops) = self.draw_case(seed, &[], (d + lottery::game::DRAW_WINDOW + 1_000) as u64);
         let f = self.draw(&c, ops, c.lock_time + 10);
         (c, f)
     }

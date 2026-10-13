@@ -315,11 +315,11 @@ fn da5_fee() {
 /// Q not added to O'.
 #[test]
 fn da6_absorption() {
-    // Deadline after seed_ref, so lock_time = deadline - 1 still satisfies check 7.
+    // Deadline after D, so lock_time = deadline - 1 still satisfies check 7.
     let mut good = base();
-    good.absorbed[0].state.deadline = good.marker.seed_ref + 1_000;
+    good.absorbed[0].state.deadline = good.d() + 1_000;
     good.fix_lock_time();
-    assert_eq!(good.lock_time as i64, good.marker.seed_ref + 1_000);
+    assert_eq!(good.lock_time as i64, good.d() + 1_000);
     let mut early = good.clone();
     early.lock_time -= 1;
     pair(&good, &early, POOL0); // pool L5
@@ -629,34 +629,8 @@ fn da11_legs() {
 
 // ---------------------------------------------------------------- DA12
 
-/// DA12 (checks 7, 8): the winning numbers.
-#[test]
-fn da12_seed() {
-    let c = base();
-    let x = c.expected();
-    // win5 of another rank, with consistent proofs and pools for that rank.
-    lie(&c, DRW, |l| l.rank = Some((x.rank + 1) % RANKS));
-    // Non-canonical win5 (reversed order; pools carry it).
-    let mut rev = x.win5;
-    rev.reverse();
-    lie(&c, DRW, |l| l.win5 = Some(rev));
-    // Only the win5 argument changed.
-    args(&c, |a| bytes_arg(a, ARG_WIN5)[4] ^= 1);
-    // A bonus other than the seed's (h_J, n2 and the pools follow it).
-    let ob = c.other_bonus(0);
-    lie(&c, DRW, |l| l.bonus = Some(ob));
-    // Another test seed with the same outputs.
-    args(&c, |a| bytes_arg(a, ARG_SEED)[0] ^= 1);
-    // lock_time = seed_ref - 1 (the absorbed pool's deadline is earlier).
-    let mut early = c.clone();
-    early.lock_time = c.marker.seed_ref as u64 - 1;
-    assert!(early.absorbed[0].state.deadline as u64 <= early.lock_time);
-    pair(&c, &early, DRW);
-    done(&c);
-    // (Stage 4 addition, mutant gap) a non-canonical win5 with the seed's colex rank; a canonical win5 of another rank with genuine proofs (check 8).
-    s4::win5_noncanonical().strike();
-    s4::win5_other_rank().strike();
-}
+// DA12 is replaced by SA6 (seed: win5 of another rank, non-canonical win5, bonus not from h,
+// leaves for another rank), SA4 (another anchor) and SA5 (lock_time = D - 1) in m7_attacks.rs.
 
 // ---------------------------------------------------------------- DA13
 
@@ -697,8 +671,7 @@ fn da13_new_pool_state() {
         b.outputs[3].script_public_key = spkp;
     });
     done(&c);
-    // (Stage 4 addition, mutant gap) only old inputs: D_claim must be seed_ref + DRAW_WINDOW + CLAIM_WINDOW (check 19 D19_max).
-    s4::deadline_without_draw_window().strike();
+    // The Stage 4 D19_max strike (only old inputs) is replaced by SP6 / M7C_claim (spec M7 D98).
 }
 
 // ---------------------------------------------------------------- DA14
@@ -804,58 +777,8 @@ fn da16_input_values() {
     s4::pot_negative().strike();
 }
 
-// ---------------------------------------------------------------- DA17 own argument
-
-/// The three false `own` claims of DA17 on `c`: one below the true maximum creation DAA
-/// score, one above, and a non-maximum input's (the drawer's) DAA score.
-fn own_lies(c: &DrawCase) -> [i64; 3] {
-    let own = c.own() as i64;
-    assert_ne!(c.drawer_daa as i64, own, "the drawer input is not the newest input");
-    [own - 1, own + 1, c.drawer_daa as i64]
-}
-
-/// DA17 (check 19, user decision 2026-10-10: `own` is an explicit argument that must equal
-/// the maximum OpTxInputDaaScore over all inputs): a consistent false claim (the new pools'
-/// D_claim follows it) one too low, one too high, or a non-maximum input's DAA.
-#[test]
-fn da17_own_argument() {
-    let c = base();
-    let d0 = c.expected().d_claim;
-    for o in own_lies(&c) {
-        let mut bad = c.clone();
-        bad.lie.own = Some(o);
-        assert_ne!(bad.expected().d_claim, d0, "own {o}: the lie must move D_claim");
-        pair(&c, &bad, DRW);
-    }
-    done(&c);
-}
-
-/// Point a draw case at templates `t` (a drawer mutant changes the marker, vault and pool
-/// hashes): the drawer's pool_tpl/vault_tpl and the controller's marker_tpl.
-fn retarget(mut c: DrawCase, t: &lottery::buy::Templates) -> DrawCase {
-    c.drawer.pool_tpl = t.pool.hash;
-    c.drawer.vault_tpl = t.vault.hash;
-    c.drawer.ticket_tpl = t.ticket.hash;
-    c.controller.marker_tpl = t.marker.hash;
-    c
-}
-
-/// DA17 negative control: with the check 19 equality removed (mutant `D19_own`), every DA17
-/// claim is accepted by every input, with D_claim moved by the claim. Restored = the
-/// committed source (the mutant is compiled in memory only).
-#[test]
-fn da17_negative_control_without_own_check() {
-    let t = mutant(Sil::Drawer, &["D19_own"]);
-    let c = retarget(base(), &t);
-    let d0 = c.expected().d_claim;
-    accept_draw(&c.build_with(t.clone()));
-    for o in own_lies(&c) {
-        let mut bad = c.clone();
-        bad.lie.own = Some(o);
-        assert_ne!(bad.expected().d_claim, d0);
-        accept_draw(&bad.build_with(t.clone()));
-    }
-}
+// DA17 (own argument) and its negative control are replaced by SA5 (mk_daa +- 1, check 7, tag
+// M7D_mk) in m7_attacks.rs; spec M7 D98 removes own_daa.
 
 // ---------------------------------------------------------------- A6 G2 guard
 

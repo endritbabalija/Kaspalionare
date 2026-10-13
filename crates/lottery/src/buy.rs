@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use harness::{
     ArtifactValue, CovenantBinding, Hash, PopulatedTransaction, ScriptBuilder, ScriptPublicKey, SilAbiArtifact, Transaction,
-    TransactionInput, TransactionOutpoint, TransactionOutput, TxScriptError, UtxoEntry, budget_for, compile_source, covenant_path, execute,
-    outpoint, pay_to_script_hash_script,
+    ChainSim, TransactionInput, TransactionOutpoint, TransactionOutput, TxScriptError, UtxoEntry, budget_for, compile_source, covenant_path, execute,
+    execute_on_chain, outpoint, pay_to_script_hash_script,
 };
 use kaspa_consensus_core::{hashing::sighash_type::SIG_HASH_ALL, sign::sign_input, tx::GenesisCovenantGroup};
 use secp256k1::{Keypair, SECP256K1};
@@ -20,10 +20,9 @@ use silverscript_abi::{encode_contract_entry_sig_script, encode_runtime_state_sc
 use crate::combo::{Combo, bundle_bytes};
 use crate::smt::{Tree, counts_bytes, num_bytes};
 use crate::state::{
-    ControllerState, K_MAX, MarkerState, ParamsState, Payout, PoolState, PositionState, RecordState, RequestState, ShardState, TicketState, VaultState,
+    ControllerState, DrawerState, K_MAX, MarkerState, ParamsState, Payout, PoolState, PositionState, RecordState, RequestState, ShardState, TicketState,
+    VaultState,
 };
-#[cfg(feature = "test-seed")]
-use crate::state::DrawerState;
 
 pub const KAS: u64 = 100_000_000;
 pub const M_REF: u64 = 10_000_000;
@@ -67,7 +66,17 @@ impl Template {
     /// Redeem script for a state: prefix || encoded state || suffix.
     pub fn redeem(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Vec<u8> {
         let c = self.art.contracts.values().next().unwrap();
-        let state = encode_runtime_state_script(&self.art, &c.runtime_state, values).expect("encode state");
+        let state = match encode_runtime_state_script(&self.art, &c.runtime_state, values) {
+            Ok(s) => s,
+            // LEGACY_MARKER_SEED_REF (M7 Stage 1a only; delete in Stage 2 together with the
+            // marker's `seed_ref`): see `LEGACY_SEED_REF`.
+            Err(_) if self.name() == "Marker" && !values.contains_key("seed_ref") => {
+                let mut v = values.clone();
+                v.insert("seed_ref".into(), ArtifactValue::Int(LEGACY_SEED_REF));
+                encode_runtime_state_script(&self.art, &c.runtime_state, &v).expect("encode state")
+            }
+            Err(e) => panic!("encode state: {e}"),
+        };
         [self.prefix.as_slice(), &state, &self.suffix].concat()
     }
 }
@@ -120,8 +129,7 @@ pub struct Sources {
     pub record: String,
     pub position: String,
     pub request: String,
-    /// TEST-ONLY seed drawer (D43): only with the `test-seed` feature.
-    #[cfg(feature = "test-seed")]
+    /// The drawer (spec M7 D101: compiled unconditionally; the TEST-ONLY entry is gone).
     pub drawer: String,
 }
 
@@ -144,7 +152,6 @@ impl Sources {
             record: read_covenant("record.sil"),
             position: read_covenant("position.sil"),
             request: read_covenant("request.sil"),
-            #[cfg(feature = "test-seed")]
             drawer: read_covenant("drawer.sil"),
         }
     }
@@ -160,9 +167,6 @@ impl Sources {
 /// and position_tpl in state (D74: the position commits to VAULT_TPL and the request to
 /// RECORD_TPL and POSITION_TPL); the record has no constructor constant (its request_tpl is
 /// state, written by draw()).
-///
-/// Without the `test-seed` feature there is no drawer (D43): marker, vault and pool are then
-/// compiled with a zero drawer hash, so their draw legs can never pass.
 pub struct Templates {
     pub b_max: usize,
     pub ticket: Arc<Template>,
@@ -175,7 +179,6 @@ pub struct Templates {
     pub record: Arc<Template>,
     pub position: Arc<Template>,
     pub request: Arc<Template>,
-    #[cfg(feature = "test-seed")]
     pub drawer: Arc<Template>,
 }
 
@@ -207,16 +210,12 @@ impl Templates {
         };
         let dummy_ticket = TicketState::new(&dummy_shard, &[Combo::new([1, 2, 3, 4, 5], 1)], &Payout::Schnorr([1; 32]), b_max);
         let controller = Template::from(compile_source(&src.controller, &dummy_controller().ctor()));
-        #[cfg(feature = "test-seed")]
         let drawer = crate::draw::compile_drawer(&src.drawer, controller.hash);
-        #[cfg(feature = "test-seed")]
         let drawer_hash = drawer.hash;
-        #[cfg(not(feature = "test-seed"))]
-        let drawer_hash = [0u8; 32];
         // M6-b K_MAX variants (measurement only, D91): the marker and pool constructor roots
         // follow the controller source's K_MAX (16 for the committed sources).
         let k_max = source_k_max(&src.controller);
-        let marker = Template::from(compile_source(&src.marker, &dummy_marker(k_max).ctor(drawer_hash)));
+        let marker = Template::from(compile_source(&src.marker, &legacy_marker_ctor(&src.marker, dummy_marker(k_max).ctor(drawer_hash))));
         let vault = Template::from(compile_source(&src.vault, &dummy_vault().ctor(drawer_hash)));
         let pool = Template::from(compile_source(&src.pool, &dummy_pool(k_max).ctor(drawer_hash)));
         let record = Template::from(compile_source(&src.record, &dummy_record().ctor()));
@@ -237,18 +236,13 @@ impl Templates {
             record: Arc::new(record),
             position: Arc::new(position),
             request: Arc::new(request),
-            #[cfg(feature = "test-seed")]
             drawer: Arc::new(drawer),
         }
     }
 
-    /// The drawer template hash the marker, vault and pool commit to (zero without the
-    /// `test-seed` feature, D43).
+    /// The drawer template hash the marker, vault and pool commit to (D38).
     pub fn drawer_hash(&self) -> [u8; 32] {
-        #[cfg(feature = "test-seed")]
-        return self.drawer.hash;
-        #[cfg(not(feature = "test-seed"))]
-        return [0u8; 32];
+        self.drawer.hash
     }
 
     /// Shared compiled templates per B_MAX (compiling is slow).
@@ -338,12 +332,10 @@ impl Templates {
         pay_to_script_hash_script(&self.request_redeem(r))
     }
 
-    #[cfg(feature = "test-seed")]
     pub fn drawer_redeem(&self, d: &DrawerState) -> Vec<u8> {
         self.drawer.redeem(&d.values())
     }
 
-    #[cfg(feature = "test-seed")]
     pub fn drawer_spk(&self, d: &DrawerState) -> ScriptPublicKey {
         pay_to_script_hash_script(&self.drawer_redeem(d))
     }
@@ -418,6 +410,26 @@ fn dummy_params() -> ParamsState {
     ParamsState { round: 1, admin_hash: [0; 32], nonce: 0, used: 0, next_s_f: 500, next_s_r: 1_000, next_fee_class: 0, next_fee_key: [0; 33] }
 }
 
+/// LEGACY_MARKER_SEED_REF (M7 Stage 1a only; delete in Stage 2). The Rust `MarkerState` has
+/// no `seed_ref` (spec M7 A3, D99), but until Stage 2 the committed `marker.sil` still declares
+/// `int init_seed_ref` / `int seed_ref` between st5 and funder_class. So that the templates
+/// still compile (and every suite that does not close or draw stays testable), a marker
+/// source that still has the field gets this placeholder value in its constructor
+/// (`legacy_marker_ctor`) and in every encoded marker state (`Template::redeem`). `close()`
+/// then fails at the controller's check 24 (its marker output carries own + seed_offset),
+/// which is the expected Stage 1a failure. Grep LEGACY_MARKER_SEED_REF to remove it.
+pub const LEGACY_SEED_REF: i64 = 0;
+
+/// LEGACY_MARKER_SEED_REF: the marker constructor for `src`, with `LEGACY_SEED_REF` inserted
+/// before funder_class (the last two arguments) iff the source still declares `init_seed_ref`.
+pub fn legacy_marker_ctor(src: &str, mut ctor: Vec<ArtifactValue>) -> Vec<ArtifactValue> {
+    if src.contains("int init_seed_ref") {
+        let at = ctor.len() - 2;
+        ctor.insert(at, ArtifactValue::Int(LEGACY_SEED_REF));
+    }
+    ctor
+}
+
 fn dummy_marker(k_max: usize) -> MarkerState {
     MarkerState {
         round: 1,
@@ -434,7 +446,6 @@ fn dummy_marker(k_max: usize) -> MarkerState {
         s_c: 50,
         s_d: 50,
         st: [400, 300, 300, 0, 0],
-        seed_ref: 0,
         funder_class: 0,
         funder_key: [0; 33],
     }
@@ -677,6 +688,7 @@ impl BuyCase {
             budget_delta: 0,
             outpoints,
             funding_sk: self.funding_sk,
+            sim: None,
         }
     }
 }
@@ -804,6 +816,10 @@ pub struct Built {
     /// Outpoints of the inputs (dummy ones in local tests).
     pub outpoints: Vec<TransactionOutpoint>,
     pub funding_sk: [u8; 32],
+    /// Spec M7 (A7): the fabricated selected chain the scripts see through
+    /// `OpChainblockSeqCommit` (`harness::execute_on_chain`). `None` runs without an accessor
+    /// (`harness::execute`; the opcode then fails with InvalidOpcode). Set by `DrawCase`.
+    pub sim: Option<Arc<ChainSim>>,
 }
 
 pub fn push_redeem(mut sig: Vec<u8>, redeem: &[u8]) -> Vec<u8> {
@@ -886,6 +902,17 @@ pub struct Final {
     pub entries: Vec<UtxoEntry>,
     /// Script units used by each input (unlimited run).
     pub units: Vec<u64>,
+    /// The chain the inputs run against (`Built::sim`).
+    pub sim: Option<Arc<ChainSim>>,
+}
+
+/// Run input `i` of `tx` through the engine, with the `ChainSim` accessor when `sim` is set
+/// (spec M7 A7) and without one otherwise.
+pub fn run_script(tx: &Transaction, entries: &[UtxoEntry], i: usize, enforce_budget: bool, sim: Option<&ChainSim>) -> Result<u64, TxScriptError> {
+    match sim {
+        Some(s) => execute_on_chain(tx, entries, i, enforce_budget, s),
+        None => execute(tx, entries, i, enforce_budget),
+    }
 }
 
 impl Built {
@@ -987,7 +1014,7 @@ impl Built {
                 InKind::Funding | InKind::Owner(_) => P2PK_UNITS,
                 // A rejected dry run (attack tests) gets a generous budget, so the run under the
                 // committed budget fails on the script's own check, not on the budget.
-                _ => execute(&probe, &entries, i, false).unwrap_or(FAILED_RUN_UNITS),
+                _ => run_script(&probe, &entries, i, false, self.sim.as_deref()).unwrap_or(FAILED_RUN_UNITS),
             })
             .collect();
         loop {
@@ -1027,7 +1054,7 @@ impl Built {
             let mut rerun = false;
             for (i, inp) in self.inputs.iter().enumerate() {
                 if let InKind::Owner(_) = inp.kind {
-                    if let Ok(u) = execute(&tx, &entries, i, false) {
+                    if let Ok(u) = run_script(&tx, &entries, i, false, self.sim.as_deref()) {
                         if budget_for(u) > budget_for(units[i]) {
                             units[i] = u;
                             rerun = true;
@@ -1036,7 +1063,7 @@ impl Built {
                 }
             }
             if !rerun {
-                return Final { tx, entries, units };
+                return Final { tx, entries, units, sim: self.sim.clone() };
             }
         }
     }
@@ -1046,14 +1073,14 @@ impl Final {
     /// Run every input under its committed budget, as consensus does.
     pub fn run(&self) -> Result<(), (usize, TxScriptError)> {
         for i in 0..self.tx.inputs.len() {
-            execute(&self.tx, &self.entries, i, true).map_err(|e| (i, e))?;
+            self.run_input(i).map_err(|e| (i, e))?;
         }
         Ok(())
     }
 
     /// Run one input under its committed budget; returns the script units used.
     pub fn run_input(&self, i: usize) -> Result<u64, TxScriptError> {
-        execute(&self.tx, &self.entries, i, true)
+        run_script(&self.tx, &self.entries, i, true, self.sim.as_deref())
     }
 
     /// Every input's result under its committed budget (attack tests check which input

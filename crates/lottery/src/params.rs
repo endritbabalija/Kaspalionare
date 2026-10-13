@@ -238,6 +238,7 @@ impl SetParamsCase {
             budget_delta: 0,
             outpoints,
             funding_sk: self.funding_sk,
+            sim: None,
         }
     }
 }

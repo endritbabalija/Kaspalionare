@@ -12,9 +12,12 @@
 //! `consensus/core/src/tx.rs:335-385`). No covenant script runs at genesis: the deployer
 //! commits to every initial state (D31, D50).
 //!
-//! The drawer takes a TEST-ONLY seed (D42), so the builder refuses any network other than
-//! testnet or devnet, and a build without the `test-seed` feature has no drawer and builds no
-//! genesis (D43).
+//! Spec M7 (D100, D101): the drawer's seed is the anchor block's hash; its miner-withholding
+//! bias is OPEN on the release gate, so the builder still refuses any network other than
+//! testnet or devnet ("the drawer is deployed on testnet or devnet only until the release
+//! gate"). draw_window must be at least VOID_MIN = 2F (D97), except with the TEST-ONLY
+//! `allow_short_void_window` flag, itself refused unless the network is testnet or devnet
+//! (`probe void-m7`, D103).
 //!
 //! Because nothing on chain validates genesis, `build*` refuses an instance that breaks an
 //! A3 range or the share-room invariant (`GenesisCase::validate`). `close()` check 2 rejects
@@ -32,7 +35,7 @@ use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, sp
 use crate::close::{CloseCase, z18};
 use crate::game::{
     ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, SHARE_UNIT, SHARES_MAX, S_F_CAP, S_R_CAP,
-    TOTAL_MAX, muldiv,
+    TOTAL_MAX, VOID_MIN, muldiv,
 };
 use crate::params::xonly;
 use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, Payout, PositionState, ShardState, VaultState};
@@ -75,8 +78,13 @@ pub struct GenesisCase {
     /// The deployer's share position (D66, spec M5 A9): round 0, S0 shares, owned by a D11
     /// payout script (the funding key's Schnorr P2PK by default). Value R.
     pub position: PositionState,
-    /// Target network; only testnet and devnet are accepted (D43).
+    /// Target network; only testnet and devnet are accepted until the release gate (spec M7
+    /// D100: the seed's miner-withholding bias is OPEN).
     pub network: NetworkType,
+    /// TEST-ONLY (spec M7 D103, `probe void-m7`): accept draw_window < VOID_MIN, so a void
+    /// can be shown on testnet without waiting 24 h. Refused unless the network is testnet
+    /// or devnet; never set it for a deployment.
+    pub allow_short_void_window: bool,
     /// Funding inputs: outpoint (e.g. from a `Ledger`) and entry.
     pub funding: Vec<(TransactionOutpoint, UtxoEntry)>,
     pub change: bool,
@@ -127,6 +135,7 @@ impl GenesisCase {
             drawer,
             position,
             network: NetworkType::Testnet,
+            allow_short_void_window: false,
             funding,
             change: true,
             fee: KAS / 2,
@@ -346,12 +355,22 @@ impl GenesisCase {
         range("f_min", d.f_min, F_MIN_FLOOR, F_MIN_MAX)?;
         range("claim_window", d.claim_window, 0, DAA_MAX - 1)?;
         range("draw_window", d.draw_window, 0, DAA_MAX - 1)?;
+        // Spec M7 D97: at tx.daa >= D + draw_window the anchor must be outside the opcode
+        // window from every point of view (A5), so a void and a draw are never both valid.
+        if self.allow_short_void_window {
+            if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
+                return Err(format!("network {:?}: allow_short_void_window is TEST-ONLY, allowed only on testnet or devnet (D103)", self.network));
+            }
+        } else if d.draw_window < VOID_MIN {
+            return Err(format!("draw_window = {} < VOID_MIN = {VOID_MIN} (2F, D97): a void could overlap a valid draw", d.draw_window));
+        }
         if d.draw_window + d.claim_window > WINDOWS_MAX {
             return Err(format!("draw_window + claim_window > WINDOWS_MAX = {WINDOWS_MAX}: D_claim could reach DAA_MAX"));
         }
         // M4 review S1, user decision U3: every pool of an on-time draw keeps at least 7
         // days to claim (design 4.5), and the claim deadline of a round closed at T and
-        // drawn within draw_window, seed_ref + draw_window + claim_window, is at most
+        // drawn, D + draw_window + claim_window (spec M7 D98, D = the marker's creation DAA
+        // score + seed_offset; D102 bounds the case of a close accepted late), is at most
         // T + D_RET, the earliest return_deposit_after (ticket.sil A5b.3), so path b
         // cannot forfeit a winning ticket while its pool is claimable. Exact in i128.
         if d.claim_window < CLAIM_WINDOW {
@@ -370,12 +389,12 @@ impl GenesisCase {
         if d.ticket_tpl != t.ticket.hash {
             return Err("drawer ticket_tpl does not match the compiled ticket template (D54)".into());
         }
-        // D43: the drawer takes a TEST-ONLY seed.
+        // Spec M7 D100: the seed's miner-withholding bias is OPEN on the release gate.
         if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
-            return Err(format!("network {:?}: the TEST-ONLY seed drawer is allowed only on testnet or devnet (D43)", self.network));
-        }
-        if cfg!(not(feature = "test-seed")) {
-            return Err("no drawer in a build without the test-seed feature (D43)".into());
+            return Err(format!(
+                "network {:?}: the drawer is deployed on testnet or devnet only until the release gate (D100: the seed's miner-withholding bias is OPEN)",
+                self.network
+            ));
         }
         for (i, s) in self.shards.iter().enumerate() {
             let same = s.round == c.round
@@ -430,7 +449,7 @@ impl GenesisCase {
             outputs.push(TransactionOutput::new(self.shard_value(i), t.shard_spk(s)));
         }
         outputs.push(TransactionOutput::new(self.vault_value(), t.vault_spk(&self.vault)));
-        outputs.push(TransactionOutput::new(self.reserve(), drawer_spk(&t, &self.drawer)));
+        outputs.push(TransactionOutput::new(self.reserve(), t.drawer_spk(&self.drawer)));
         outputs.push(TransactionOutput::new(self.reserve(), t.position_spk(&self.position)));
         let total_in: u64 = inputs.iter().map(|i| i.entry.amount).sum();
         let total_out: u64 = outputs.iter().map(|o| o.value).sum();
@@ -452,20 +471,11 @@ impl GenesisCase {
             budget_delta: 0,
             outpoints: self.funding.iter().map(|(o, _)| *o).collect(),
             funding_sk: self.funding_sk,
+            sim: None,
         }
     }
 }
 
-#[cfg(feature = "test-seed")]
-fn drawer_spk(t: &Templates, d: &DrawerState) -> harness::ScriptPublicKey {
-    t.drawer_spk(d)
-}
-
-/// D43: without the `test-seed` feature there is no drawer, so there is no genesis.
-#[cfg(not(feature = "test-seed"))]
-fn drawer_spk(_: &Templates, _: &DrawerState) -> harness::ScriptPublicKey {
-    panic!("no drawer in a build without the test-seed feature (D43)")
-}
 
 /// User decision U-M6-1 (spec M6, the Stage 3a D90 stop): genesis is exempt from the 90 %
 /// margin of D90, because its masses depend only on deployer-chosen output values (K + 4
@@ -572,6 +582,8 @@ mod tests {
             ("f_min", |g| g.drawer.f_min = F_MIN_MAX + 1),
             ("claim_window", |g| g.drawer.claim_window = DAA_MAX),
             ("draw_window", |g| g.drawer.draw_window = -1),
+            // Spec M7 D97: draw_window >= VOID_MIN = 2F.
+            ("draw_window = VOID_MIN - 1", |g| g.drawer.draw_window = VOID_MIN - 1),
             ("mainnet", |g| g.network = NetworkType::Mainnet),
             ("simnet", |g| g.network = NetworkType::Simnet),
         ];
@@ -588,7 +600,7 @@ mod tests {
         let mut dev = good.clone();
         dev.network = NetworkType::Devnet;
         assert_eq!(dev.validate(), Ok(()));
-        // A mainnet genesis is refused by the builder (D43).
+        // A mainnet genesis is refused by the builder (D100).
         let mut main = good.clone();
         main.network = NetworkType::Mainnet;
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main.build()));
@@ -709,7 +721,7 @@ mod tests {
     /// M4 review S1, user decision U3: the windows must fit inside the ticket's
     /// return_deposit_after delay, so a winning ticket of a round closed at T and drawn
     /// within draw_window cannot be forfeited by return_deposit_after (T + D_RET) before
-    /// its pool's claim deadline (seed_ref + draw_window + claim_window), and every pool
+    /// its pool's claim deadline (D + draw_window + claim_window, spec M7 D98), and every pool
     /// keeps at least 7 days to claim (design 4.5). Rules: claim_window >= CLAIM_WINDOW
     /// (6,048,000) and seed_offset + draw_window + claim_window <= D_RET.
     #[test]
@@ -745,13 +757,40 @@ mod tests {
             ("sum = D_RET (draw_window)", (|g: &mut GenesisCase| g.drawer.draw_window = D_RET - g.controller.seed_offset - g.drawer.claim_window) as fn(&mut GenesisCase)),
             ("sum = D_RET (claim_window)", |g| g.drawer.claim_window = D_RET - g.controller.seed_offset - g.drawer.draw_window),
             ("sum = D_RET (seed_offset)", |g| g.controller.seed_offset = D_RET - g.drawer.draw_window - g.drawer.claim_window),
-            ("draw_window = 0", |g| g.drawer.draw_window = 0),
+            // Spec M7 D97: the draw_window floor is VOID_MIN (was 0 before M7).
+            ("draw_window = VOID_MIN", |g| g.drawer.draw_window = VOID_MIN),
         ] {
             let mut g = good.clone();
             f(&mut g);
             assert_eq!(g.validate(), Ok(()), "{name}");
         }
         assert!(so + DRAW_WINDOW + CLAIM_WINDOW <= D_RET, "the defaults satisfy the rule");
+    }
+
+    /// Spec M7 D97, D103: draw_window < VOID_MIN is refused unless the TEST-ONLY
+    /// `allow_short_void_window` flag is set, and the flag is refused off testnet/devnet.
+    #[test]
+    fn m7_void_window_floor_and_test_only_flag() {
+        let good = case();
+        assert_eq!(good.drawer.draw_window, VOID_MIN);
+        let mut short = good.clone();
+        short.drawer.draw_window = 1_200;
+        let e = short.validate().unwrap_err();
+        assert!(e.contains("VOID_MIN"), "{e}");
+        short.allow_short_void_window = true;
+        assert_eq!(short.validate(), Ok(()));
+        short.network = NetworkType::Devnet;
+        assert_eq!(short.validate(), Ok(()));
+        for net in [NetworkType::Mainnet, NetworkType::Simnet] {
+            let mut g = short.clone();
+            g.network = net;
+            let e = g.validate().unwrap_err();
+            assert!(e.contains("allow_short_void_window"), "{net:?}: {e}");
+        }
+        let mut main = good.clone();
+        main.network = NetworkType::Mainnet;
+        let e = main.validate().unwrap_err();
+        assert!(e.contains("testnet or devnet only until the release gate"), "{e}");
     }
 
     /// The Rust D_RET mirrors `int constant D_RET` of ticket.sil (the genesis window rule
@@ -787,7 +826,7 @@ mod tests {
         assert_ne!(t.ticket.hash, [0u8; 32]);
         // The built genesis carries the drawer with that ticket_tpl (output spk).
         let built = good.build();
-        let spk = drawer_spk(&t, &good.drawer);
+        let spk = t.drawer_spk(&good.drawer);
         assert_eq!(built.outputs[good.drawer_output()].script_public_key, spk);
         // A bad ticket_tpl is refused by validate() and by the builder.
         for bad_tpl in [[0u8; 32], t.pool.hash, {

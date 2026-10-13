@@ -1,16 +1,16 @@
 //! Off-chain protocol code for the Kaspa L1 lottery: combinations, the counter tree,
 //! state encoders, the arithmetic reference and the transaction builders. It only
 //! assembles transactions and proofs; the covenants decide.
+//!
+//! Spec M7 D101: the TEST-ONLY seed path, the `test-seed` feature and its `compile_error!`
+//! gate are deleted; `draw` compiles unconditionally. The `mainnet` feature stays for the
+//! genesis network refusal.
 
-// D43 (spec M3): the drawer's entry takes a TEST-ONLY seed. It must never be built for mainnet.
-#[cfg(all(feature = "test-seed", feature = "mainnet"))]
-compile_error!("TEST-ONLY seed cannot be built for mainnet");
-
+pub mod anchor;
 pub mod buy;
 pub mod claim;
 pub mod close;
 pub mod combo;
-#[cfg(feature = "test-seed")]
 pub mod draw;
 pub mod game;
 pub mod genesis;

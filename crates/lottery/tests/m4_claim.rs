@@ -449,10 +449,10 @@ fn kp14_return_with_pool_at_deadline() {
 
 // ---------------------------------------------------------------- KP15
 
-/// KP15: `refresh()` of a marker, a ticket and two pools at creation + D_IDLE (byte-identical
-/// successors, same values); afterwards a `draw()` on the refreshed marker, a claim on the
-/// refreshed ticket and pool, and round 2's absorption of the other refreshed pool are all
-/// accepted.
+/// KP15: `refresh()` of a ticket and two pools at creation + D_IDLE (byte-identical
+/// successors, same values); afterwards a claim on the refreshed ticket and pool, and round
+/// 2's absorption of the other refreshed pool are accepted. Spec M7 D99: the marker refresh
+/// and the draw on the refreshed marker are removed (the marker has no `refresh()`; SP10).
 #[test]
 fn kp15_refresh_then_use() {
     let mut ch = genesis_priced(KAS, ST);
@@ -463,11 +463,6 @@ fn kp15_refresh_then_use() {
     ch.buy(0, &b, ops, 300_000);
     let (cc, ops) = ch.close_case(900_000);
     ch.close(&cc, ops, TEST_DEADLINE as u64 + 10);
-    // Marker refresh, then the draw spends the refreshed marker.
-    let (r, ops) = ch.refresh_marker_case(ch.marker_daa + 1);
-    assert_eq!(r.lock_time, r.daa + D_IDLE as u64);
-    let f = ch.refresh(&r, ops, r.lock_time + 10);
-    check_refresh(&r, &f);
     ch.draw_round(seed);
     // Ticket and pool refreshes, then a claim on both.
     let pa = ch.pool_of(1, TIER_LOWER0);
@@ -525,11 +520,8 @@ fn kp15_refresh_pool_standalone() {
     refresh_standalone("refresh (standalone pool)", RefreshObj::Pool(c.pool), c.pool_value);
 }
 
-#[test]
-fn kp15_refresh_marker_standalone() {
-    let marker = lottery::close::CloseCase::new(4).expected().marker;
-    refresh_standalone("refresh (standalone marker)", RefreshObj::Marker(marker), 50 * KAS);
-}
+// kp15_refresh_marker_standalone is replaced by SP10 (m7_seed.rs; spec M7 D99: the marker's
+// only entry is draw_leg, a `refresh` call fails at dispatch).
 
 // ---------------------------------------------------------------- KP16, KP17
 
@@ -668,8 +660,8 @@ fn u3_default_windows_claim_deadline_before_return_after() {
     ch.buy(0, &b, ops, 300_000);
     let (cc, ops) = ch.close_case(900_000);
     ch.close(&cc, ops, TEST_DEADLINE as u64 + 10);
-    let seed_ref = ch.marker.as_ref().unwrap().1.seed_ref;
-    let (c, ops) = ch.draw_case(seed, &[], (seed_ref + 10) as u64);
+    let d = ch.anchor_d();
+    let (c, ops) = ch.draw_case(seed, &[], (d + 10) as u64);
     let lt = c.lock_time;
     ch.draw(&c, ops, lt + 10);
     let pi = ch.pool_of(1, TIER_JACKPOT);
@@ -680,31 +672,5 @@ fn u3_default_windows_claim_deadline_before_return_after() {
     assert!(deadline - (lt as i64) >= lottery::game::CLAIM_WINDOW, "at least 7 days to claim after an on-time draw");
 }
 
-/// PARKED (M4 review S2, user decision U4; the missed-draw item, release gate): this test
-/// DOCUMENTS current behaviour, it does not endorse it. A late `draw()` whose caller funds
-/// it with old inputs (drawer check 19: D_claim = max(own, seed_ref + draw_window) +
-/// claim_window, own = the latest input creation score) creates pools whose claim deadline
-/// has already passed, so a third party can forfeit a winning ticket through
-/// `return_deposit_with_pool` one DAA after the draw. Design 4.5's "at least 7 days" holds
-/// only for a draw within draw_window. When the missed-draw item is resolved, this test
-/// must fail and be replaced by the attack test for the fix.
-#[test]
-fn parked_u4_late_draw_creates_already_expired_pools() {
-    let mut ch = Chain::genesis(4);
-    let seed = [1u8; 32];
-    let win = win6(&ch, &seed);
-    let (mut b, ops) = ch.buy_case(0);
-    b.bundle = vec![tc(&win, TIER_JACKPOT), nowin(&win, 1)];
-    ch.buy(0, &b, ops, 300_000);
-    let (cc, ops) = ch.close_case(900_000);
-    ch.close(&cc, ops, TEST_DEADLINE as u64 + 10);
-    let (mut c, ops) = ch.draw_case(seed, &[], 1_000);
-    let late = 8_000_000u64;
-    c.lock_time = late;
-    ch.draw(&c, ops, late);
-    let pi = ch.pool_of(1, TIER_JACKPOT);
-    let deadline = ch.pools[pi].1.deadline;
-    assert!(deadline <= late as i64, "pool deadline {deadline} is not past at the late draw {late}");
-    let (r, ops) = ch.return_with_pool_case(0, pi, late);
-    ch.return_deposit(&r, ops, late + 1);
-}
+// parked_u4_late_draw_creates_already_expired_pools (the U4 tripwire) is inverted into SP6
+// (m7_seed.rs): spec M7 D98 makes D_claim = D + draw_window + claim_window, so U4 is closed.

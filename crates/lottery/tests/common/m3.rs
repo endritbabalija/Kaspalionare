@@ -16,7 +16,7 @@ use lottery::buy::{Built, KAS, Templates, spk_of};
 use lottery::close::FundingIn;
 use lottery::combo::{RANKS, unrank};
 use lottery::draw::*;
-use lottery::game::{DRAW_WINDOW, JackpotRule, M_DRAW, TOTAL_MAX, witness_ok};
+use lottery::game::{JackpotRule, M_DRAW, TOTAL_MAX, witness_ok};
 use lottery::smt::Tree;
 use lottery::state::{Payout, PoolState};
 
@@ -301,10 +301,8 @@ pub fn pot_negative() -> Atk {
 
 // ---------------------------------------------------------------- checks 7-10 (DA1, DA2, DA12)
 
-/// lock_time = seed_ref - 1 (D7; DA12).
-pub fn early_lock() -> Atk {
-    Atk::case(DRW, base(), |c| c.lock_time = c.marker.seed_ref as u64 - 1)
-}
+// `early_lock` (lock_time = seed_ref - 1, D7; DA12) is replaced by SA5 (lock_time = D - 1,
+// check 7, tag M7D_lock; m7_attacks.rs).
 
 /// A non-canonical win5 with the seed's colex rank (D8_canon): (n1 + C(n2 - 1, 2), 1, n3,
 /// n4, n5) has the same rank under the script's formula. The pools carry it. A round 1 draw
@@ -312,7 +310,9 @@ pub fn early_lock() -> Atk {
 pub fn win5_noncanonical() -> Atk {
     for i in 0u32..10_000 {
         let mut c = DrawCase::new(4);
-        c.test_only_seed[..4].copy_from_slice(&i.to_le_bytes());
+        // Spec M7: the seed source is X.hash (the default anchored chain uses x_hash).
+        c.x_hash = [0x58; 32];
+        c.x_hash[..4].copy_from_slice(&i.to_le_bytes());
         let w = unrank(c.seed().rank);
         let y2 = w[1] as u32 - 1;
         let n1 = w[0] as u32 + y2 * (y2.saturating_sub(1)) / 2;
@@ -682,11 +682,11 @@ pub fn pool_round_r() -> Atk {
     Atk::case(DRW, base(), |c| c.absorbed[0].state.round = c.marker.round)
 }
 
-/// A base whose absorbed pool's deadline is after seed_ref (so lock_time = deadline - 1
-/// passes check 7).
+/// A base whose absorbed pool's deadline is after D (so lock_time = deadline - 1 passes
+/// check 7).
 pub fn late_deadline() -> DrawCase {
     let mut good = base();
-    good.absorbed[0].state.deadline = good.marker.seed_ref + 1_000;
+    good.absorbed[0].state.deadline = good.d() + 1_000;
     good.fix_lock_time();
     good
 }
@@ -710,28 +710,9 @@ pub fn pool_class3() -> Atk {
     })
 }
 
-/// own_daa one below the true maximum (D19_own; DA17).
-pub fn own_lie() -> Atk {
-    Atk::case(DRW, base(), |c| c.lie.own = Some(c.own() as i64 - 1))
-}
-
-/// Only inputs created before seed_ref + DRAW_WINDOW, and the new pools' deadline
-/// own + CLAIM_WINDOW instead of seed_ref + DRAW_WINDOW + CLAIM_WINDOW (D19_max).
-pub fn deadline_without_draw_window() -> Atk {
-    let mut good = base();
-    good.funding[0].daa = (good.marker.seed_ref + DRAW_WINDOW - 10) as u64;
-    assert!((good.own() as i64) < good.marker.seed_ref + DRAW_WINDOW);
-    Atk::built(DRW, good, |b, c| {
-        let x = c.expected();
-        let d = x.own + c.drawer.claim_window;
-        assert!(d < x.d_claim);
-        for p in 0..x.np() {
-            let mut s = x.new_pools[p].clone();
-            s.deadline = d;
-            b.outputs[x.pool_output(p)].script_public_key = b.templates.pool_spk(&s);
-        }
-    })
-}
+// `own_lie` (own_daa - 1, D19_own; DA17) is replaced by SA5 (mk_daa +- 1, check 7, tag
+// M7D_mk; m7_attacks.rs). `deadline_without_draw_window` (D19_max; DA13) is replaced by SP6
+// and the M7C_claim mutant (spec M7 D98: D_claim = D + draw_window + claim_window, no own).
 
 /// An extra plain output after the caller output (D20_count; DA8).
 pub fn extra_plain() -> Atk {

@@ -89,7 +89,6 @@ impl Case {
                 ReturnPath::WithPool { .. } => "return_deposit_with_pool (attack base)",
             },
             Case::Refresh(r) => match r.obj {
-                RefreshObj::Marker(_) => "refresh marker (attack base)",
                 RefreshObj::Pool(_) => "refresh pool (attack base)",
                 RefreshObj::Ticket(_) => "refresh ticket (attack base)",
                 RefreshObj::Position(_) => "refresh position (attack base)",
@@ -734,8 +733,8 @@ pub fn claim_with_second(tier: u8, other: Combo) -> ClaimCase {
     c
 }
 
-/// Standalone refresh cases (as KP15): ticket and pool of `ClaimCase::new(4)`, the
-/// `CloseCase::new(4)` marker, created at DAA 1,500,000.
+/// Standalone refresh cases (as KP15): ticket and pool of `ClaimCase::new(4)`, created at DAA
+/// 1,500,000. Spec M7 D99: the marker has no `refresh()` (its case is removed; SP10).
 pub fn refresh_ticket() -> RefreshCase {
     let c = ClaimCase::new(4);
     RefreshCase::new(RefreshObj::Ticket(c.ticket), c.ticket_value, 1_500_000)
@@ -744,14 +743,11 @@ pub fn refresh_pool() -> RefreshCase {
     let c = ClaimCase::new(4);
     RefreshCase::new(RefreshObj::Pool(c.pool), c.pool_value, 1_500_000)
 }
-pub fn refresh_marker() -> RefreshCase {
-    let marker = lottery::close::CloseCase::new(4).expected().marker;
-    RefreshCase::new(RefreshObj::Marker(marker), 50 * KAS, 1_500_000)
-}
 
-/// The three refresh bases with their object name (`ticket`, `pool`, `marker`).
+/// The refresh bases with their object name (`ticket`, `pool`; spec M7 D99 removed the
+/// marker's).
 pub fn refresh_bases() -> Vec<(&'static str, RefreshCase)> {
-    vec![("ticket", refresh_ticket()), ("pool", refresh_pool()), ("marker", refresh_marker())]
+    vec![("ticket", refresh_ticket()), ("pool", refresh_pool())]
 }
 
 /// A refresh's check label for object `obj` ("ticket:A6.N" etc.).
@@ -1359,7 +1355,8 @@ pub fn ka14() -> Vec<Atk> {
 
 // ---------------------------------------------------------------- KA15
 
-/// KA15: `refresh()` of each of the ticket, a pool and a marker (input 0).
+/// KA15: `refresh()` of each of the ticket and a pool (input 0; spec M7 D99 removed the
+/// marker's `refresh()`, SP10).
 pub fn ka15() -> Vec<Atk> {
     let mut v = vec![];
     for (obj, base) in refresh_bases() {
@@ -1402,24 +1399,7 @@ pub fn ka15() -> Vec<Atk> {
                     _ => unreachable!(),
                 })),
             ],
-            _ => vec![
-                ("seed_ref", Box::new(|o| match o {
-                    RefreshObj::Marker(s) => {
-                        let mut s = s.clone();
-                        s.seed_ref += 1;
-                        RefreshObj::Marker(s)
-                    }
-                    _ => unreachable!(),
-                })),
-                ("roots", Box::new(|o| match o {
-                    RefreshObj::Marker(s) => {
-                        let mut s = s.clone();
-                        s.roots[0] ^= 1;
-                        RefreshObj::Marker(s)
-                    }
-                    _ => unreachable!(),
-                })),
-            ],
+            _ => unreachable!("refresh_bases: ticket and pool only"),
         };
         for (field, f) in fields {
             v.push(Atk::new(format!("KA15 {obj}: successor {field} changed"), 0, a6(obj, 7), base.clone()).built(move |b, c| {
@@ -1498,7 +1478,6 @@ pub fn ka16_cases() -> Vec<(&'static str, Case)> {
         ("return_deposit_with_pool", ReturnCase::with_pool().into()),
         ("refresh ticket", refresh_ticket().into()),
         ("refresh pool", refresh_pool().into()),
-        ("refresh marker", refresh_marker().into()),
     ]
 }
 

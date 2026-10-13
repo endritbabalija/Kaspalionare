@@ -140,7 +140,7 @@ fn m3a_redeem_sizes() {
     let row = |name: &str, tp: &lottery::buy::Template, redeem: usize| {
         println!("| {name} | {} | {} | {} | {redeem} |", tp.prefix.len(), tp.suffix.len(), redeem - tp.prefix.len() - tp.suffix.len());
     };
-    row("drawer (draw_test_seed)", &t.drawer, t.drawer_redeem(&c.drawer).len());
+    row("drawer (draw)", &t.drawer, t.drawer_redeem(&c.drawer).len());
     row("marker (draw_leg)", &t.marker, t.marker_redeem(&c.marker).len());
     row("vault (draw_leg)", &t.vault, t.vault_redeem(&c.vault).len());
     row("pool (absorb_leg + placeholder claim)", &t.pool, t.pool_redeem(&x.new_pools[0]).len());

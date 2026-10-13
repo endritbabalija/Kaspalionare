@@ -1,8 +1,10 @@
-//! `draw()` with a TEST-ONLY seed (spec M3 A4, D42, D43). This module exists only with the
-//! `test-seed` feature, and it is the only place `covenants/drawer.sil` is compiled (D43).
+//! `draw()` (spec M3 A4, M5 A5, M7 A4): the seed is the anchor block's hash X.hash, proven
+//! by the 304-byte anchor argument (spec M7 D93-D95, `crate::anchor`); an empty anchor is a
+//! void (D96: no winners, everything but the fee and C_draw to the boost pot). This is the
+//! only place `covenants/drawer.sil` is compiled.
 //!
-//! Shape (A4, extended by spec M5 A5):
-//!   inputs : 0 drawer r (leader, `draw_test_seed`); 1 marker r (`draw_leg`); 2 vault r - 1
+//! Shape (A4, extended by spec M5 A5; np = 0 in a void):
+//!   inputs : 0 drawer r (leader, `draw`); 1 marker r (`draw_leg`); 2 vault r - 1
 //!            (`draw_leg`); 3 controller r + 1, drawn = 0 (`draw_leg`); 4 + i absorbed pool i
 //!            (`absorb_leg`), i < a <= A_MAX; 4 + a .. caller funding (zero ID, 1..F_MAX)
 //!   outputs: 0 drawer'; 1 vault'; 2 controller'; 3 .. 2 + np the new pools in tier order;
@@ -13,9 +15,12 @@
 //!
 //! Spec M5 (D65): the vault's pending totals are converted at the post-settlement price
 //! (`game::convert`, C1-C3) and the record is written; the caller posts the record's R.
-//! The entry is called by its M5 signature (`SIG_DRAW_M5`: wc, record_prefix and
-//! record_suffix before own_daa). The M4 signature and the builder's M4 fallback were
-//! removed in M6 (D89): the committed drawer has only the M5 entry.
+//! The entry is called by its M7 signature (`SIG_DRAW`: the anchor first, mk_daa last; wc,
+//! record_prefix and record_suffix before mk_daa as in M5). The M4 signature was removed in
+//! M6 (D89); the M5 TEST-ONLY entry in M7 (D101).
+//!
+//! Spec M7 (A7): the case runs against a `harness::ChainSim` (`DrawCase::sim`, default
+//! `ChainSim::anchored(D, x_hash)`), so `OpChainblockSeqCommit` sees the anchor.
 //!
 //! `DrawCase` describes a draw with public fields; `expected()` derives every output from
 //! the Rust reference in `game` (never from the script); `build()` returns an editable
@@ -25,14 +30,16 @@
 
 use std::sync::Arc;
 
-use harness::{ArtifactValue, CovenantBinding, Hash, Transaction, TransactionId, TransactionOutpoint, TransactionOutput, UtxoEntry, compile_source, outpoint};
+use harness::{ArtifactValue, ChainSim, CovenantBinding, Hash, Transaction, TransactionId, TransactionOutpoint, TransactionOutput, UtxoEntry, compile_source, outpoint};
 
+use crate::anchor::AnchorProof;
 use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, Template, Templates, b_max, spk_of};
 use crate::close::{CloseCase, FundingIn, TEST_DEADLINE, TEST_ROUND_LEN};
 use crate::combo::unrank;
 use crate::game::{
-    CLAIM_WINDOW, Conversion, DRAW_WINDOW, F_MIN, FeeSplit, JackpotFix, JackpotRule, PoolSet, RoundAmounts, SeedNumbers, VA, VS, boost_after,
-    claim_deadline, convert, draw_amounts, fee_split, fix_jackpot, muldiv, pool_set, seed_numbers, vault_settle, win_counts, withdraw_out,
+    CLAIM_WINDOW, Conversion, DRAW_WINDOW, F_MIN, FeeSplit, JackpotFix, JackpotRule, PoolSet, RoundAmounts, SeedNumbers, VA, VS,
+    anchor_daa, boost_after, claim_deadline, convert, draw_amounts, fee_split, fix_jackpot, guarded_add, muldiv, pool_set, seed_numbers, vault_settle,
+    void_lock, void_pool_set, win_counts, withdraw_out,
 };
 use crate::params::xonly;
 use crate::smt::{Tree, proofs_at};
@@ -51,13 +58,18 @@ fn dummy_drawer() -> DrawerState {
     DrawerState { round: 1, pool_tpl: [0; 32], vault_tpl: [0; 32], ticket_tpl: [0; 32], f_min: F_MIN, claim_window: CLAIM_WINDOW, draw_window: DRAW_WINDOW }
 }
 
-/// seed_ref of the round 1 marker in the standalone fixture (round r: + (r - 1) x 10^6).
-pub const TEST_SEED_REF: i64 = 1_000_600;
+/// Creation DAA score of the round 1 marker in the standalone fixture (round r:
+/// + (r - 1) x 10^6), so D = TEST_MARKER_DAA + SEED_OFFSET = 1,000,600 as the M3-M6 seed_ref.
+pub const TEST_MARKER_DAA: i64 = 1_000_000;
+/// The fixture's anchor block hash X.hash (the seed source, D94). Any non-zero value works;
+/// zero is refused because `ChainSim` marks its roots with a zero parent hash.
+pub const TEST_X_HASH: [u8; 32] = [0x58; 32];
 /// Fixture vault V (10,000,000 KAS, as the genesis fixture).
 pub const TEST_VAULT: i64 = 10_000_000 * KAS as i64;
 
-// Argument positions of `draw_test_seed` (A4 "Arguments", drawer.sil order).
-pub const ARG_SEED: usize = 0;
+// Argument positions of `draw` (spec M7 A4 "Arguments", drawer.sil order).
+/// `byte[] anchor`: 304 bytes (X fields, P fields; spec M7 A3) or empty (void).
+pub const ARG_ANCHOR: usize = 0;
 pub const ARG_WIN5: usize = 1;
 pub const ARG_LEAVES: usize = 2;
 pub const ARG_SIBLINGS: usize = 3;
@@ -73,19 +85,21 @@ pub const ARG_POOL_SUFFIX: usize = 16;
 pub const ARG_FUNDER_CLASS: usize = 17;
 pub const ARG_FUNDER_KEY: usize = 18;
 /// Spec M5 A5: the withdrawal witness wc and the record template's prefix and suffix,
-/// inserted before own_daa.
+/// before mk_daa.
 pub const ARG_WC: usize = 19;
 pub const ARG_RECORD_PREFIX: usize = 20;
 pub const ARG_RECORD_SUFFIX: usize = 21;
-/// `own_daa`: the maximum creation DAA score of the inputs, verified by check 19 (user
-/// decision 2026-10-10, spec correction of A4 check 19 and A9). Its position in the M5
-/// signature.
-pub const ARG_OWN: usize = 22;
+/// `int mk_daa`: the marker's creation DAA score, required equal to `OpTxInputDaaScore(1)`
+/// by check 7 (spec M7 D93, D98; replaces own_daa at the same position), so the round result
+/// record stays derivable from the transaction bytes (M3 A9).
+pub const ARG_MK_DAA: usize = 22;
+/// Number of `draw` arguments.
+pub const DRAW_ARGS: usize = 23;
 
-/// The M5 signature (spec M5 A5 "New arguments", 23 arguments): wc, record_prefix and
-/// record_suffix before own_daa.
-pub const SIG_DRAW_M5: &str =
-    "draw_test_seed(byte[32],byte[5],byte[],byte[],int,int,int,int,int,int,int,int,int,int,int,byte[],byte[],byte,byte[33],int,byte[],byte[],int)";
+/// The M7 signature (spec M7 A4 "Arguments", 23 arguments): `byte[] anchor` replaces the
+/// TEST-ONLY 32-byte seed, `int mk_daa` replaces own_daa, the rest as M5.
+pub const SIG_DRAW: &str =
+    "draw(byte[],byte[5],byte[],byte[],int,int,int,int,int,int,int,int,int,int,int,byte[],byte[],byte,byte[33],int,byte[],byte[],int)";
 
 /// An expired pool of an earlier round absorbed by this draw (input 4 + i). Value
 /// remaining + R.
@@ -117,9 +131,13 @@ pub struct Lie {
     pub v_delta: i64,
     /// Added to O' (before J fixing) (DA6, DA7).
     pub o_delta: i64,
-    /// `own_daa` argument instead of the true maximum input DAA score; D_claim follows it
-    /// (DA17).
-    pub own: Option<i64>,
+    /// `mk_daa` argument instead of the marker's true creation DAA score; D and D_claim
+    /// follow it (spec M7 SA5; replaces the M3 `own` lie of DA17).
+    pub mk_daa: Option<i64>,
+    /// The `anchor` argument bytes instead of the chain's proof (spec M7 SA1-SA4, SA7). In
+    /// draw mode the seed follows bytes 0..32 (the claimed X.hash) when there are at least
+    /// 32; the mode itself follows `DrawCase::void`, not this length.
+    pub anchor: Option<Vec<u8>>,
     // Spec M5 (stage 2 attacks). Each changes the conversion the builder writes; vault',
     // the record and controller' v_rec follow it.
     /// The withdrawal witness wc instead of the reference's; out_c = out(wc) follows (VA5).
@@ -161,12 +179,23 @@ pub struct DrawCase {
     pub trees: Vec<Tree>,
     pub absorbed: Vec<PoolIn>,
     pub funding: Vec<FundingIn>,
-    pub test_only_seed: [u8; 32],
+    /// Spec M7 D94: the anchor block's hash, the seed source. With `sim = None` the default
+    /// chain is `ChainSim::anchored(D, x_hash)`, so this is X.hash; with a given `sim` the
+    /// anchor (and X.hash) is the sim's first chain block with DAA >= D and this field is
+    /// not used (`x_hash()`).
+    pub x_hash: [u8; 32],
+    /// Spec M7 A7: the selected chain the scripts see. `None` = `ChainSim::anchored(D,
+    /// x_hash)`, rebuilt from the current fields at every `build`, so a test that changes
+    /// marker_daa, the controller's seed_offset or x_hash keeps a valid anchor.
+    pub sim: Option<Arc<ChainSim>>,
+    /// Spec M7 D96: a void (empty anchor, lock >= D + draw_window, no winners).
+    pub void: bool,
     /// Reserve funder of the new pools (argument and pool field).
     pub funder: Payout,
     /// Transaction fee.
     pub fee: u64,
-    /// Lock time: max(seed_ref, absorbed deadlines) for a valid case (D51).
+    /// Lock time: max(D, absorbed deadlines) for a valid draw, max(D + draw_window, absorbed
+    /// deadlines) for a valid void (D51, spec M7 check 7).
     pub lock_time: u64,
     pub lie: Lie,
     pub cov: Hash,
@@ -197,8 +226,15 @@ pub struct DrawExpected {
     pub fee: FeeSplit,
     pub rule: JackpotRule,
     pub fix: JackpotFix,
-    pub own: i64,
+    /// Spec M7: the mk_daa argument (the `Lie` applied), D = mk_daa + seed_offset and
+    /// D_claim = D + draw_window + claim_window (check 19).
+    pub mk_daa: i64,
+    pub d: i64,
     pub d_claim: i64,
+    /// Spec M7 D96: a void (np = 0, win5 = 0, bonus = 0, no leaves).
+    pub void: bool,
+    /// The anchor argument (empty in a void).
+    pub anchor: Vec<u8>,
     pub drawer: DrawerState,
     pub vault: VaultState,
     pub controller: ControllerState,
@@ -284,7 +320,8 @@ impl DrawCase {
         };
         let m = 10;
         let trees: Vec<Tree> = (0..k).map(|_| Tree::new(m as usize)).collect();
-        let seed_ref = TEST_SEED_REF + (r - 1) * 1_000_000;
+        let marker_daa = TEST_MARKER_DAA + (r - 1) * 1_000_000;
+        let d = anchor_daa(marker_daa, controller.seed_offset);
         let mut marker = MarkerState {
             round: r,
             k: k as i64,
@@ -300,7 +337,6 @@ impl DrawCase {
             s_c: controller.s_c,
             s_d: controller.s_d,
             st: controller.st,
-            seed_ref,
             funder_class: 0,
             funder_key: [0; 33],
         };
@@ -326,7 +362,7 @@ impl DrawCase {
             claim_window: CLAIM_WINDOW,
             draw_window: DRAW_WINDOW,
         };
-        let close_daa = (seed_ref - 600) as u64;
+        let close_daa = marker_daa as u64;
         let mut c = Self {
             b_max: t.b_max,
             drawer,
@@ -340,18 +376,75 @@ impl DrawCase {
             controller_daa: close_daa,
             trees,
             absorbed: vec![],
-            // Fresh: created after seed_ref + DRAW_WINDOW, so D_claim = own + CLAIM_WINDOW.
-            funding: vec![FundingIn { value: 100 * KAS, daa: (seed_ref + DRAW_WINDOW + 10_000) as u64 }],
-            test_only_seed: [0; 32],
+            // A fresh funding input (its creation DAA score no longer matters: D_claim is a
+            // constant of the round, spec M7 D98).
+            funding: vec![FundingIn { value: 100 * KAS, daa: (d + DRAW_WINDOW + 10_000) as u64 }],
+            x_hash: TEST_X_HASH,
+            sim: None,
+            void: false,
             funder: Payout::Schnorr(xonly(&FUNDING_SK)),
             fee: KAS / 2,
-            lock_time: seed_ref as u64,
+            lock_time: d as u64,
             lie: Lie::default(),
             cov: COV,
             funding_sk: FUNDING_SK,
         };
         c.sync_roots();
         c
+    }
+
+    /// As `new(k)`, a void (spec M7 D96): empty anchor, lock_time = D + draw_window.
+    pub fn new_void(k: usize) -> Self {
+        let mut c = Self::new(k);
+        c.set_void(true);
+        c
+    }
+
+    /// Switch between draw and void mode and re-fix the lock time.
+    pub fn set_void(&mut self, void: bool) {
+        self.void = void;
+        self.fix_lock_time();
+    }
+
+    /// D = marker creation DAA score + seed_offset (spec M7 D93, check 7), from the true
+    /// marker_daa and the round r + 1 controller's seed_offset.
+    pub fn d(&self) -> i64 {
+        anchor_daa(self.marker_daa as i64, self.controller.seed_offset)
+    }
+
+    /// The chain the case runs against: `sim`, or `ChainSim::anchored(D, x_hash)`.
+    pub fn chain(&self) -> Arc<ChainSim> {
+        match &self.sim {
+            Some(s) => s.clone(),
+            None => {
+                assert!(self.x_hash != [0; 32], "DrawCase: x_hash must be non-zero (ChainSim marks roots with a zero parent hash)");
+                Arc::new(ChainSim::anchored(self.d() as u64, Hash::from_bytes(self.x_hash)))
+            }
+        }
+    }
+
+    /// The anchor argument: `lie.anchor`, else empty in a void, else the chain's proof for D
+    /// (spec M7 A3).
+    pub fn anchor_bytes(&self) -> Vec<u8> {
+        if let Some(a) = &self.lie.anchor {
+            return a.clone();
+        }
+        if self.void {
+            return vec![];
+        }
+        AnchorProof::from_sim(&self.chain(), self.d() as u64).to_bytes()
+    }
+
+    /// The seed source X.hash of this case (D94): the claimed X.hash of `lie.anchor` (its
+    /// first 32 bytes), else the given sim's anchor for D, else `x_hash`.
+    pub fn x_hash(&self) -> [u8; 32] {
+        if let Some(a) = self.lie.anchor.as_ref().filter(|a| a.len() >= 32) {
+            return a[..32].try_into().unwrap();
+        }
+        match &self.sim {
+            Some(s) => s.anchor_for(self.d() as u64).0.hash.as_bytes(),
+            None => self.x_hash,
+        }
     }
 
     pub fn k(&self) -> usize {
@@ -380,9 +473,10 @@ impl DrawCase {
         self.marker.roots = MarkerState::roots_bytes(&roots);
     }
 
-    /// The seed mapping of this draw (D42): the instance ID, the marker's round and m.
+    /// The seed mapping of this draw (D42, spec M7 D94): the instance ID, the marker's round,
+    /// X.hash and m. Not used by a void.
     pub fn seed(&self) -> SeedNumbers {
-        seed_numbers(&self.cov.as_bytes(), self.marker.round, &self.test_only_seed, self.marker.m)
+        seed_numbers(&self.cov.as_bytes(), self.marker.round, &self.x_hash(), self.marker.m)
     }
 
     /// Add `n` holdings of (rank, bonus) to shard `i`'s tree and resync the marker roots.
@@ -419,7 +513,7 @@ impl DrawCase {
     }
 
     /// Absorb `n` more expired pools of round r - 1 (lower tiers, remaining 3 + i KAS,
-    /// deadline 100,000 DAA before seed_ref, distinct funders). Requires r >= 2.
+    /// deadline 100,000 DAA before D, distinct funders). Requires r >= 2.
     pub fn absorb(&mut self, n: usize) {
         assert!(self.marker.round >= 2, "absorbed pools need an earlier round");
         for _ in 0..n {
@@ -432,7 +526,7 @@ impl DrawCase {
                 m: 10,
                 k: self.k() as i64,
                 roots: vec![0x21; 32 * K_MAX],
-                deadline: self.marker.seed_ref - 100_000,
+                deadline: self.d() - 100_000,
                 ticket_tpl: self.drawer.ticket_tpl,
                 reserve: self.controller.reserve,
                 funder_class: 0,
@@ -444,9 +538,11 @@ impl DrawCase {
         self.fix_lock_time();
     }
 
-    /// lock_time = max(seed_ref, absorbed deadlines) (D51).
+    /// lock_time = max(D, absorbed deadlines) for a draw, max(D + draw_window, absorbed
+    /// deadlines) for a void (D51, spec M7 check 7).
     pub fn fix_lock_time(&mut self) {
-        let mut l = self.marker.seed_ref;
+        let d = self.d();
+        let mut l = if self.void { void_lock(d, self.drawer.draw_window).expect("D + draw_window < DAA_MAX") } else { d };
         for p in &self.absorbed {
             l = l.max(p.state.deadline);
         }
@@ -481,38 +577,50 @@ impl DrawCase {
         self.funding.iter().map(|f| f.value).sum()
     }
 
-    /// Max creation DAA score over all inputs (check 19).
-    pub fn own(&self) -> u64 {
-        let mut own = self.drawer_daa.max(self.marker_daa).max(self.vault_daa).max(self.controller_daa);
-        for p in &self.absorbed {
-            own = own.max(p.daa);
-        }
-        for f in &self.funding {
-            own = own.max(f.daa);
-        }
-        own
-    }
-
     /// Every successor state and output value of the draw (A4 checks 8-25), from `game`.
     /// Panics where the reference rejects (V' < 0, a guard of A6, D_claim >= DAA_MAX).
+    ///
+    /// Spec M7 void (D96, D105): win5 = 0 and bonus = 0 (unless a `Lie` replaces them), no
+    /// leaves or siblings, h_J = n2 = 0, every lp_t = 0 (np = 0), V' = total_assets (H not
+    /// paid to the vault), O' = O + b_r + J_boost + sum B_t + sum Q + H; fee, C_draw, the
+    /// conversion and J(r+1) as in a draw. The caller output is the remainder, so the M3 A4
+    /// identity holds with H moved from V' to O'.
     pub fn expected(&self) -> DrawExpected {
         let mk = &self.marker;
         let ctrl = &self.controller;
-        let seed = self.seed();
-        let rank = self.lie.rank.unwrap_or(seed.rank);
-        let bonus = self.lie.bonus.unwrap_or(seed.bonus);
-        let win5 = self.lie.win5.unwrap_or(unrank(rank));
-        let (leaves, siblings) = proofs_at(&self.trees, rank);
-        let counts: Vec<Vec<u16>> = self.trees.iter().map(|t| t.counts(rank)).collect();
-        let (h_j, n2) = self.lie.counts.unwrap_or_else(|| win_counts(&counts, bonus, mk.m));
+        let void = self.void;
+        // A void has no seed (D96); its `seed` field is the mapping of the x_hash field only.
+        let seed = if void { seed_numbers(&self.cov.as_bytes(), mk.round, &self.x_hash, mk.m) } else { self.seed() };
         let amounts = draw_amounts(mk);
         let j_house = mk.jackpot - mk.j_boost;
-        let pools = pool_set(h_j, n2, mk.jackpot, mk.g2, &amounts.b, mk.m);
-        let v_prime = vault_settle(self.vault.total_assets, amounts.h, j_house, pools.jp, mk.g2, n2, pools.sp).expect("V' >= 0 (check 14)")
-            + self.lie.v_delta;
         let q: Vec<i64> = self.absorbed.iter().map(|p| p.remaining as i64).collect();
-        let o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, pools.jp, &amounts.b, &pools.lp, &q).expect("O' guards (check 15)")
-            + self.lie.o_delta;
+        let (rank, bonus, win5, leaves, siblings, counts, h_j, n2, pools, v_prime, o_prime);
+        if void {
+            rank = self.lie.rank.unwrap_or(0);
+            bonus = self.lie.bonus.unwrap_or(0);
+            win5 = self.lie.win5.unwrap_or([0; 5]);
+            (leaves, siblings) = (vec![], vec![]);
+            counts = vec![];
+            (h_j, n2) = self.lie.counts.unwrap_or((0, 0));
+            pools = void_pool_set(&amounts.b, mk.m);
+            v_prime = vault_settle(self.vault.total_assets, 0, j_house, false, mk.g2, 0, false).expect("V' >= 0 (check 14)") + self.lie.v_delta;
+            o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, false, &amounts.b, &pools.lp, &q)
+                .and_then(|o| guarded_add(o, amounts.h))
+                .expect("O' guards (check 15)")
+                + self.lie.o_delta;
+        } else {
+            rank = self.lie.rank.unwrap_or(seed.rank);
+            bonus = self.lie.bonus.unwrap_or(seed.bonus);
+            win5 = self.lie.win5.unwrap_or(unrank(rank));
+            (leaves, siblings) = proofs_at(&self.trees, rank);
+            counts = self.trees.iter().map(|t| t.counts(rank)).collect::<Vec<Vec<u16>>>();
+            (h_j, n2) = self.lie.counts.unwrap_or_else(|| win_counts(&counts, bonus, mk.m));
+            pools = pool_set(h_j, n2, mk.jackpot, mk.g2, &amounts.b, mk.m);
+            v_prime = vault_settle(self.vault.total_assets, amounts.h, j_house, pools.jp, mk.g2, n2, pools.sp).expect("V' >= 0 (check 14)")
+                + self.lie.v_delta;
+            o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, pools.jp, &amounts.b, &pools.lp, &q).expect("O' guards (check 15)")
+                + self.lie.o_delta;
+        }
         let mut fee = fee_split(ctrl.acc, amounts.f, self.drawer.f_min).expect("T_F guard (check 16)");
         if let Some(p) = self.lie.paid {
             fee.paid = p;
@@ -529,8 +637,9 @@ impl DrawCase {
                 JackpotFix { x_b: muldiv(j_v, ctrl.j), x1, y, x2, jackpot, j_boost: y, g2, liability: x2 + g2 * (rule.m - 1) }
             }
         };
-        let own = self.lie.own.unwrap_or(self.own() as i64);
-        let d_claim = claim_deadline(own, mk.seed_ref, self.drawer.draw_window, self.drawer.claim_window).expect("D_claim < DAA_MAX (check 19)");
+        let mk_daa = self.lie.mk_daa.unwrap_or(self.marker_daa as i64);
+        let d = anchor_daa(mk_daa, ctrl.seed_offset);
+        let d_claim = claim_deadline(d, self.drawer.draw_window, self.drawer.claim_window).expect("D_claim < DAA_MAX (check 19)");
 
         let drawer = DrawerState { round: self.drawer.round + 1, ..self.drawer.clone() };
         // Spec M5 A5 C1-C3 (D65, D69, D71): convert the pending totals at V'.
@@ -636,8 +745,11 @@ impl DrawCase {
             fee,
             rule,
             fix,
-            own,
+            mk_daa,
+            d,
             d_claim,
+            void,
+            anchor: self.anchor_bytes(),
             drawer,
             vault,
             controller,
@@ -711,14 +823,14 @@ impl DrawCase {
         self.funding_total() as i128 - (x.np() as u64 * self.reserve()) as i128 + x.amounts.c_draw as i128 - self.fee as i128
     }
 
-    /// draw_test_seed(test_only_seed, win5, leaves, siblings, x1, y, x2, ctrl_pl, ctrl_sl,
-    /// marker_pl, marker_sl, vault_pl, vault_sl, pool_pl, pool_sl, pool_prefix, pool_suffix,
-    /// funder_class, funder_key, wc, record_prefix, record_suffix, own_daa): the M5
-    /// signature (`SIG_DRAW_M5`, 23 arguments; spec M5 A5 "New arguments").
+    /// draw(anchor, win5, leaves, siblings, x1, y, x2, ctrl_pl, ctrl_sl, marker_pl, marker_sl,
+    /// vault_pl, vault_sl, pool_pl, pool_sl, pool_prefix, pool_suffix, funder_class,
+    /// funder_key, wc, record_prefix, record_suffix, mk_daa): the M7 signature (`SIG_DRAW`,
+    /// 23 arguments; spec M7 A4 "Arguments").
     pub fn args(&self, t: &Templates, x: &DrawExpected) -> Vec<ArtifactValue> {
         use ArtifactValue::*;
         vec![
-            Bytes(self.test_only_seed.to_vec()),
+            Bytes(x.anchor.clone()),
             Bytes(x.win5.to_vec()),
             Bytes(x.leaves.clone()),
             Bytes(x.siblings.clone()),
@@ -740,7 +852,7 @@ impl DrawCase {
             Int(x.conv.wc),
             Bytes(t.record.prefix.clone()),
             Bytes(t.record.suffix.clone()),
-            Int(x.own),
+            Int(x.mk_daa),
         ]
     }
 
@@ -773,7 +885,7 @@ impl DrawCase {
                 entry: UtxoEntry::new(self.reserve(), t.drawer_spk(&self.drawer), self.drawer_daa, false, cov),
                 kind: InKind::Entry {
                     template: t.drawer.clone(),
-                    entry: SIG_DRAW_M5.into(),
+                    entry: SIG_DRAW.into(),
                     args: self.args(&t, &x),
                     redeem: t.drawer_redeem(&self.drawer),
                 },
@@ -842,6 +954,7 @@ impl DrawCase {
             budget_delta: 0,
             outpoints,
             funding_sk: self.funding_sk,
+            sim: Some(self.chain()),
         }
     }
 }
@@ -875,6 +988,12 @@ pub struct RoundResult {
     /// Spec M5 A5 (R4 for the record): the settlement record written by this draw, if
     /// anything was pending.
     pub record: Option<ResultRecord>,
+    /// Spec M7 A3 (round result record): the anchor block's hash (zero in a void), the
+    /// marker's creation DAA score (the mk_daa argument; D = mk_daa + seed_offset), and
+    /// whether the round was voided (D96).
+    pub x_hash: [u8; 32],
+    pub mk_daa: i64,
+    pub void: bool,
 }
 
 /// The settlement record of a round result (spec M5 A3.3, A5 C3).
@@ -918,37 +1037,42 @@ impl RoundResult {
                 (Some(i), Some(s)) => Some(ResultRecord { state: s.clone(), value: x.values[i], outpoint: TransactionOutpoint::new(txid, i as u32) }),
                 _ => None,
             },
+            x_hash: if x.void { [0; 32] } else { case.x_hash() },
+            mk_daa: x.mk_daa,
+            void: x.void,
         }
     }
 
     /// The record rebuilt from the `draw()` transaction bytes alone (spec A9), without the
     /// builder's data or the spent UTXO entries:
     ///   - cov from output 0's covenant binding;
-    ///   - round, m, k, roots, the shares and seed_ref from the marker's redeem (input 1);
+    ///   - round, m, k, roots and the shares from the marker's redeem (input 1);
     ///   - draw_window, claim_window and ticket_tpl from the drawer's redeem (input 0);
     ///   - R (the pools' reserve) from output 0's value (drawer' = R, check 20);
-    ///   - test_only_seed, win5, the count leaves and the funder from input 0's arguments;
+    ///   - the anchor (empty = void, spec M7 D96), win5, the count leaves and the funder from
+    ///     input 0's arguments; X.hash = the anchor's bytes 0..32 (D94);
     ///   - bonus from the seed mapping (D42); h_J and n2 from the leaves; the pool set (D45)
-    ///     and slices from the marker; values and outpoints from the outputs;
-    ///   - D_claim from the `own_daa` argument, which check 19 requires to equal the maximum
-    ///     creation DAA score of the inputs (user decision 2026-10-10), seed_ref and the
-    ///     drawer's windows (D39).
+    ///     and slices from the marker; values and outpoints from the outputs; in a void no
+    ///     pools (win5 = 0, no leaves);
+    ///   - D_claim = D + draw_window + claim_window (spec M7 D98) with D = mk_daa +
+    ///     seed_offset: mk_daa from its argument, which check 7 requires to equal the
+    ///     marker's creation DAA score, seed_offset from the controller's redeem (input 3).
     ///   - spec M5: the record (if anything was pending) from the vault's redeem (input 2:
     ///     S, D, W, request_tpl), V' (as check 14), L' (from x2, y and the controller's g
     ///     and m, input 3's redeem), the wc argument and the funder; checked against the
     ///     record output's script and value at 3 + np.
     /// `t` supplies the committed marker, drawer, vault, controller and record layouts.
-    /// Returns an error on any inconsistency (wrong shape, pool count or value). Only the M5
-    /// entry (23 arguments) is read; the M4 one (20 arguments) was removed in M6 (D89).
+    /// Returns an error on any inconsistency (wrong shape, pool count or value). Only the M7
+    /// entry (23 arguments) is read.
     pub fn from_tx(tx: &Transaction, t: &Templates) -> Result<Self, String> {
         let cov = tx.outputs.first().and_then(|o| o.covenant).ok_or("output 0 has no covenant binding")?.covenant_id;
         let drawer_pushes = pushes(&tx.inputs.first().ok_or("no input 0")?.signature_script)?;
         let marker_pushes = pushes(&tx.inputs.get(1).ok_or("no input 1")?.signature_script)?;
         let vault_pushes = pushes(&tx.inputs.get(2).ok_or("no input 2")?.signature_script)?;
         let ctrl_pushes = pushes(&tx.inputs.get(3).ok_or("no input 3")?.signature_script)?;
-        // draw_test_seed has 23 arguments (M5), then the dispatch tag and the redeem script.
-        if drawer_pushes.len() != 25 {
-            return Err(format!("input 0: {} pushes, expected 25 (M5)", drawer_pushes.len()));
+        // draw has 23 arguments (M7), then the dispatch tag and the redeem script.
+        if drawer_pushes.len() != DRAW_ARGS + 2 {
+            return Err(format!("input 0: {} pushes, expected {} (M7)", drawer_pushes.len(), DRAW_ARGS + 2));
         }
         let drawer = state_values(&t.drawer, drawer_pushes.last().unwrap())?;
         let mk = state_values(&t.marker, marker_pushes.last().ok_or("input 1: empty sigscript")?)?;
@@ -983,7 +1107,6 @@ impl RoundResult {
             s_c: int(&mk, "s_c")?,
             s_d: int(&mk, "s_d")?,
             st: [int(&mk, "st1")?, int(&mk, "st2")?, int(&mk, "st3")?, int(&mk, "st4")?, int(&mk, "st5")?],
-            seed_ref: int(&mk, "seed_ref")?,
             funder_class: 0,
             funder_key: [0; 33],
         };
@@ -991,9 +1114,14 @@ impl RoundResult {
             let a = &drawer_pushes[i];
             if a.len() == len { Ok(a) } else { Err(format!("argument {i}: {} bytes, expected {len}", a.len())) }
         };
-        let seed: [u8; 32] = arg(ARG_SEED, 32)?.as_slice().try_into().unwrap();
+        let anchor = &drawer_pushes[ARG_ANCHOR];
+        let void = anchor.is_empty();
+        let x_hash = if void { [0; 32] } else { AnchorProof::from_bytes(anchor)?.x_hash() };
         let win5: [u8; 5] = arg(ARG_WIN5, 5)?.as_slice().try_into().unwrap();
-        let leaves = arg(ARG_LEAVES, 2 * m as usize * k as usize)?;
+        let leaves = arg(ARG_LEAVES, if void { 0 } else { 2 * m as usize * k as usize })?;
+        if void && !drawer_pushes[ARG_SIBLINGS].is_empty() {
+            return Err("void with siblings".into());
+        }
         let class = arg(ARG_FUNDER_CLASS, 1)?[0];
         let key: [u8; 33] = arg(ARG_FUNDER_KEY, 33)?.as_slice().try_into().unwrap();
         if class > 2 {
@@ -1001,15 +1129,22 @@ impl RoundResult {
         }
         let funder = Payout::from_fields(class, &key);
 
-        let sn = seed_numbers(&cov.as_bytes(), round, &seed, m);
-        if win5 != sn.main {
-            return Err("win5 is not the seed's main numbers".into());
-        }
-        let counts: Vec<Vec<u16>> =
-            leaves.chunks(2 * m as usize).map(|c| c.chunks(2).map(|x| u16::from_le_bytes([x[0], x[1]])).collect()).collect();
-        let (h_j, n2) = win_counts(&counts, sn.bonus, m);
         let amounts = draw_amounts(&marker);
-        let set = pool_set(h_j, n2, marker.jackpot, marker.g2, &amounts.b, m);
+        let (bonus, n2, set) = if void {
+            if win5 != [0; 5] {
+                return Err("void with non-zero win5".into());
+            }
+            (0, 0, void_pool_set(&amounts.b, m))
+        } else {
+            let sn = seed_numbers(&cov.as_bytes(), round, &x_hash, m);
+            if win5 != sn.main {
+                return Err("win5 is not the seed's main numbers".into());
+            }
+            let counts: Vec<Vec<u16>> =
+                leaves.chunks(2 * m as usize).map(|c| c.chunks(2).map(|x| u16::from_le_bytes([x[0], x[1]])).collect()).collect();
+            let (h_j, n2) = win_counts(&counts, sn.bonus, m);
+            (sn.bonus, n2, pool_set(h_j, n2, marker.jackpot, marker.g2, &amounts.b, m))
+        };
         let vt = state_values(&t.vault, vault_pushes.last().ok_or("input 2: empty sigscript")?)?;
         let ctrl = state_values(&t.controller, ctrl_pushes.last().ok_or("input 3: empty sigscript")?)?;
         let (s_tot, d_pend, w_pend) = (int(&vt, "total_shares")?, int(&vt, "pend_dep")?, int(&vt, "pend_wsh")?);
@@ -1029,8 +1164,9 @@ impl RoundResult {
             }
             pools.push(ResultPool { tier: np.tier, slice: np.slice, value, outpoint: TransactionOutpoint::new(txid, 3 + p as u32) });
         }
-        let own = script_num(&drawer_pushes[ARG_OWN])?;
-        let d_claim = claim_deadline(own, marker.seed_ref, int(&drawer, "draw_window")?, int(&drawer, "claim_window")?).ok_or("D_claim out of range")?;
+        let mk_daa = script_num(&drawer_pushes[ARG_MK_DAA])?;
+        let d = anchor_daa(mk_daa, int(&ctrl, "seed_offset")?);
+        let d_claim = claim_deadline(d, int(&drawer, "draw_window")?, int(&drawer, "claim_window")?).ok_or("D_claim out of range")?;
         let roots = (0..k as usize).map(|i| roots_bytes[32 * i..32 * (i + 1)].try_into().unwrap()).collect();
         let bytes32 = |v: &std::collections::BTreeMap<String, ArtifactValue>, f: &str| -> Result<[u8; 32], String> {
             match v.get(f) {
@@ -1045,8 +1181,9 @@ impl RoundResult {
             let (x2, y) = (script_num(&drawer_pushes[ARG_X2])?, script_num(&drawer_pushes[ARG_Y])?);
             let (g, cm) = (int(&ctrl, "g")?, int(&ctrl, "m")?);
             let l_next = x2 + muldiv(x2 + y, g) * (cm - 1);
-            let v_prime = vault_settle(int(&vt, "total_assets")?, amounts.h, marker.jackpot - marker.j_boost, set.jp, marker.g2, n2, set.sp)
-                .ok_or("V' < 0")?;
+            // Spec M7 D96: a void pays H to the boost pot, not the vault.
+            let h = if void { 0 } else { amounts.h };
+            let v_prime = vault_settle(int(&vt, "total_assets")?, h, marker.jackpot - marker.j_boost, set.jp, marker.g2, n2, set.sp).ok_or("V' < 0")?;
             let conv = convert(v_prime, s_tot, d_pend, w_pend, l_next).ok_or("the conversion is outside its domain")?;
             if conv.wc != wc {
                 return Err(format!("wc argument {wc} is not the largest fitting share count {}", conv.wc));
@@ -1061,7 +1198,22 @@ impl RoundResult {
         } else {
             None
         };
-        Ok(Self { round, win: [win5[0], win5[1], win5[2], win5[3], win5[4], sn.bonus], m, k, roots, pools, d_claim, funder, ticket_tpl, reserve: r, record })
+        Ok(Self {
+            round,
+            win: [win5[0], win5[1], win5[2], win5[3], win5[4], bonus],
+            m,
+            k,
+            roots,
+            pools,
+            d_claim,
+            funder,
+            ticket_tpl,
+            reserve: r,
+            record,
+            x_hash,
+            mk_daa,
+            void,
+        })
     }
 
     /// Pool p's state rebuilt from the record alone (R4).
@@ -1151,3 +1303,102 @@ fn script_num(b: &[u8]) -> Result<i64, String> {
     Ok(if last & 0x80 != 0 { -v } else { v })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The M3 A4 identity (excluding R) with spec M7 D105: marker (S - P_R - C_close +
+    /// J_boost) + V + (O + A) + sum Q = pools + V' + (O' + A') + fee + C_draw.
+    fn conserves(c: &DrawCase, x: &DrawExpected) {
+        let mk = &c.marker;
+        let lhs = (mk.sales - mk.ref_paid - x.amounts.c_close + mk.j_boost) as i128
+            + c.vault.total_assets as i128
+            + (c.pot as i128 + c.controller.acc as i128)
+            + x.q.iter().map(|&q| q as i128).sum::<i128>();
+        let pools: i128 = x.pools.pools.iter().map(|p| p.value as i128).sum();
+        let fee = if x.fee.paid { x.fee.t_f as i128 } else { 0 };
+        let rhs = pools + x.v_prime as i128 + (x.o_prime + x.fee.a_next) as i128 + fee + x.amounts.c_draw as i128;
+        assert_eq!(lhs, rhs, "D105 conservation (void = {})", c.void);
+    }
+
+    /// Spec M7 (Rust side, no script): draw and void cases of the m3 attack base shape, with
+    /// and without a pending deposit (record), conserve value (D105), carry the M7 fields
+    /// (anchor, mk_daa, D, D_claim = D + draw_window + claim_window, the lock), and the round
+    /// result rebuilt from the transaction bytes alone equals the builder's (M3 A9, M7 A3).
+    #[test]
+    fn m7_draw_and_void_expected_and_round_result() {
+        let t = Templates::get(b_max());
+        for void in [false, true] {
+            for pending in [0, 100 * KAS as i64] {
+                let mut c = DrawCase::at_round(4, 2);
+                c.set_sales(157 * KAS as i64, 5 * KAS as i64);
+                c.hold_jackpot(1, 1);
+                let b = c.other_bonus(0);
+                c.hold(2, b, 2);
+                c.absorb(1);
+                c.vault.pend_dep = pending;
+                c.set_void(void);
+                let d = c.d();
+                assert_eq!(d, TEST_MARKER_DAA + 1_000_000 + SEED_OFFSET_FIXTURE);
+                let x = c.expected();
+                conserves(&c, &x);
+                assert_eq!((x.void, x.mk_daa, x.d), (void, c.marker_daa as i64, d));
+                assert_eq!(x.d_claim, d + c.drawer.draw_window + c.drawer.claim_window);
+                assert_eq!(x.rec, pending > 0);
+                if void {
+                    assert_eq!(c.lock_time as i64, d + c.drawer.draw_window);
+                    assert!(x.anchor.is_empty() && x.leaves.is_empty() && x.siblings.is_empty());
+                    assert_eq!((x.win5, x.bonus, x.h_j, x.n2, x.np()), ([0; 5], 0, 0, 0, 0));
+                    assert_eq!(x.v_prime, c.vault.total_assets, "void: H is not paid to the vault");
+                    let lower: i64 = x.amounts.b.iter().sum();
+                    let q: i64 = x.q.iter().sum();
+                    assert_eq!(x.o_prime, c.pot as i64 + x.amounts.b_r + c.marker.j_boost + lower + q + x.amounts.h);
+                } else {
+                    assert_eq!(c.lock_time as i64, d);
+                    assert_eq!(x.anchor.len(), harness::ANCHOR_LEN);
+                    let a = AnchorProof::from_bytes(&x.anchor).unwrap();
+                    assert_eq!(a.x_hash(), TEST_X_HASH);
+                    assert!(a.consistent_with(d));
+                    assert_eq!((x.h_j, x.n2), (1, 1));
+                    assert!(x.np() > 0);
+                }
+                let built = c.build();
+                assert!(built.sim.is_some());
+                let f = built.finish();
+                assert!(f.sim.is_some());
+                let rr = RoundResult::from_tx(&f.tx, &t).unwrap_or_else(|e| panic!("void = {void}, pending = {pending}: {e}"));
+                assert_eq!(rr, RoundResult::new(&c, &x, f.tx.id()));
+                assert_eq!((rr.void, rr.mk_daa, rr.x_hash == TEST_X_HASH), (void, c.marker_daa as i64, !void));
+                for p in 0..x.np() {
+                    assert_eq!(t.pool_spk(&rr.pool_state(p)), f.tx.outputs[3 + p].script_public_key);
+                }
+            }
+        }
+    }
+
+    const SEED_OFFSET_FIXTURE: i64 = crate::game::SEED_OFFSET;
+
+    /// A false mk_daa claim moves D and D_claim with it (SA5's consistent lie); a given sim
+    /// supplies X.hash; an explicit anchor lie supplies the claimed X.hash.
+    #[test]
+    fn m7_lies_and_sim() {
+        let c = DrawCase::new(4);
+        let d0 = c.expected().d_claim;
+        let mut l = c.clone();
+        l.lie.mk_daa = Some(c.marker_daa as i64 + 1);
+        assert_eq!(l.expected().d_claim, d0 + 1);
+        assert_eq!(l.expected().d, c.d() + 1);
+        let mut s = c.clone();
+        let sim = ChainSim::anchored(c.d() as u64, Hash::from_bytes([0x33; 32]));
+        s.sim = Some(Arc::new(sim));
+        assert_eq!(s.x_hash(), [0x33; 32]);
+        assert_ne!(s.seed(), c.seed());
+        let mut a = c.clone();
+        let mut bytes = c.anchor_bytes();
+        bytes[0] ^= 1;
+        a.lie.anchor = Some(bytes.clone());
+        assert_eq!(a.x_hash()[..], bytes[..32]);
+        assert_eq!(a.expected().anchor, bytes);
+    }
+}

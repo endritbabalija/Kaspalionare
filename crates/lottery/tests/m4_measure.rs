@@ -22,7 +22,7 @@ mod common;
 use std::sync::Arc;
 
 use common::m2::*;
-use common::m4::{refresh_marker, refresh_pool, refresh_ticket};
+use common::m4::{refresh_pool, refresh_ticket};
 use common::measure::{pay_storage, worst_claim};
 use harness::{Masses, masses, priority_fee};
 use lottery::buy::{BuyCase, Built, Final, KAS, Sources, TEST_DEPOSIT, Templates, b_max};
@@ -90,7 +90,7 @@ fn m4a_redeem_sizes() {
     row("ticket (claim, return x2, refresh)", &t.ticket, t.ticket.redeem(&c.ticket.values()).len());
     row("pool (absorb_leg, ticket_leg, refresh)", &t.pool, t.pool_redeem(&c.pool).len());
     row("marker (draw_leg, refresh)", &t.marker, t.marker_redeem(&close.expected().marker).len());
-    row("drawer (draw_test_seed)", &t.drawer, t.drawer_redeem(&draw.drawer).len());
+    row("drawer (draw)", &t.drawer, t.drawer_redeem(&draw.drawer).len());
     row("vault (draw_leg)", &t.vault, t.vault_redeem(&draw.vault).len());
     row("controller (close, draw_leg)", &t.controller, t.controller_redeem(&close.controller).len());
     row("shard (buy, close_leg)", &t.shard, t.shard_redeem(&BuyCase::new(t.b_max).shard).len());
@@ -309,7 +309,7 @@ fn m4g_return_and_refresh() {
         ("return_deposit_with_pool (b = 2 ticket, K = 1 pool)", ReturnCase::with_pool().build()),
         ("refresh ticket", refresh_ticket().build()),
         ("refresh pool (K = 4)", refresh_pool().build()),
-        ("refresh marker (K = 4)", refresh_marker().build()),
+        // Spec M7 D99: the marker's refresh row is removed (no marker `refresh()`).
     ];
     for (name, b) in shapes {
         let (f, m) = run(name, &b);
@@ -318,15 +318,7 @@ fn m4g_return_and_refresh() {
         println!("| {name} | {} / {} | {leg} | {} | {} | {} | {pc:.1} / {pt:.1} / {ps:.1} |", f.units[0], f.tx.inputs[0].signature_script.len(), m.compute, m.transient, m.storage);
         assert!(within(&m, MARGIN_PCT).iter().all(|&ok| ok), "{name}: {m:?}");
     }
-    // A K = 16 marker refresh (the largest marker state) for scale.
-    let mut c = CloseCase::new(K_MAX);
-    for i in 0..K_MAX {
-        c.shards[i].state.root = [0x20 + i as u8; 32];
-    }
-    let r = RefreshCase::new(RefreshObj::Marker(c.expected().marker), 50 * KAS, 1_500_000);
-    let (f, m) = run("refresh marker K = 16", &r.build());
-    let (pc, pt, ps) = pct(&m);
-    println!("| refresh marker (K = 16) | {} / {} | - | {} | {} | {} | {pc:.1} / {pt:.1} / {ps:.1} |", f.units[0], f.tx.inputs[0].signature_script.len(), m.compute, m.transient, m.storage);
+    // Spec M7 D99: the K = 16 marker refresh row is removed (no marker `refresh()`).
 }
 
 // ---------------------------------------------------------------- M4-h

@@ -341,8 +341,9 @@ impl ParamsState {
     }
 }
 
-/// Frozen marker, role 0x03 (spec M2 A3.3; layout unchanged in M3, A3.4). Its code has the
-/// `draw_leg` delegate and the drawer template hash as a constructor constant (D38).
+/// Frozen marker, role 0x03 (spec M2 A3.3; layout unchanged in M3, A3.4; spec M7 A3/D99: the
+/// `seed_ref` field between st5 and funder_class is removed). Its code has the `draw_leg`
+/// delegate and the drawer template hash as a constructor constant (D38).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkerState {
     pub round: i64,
@@ -360,7 +361,6 @@ pub struct MarkerState {
     pub s_c: i64,
     pub s_d: i64,
     pub st: TierShares,
-    pub seed_ref: i64,
     pub funder_class: u8,
     pub funder_key: [u8; 33],
 }
@@ -407,7 +407,6 @@ impl MarkerState {
             ("st3", Int(self.st[2])),
             ("st4", Int(self.st[3])),
             ("st5", Int(self.st[4])),
-            ("seed_ref", Int(self.seed_ref)),
             ("funder_class", Byte(self.funder_class)),
             ("funder_key", Bytes(self.funder_key.to_vec())),
         ]

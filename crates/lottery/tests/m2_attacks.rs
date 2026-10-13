@@ -186,8 +186,7 @@ fn ca5_marker_fields() {
     marker_attack(&c, |m| m.s_d += 1);
     marker_attack(&c, |m| m.st[0] += 1);
     marker_attack(&c, |m| m.st[4] += 1);
-    marker_attack(&c, |m| m.seed_ref += 1);
-    marker_attack(&c, |m| m.seed_ref -= 1);
+    // Spec M7 D99: the marker has no seed_ref (the extra-field case is SA10, m7_attacks.rs).
     marker_attack(&c, |m| m.set_funder(&Payout::Schnorr([0x66; 32])));
     marker_attack(&c, |m| m.funder_class = 2);
 }
@@ -488,15 +487,8 @@ fn ca12_deadline_rule() {
     shard_attack(&late, 0, |s| s.deadline = TEST_DEADLINE + TEST_ROUND_LEN);
 }
 
-#[test]
-fn ca12_seed_ref() {
-    // Check 20/24: seed_ref = max input DAA + SEED_OFFSET; using a non-maximal input's DAA
-    // (here the newest covenant input, ignoring the funding input) is rejected.
-    let c = base();
-    let not_max = c.shards.iter().map(|s| s.daa).max().unwrap() as i64;
-    assert!(not_max < c.own() as i64);
-    marker_attack(&c, |m| m.seed_ref = not_max + c.controller.seed_offset);
-}
+// ca12_seed_ref is replaced by SP5 and SA10 (m7_seed.rs, m7_attacks.rs): spec M7 D93 removes the
+// marker's seed_ref, so close() forms no seed reference.
 
 // ---------------------------------------------------------------- CA13: legs dragged
 

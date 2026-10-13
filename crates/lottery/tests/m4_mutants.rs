@@ -423,7 +423,7 @@ macro_rules! refresh_mutants {
 
 refresh_mutants!(ticket_refresh, "ticket", "ticket");
 refresh_mutants!(pool_refresh, "pool", "pool");
-refresh_mutants!(marker_refresh, "marker", "marker");
+// Spec M7 D99: the marker has no `refresh()`, so no marker_refresh instance (SP10).
 
 // ================================================================ pool ticket_leg (PT)
 
@@ -529,7 +529,6 @@ fn template_refresh_successor_is_own_template() {
         let which = match base.obj {
             RefreshObj::Ticket(_) => Sil::Ticket,
             RefreshObj::Pool(_) => Sil::Pool,
-            RefreshObj::Marker(_) => Sil::Marker,
             _ => unreachable!("M4 refresh bases only"),
         };
         let fake = lookalike(which);
@@ -605,8 +604,11 @@ fn every_m4_tag_is_tested() {
     assert_eq!((tags, lines), (EXPECTED_TAGS, EXPECTED_LINES), "M4 tag count changed: update this test and the handoff table");
 }
 
-const EXPECTED_TAGS: usize = 131;
-const EXPECTED_LINES: usize = 187;
+// Spec M7 D99: the marker's 12 RF tags on 15 lines are gone (131 - 12, 187 - 15). Until
+// the M7 Stage 2 marker.sil lands, the committed marker still carries them and this test
+// fails on "marker.sil: tag RF1 has no mutant test".
+const EXPECTED_TAGS: usize = 119;
+const EXPECTED_LINES: usize = 172;
 
 /// DIAGNOSTIC (ignored; not a test result on its own): for every `redundant!` line above,
 /// the first check that rejects the attack under that mutant, found by the M4 attribution
@@ -621,7 +623,7 @@ fn redundancy_attribution() {
         let q: Vec<&str> = l.split('"').collect();
         if l.contains("concat!") {
             // refresh_mutants!: q = [.., ":TAG", .., "KA15 ", .., ": rest", ..]
-            for obj in ["ticket", "pool", "marker"] {
+            for obj in ["ticket", "pool"] {
                 rows.push((format!("{obj}{}", q[1]), format!("KA15 {obj}{}", q[5])));
             }
         } else {

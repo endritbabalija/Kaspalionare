@@ -96,7 +96,7 @@ fn m5a_redeem_sizes() {
     row("record (request_leg, refresh)", &t.record, t.record_redeem(&st.record).len());
     let lottery::claim::RefreshObj::Position(ps) = &p.obj else { unreachable!() };
     row("position (vault_leg, refresh)", &t.position, t.position_redeem(ps).len());
-    row("drawer (draw_test_seed; 3 mulfrac copies)", &t.drawer, t.drawer_redeem(&d.drawer).len());
+    row("drawer (draw; 3 mulfrac copies)", &t.drawer, t.drawer_redeem(&d.drawer).len());
     row("marker (draw_leg, refresh)", &t.marker, t.marker_redeem(&CloseCase::new(4).expected().marker).len());
 
     // Bytes per inlined mulfrac call: the same source with one call replaced by a plain

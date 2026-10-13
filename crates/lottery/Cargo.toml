@@ -8,12 +8,11 @@ license.workspace = true
 # Off-chain protocol code: combinations, the counter tree, state encoders and the
 # transaction builder. Covenants are compiled at test time through `harness`.
 
-# D43 (spec M3): the TEST-ONLY seed drawer is built only with `test-seed` (default). A
-# mainnet build must use `--no-default-features --features mainnet`; then no drawer exists.
-# Enabling both is a compile error (lib.rs).
+# Spec M7 D101: the `test-seed` feature and its compile_error! gate are deleted (the drawer
+# has one entry, `draw()`, with the anchor proof). `mainnet` keeps the genesis network
+# refusal (the drawer is deployed on testnet or devnet only until the release gate).
 [features]
-default = ["test-seed"]
-test-seed = []
+default = []
 mainnet = []
 
 [dependencies]
