@@ -159,7 +159,7 @@ Done when:
   - cleanup: the dead M4 draw branch in `crates/lottery/src/draw.rs` (`SIG_DRAW_M4`, `args_m4`, the 22-push path of `RoundResult::from_tx`; M5 S4-9).
 
 ## M7 — Real seed
-Status: todo (ordered before testnet end to end by the owner, 2026-10-13; the entry is completed in its own session, which also lifts "randomness is parked" in `CLAUDE.md` and above)
+Status: in progress (design session done 2026-10-13: spec `docs/specs/7.md` approved, plan `docs/specs/7-handoff.md` approved, decisions D93–D105 recorded; the implementation session follows the handoff. "Randomness is parked" is lifted in `CLAUDE.md` and above when the implementation session ends)
 
 Replaces the TEST-ONLY seed of `draw()` with a real seed source, following the direction in `docs/research/randomness-sources-on-kaspa.md` (§4, M. Sutton: a PoW chain block fixed in advance at a predetermined blue-score offset, read through `OpChainblockSeqCommit`, no menu for the miner or the caller) and its three open items (blue-score anchoring, miner-withholding cost, missed-draw fallback; DECISIONS 2026-10-13), and fixes review R1 (the `close()` caller must no longer choose seed_ref). Two sessions: a design session that writes `docs/specs/7.md` with the owner's decisions and no covenant code, then an implementation session (attack tests first, then the scripts, then `covenant-reviewer`, then the re-measurements below).
 
