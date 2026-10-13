@@ -109,13 +109,24 @@ CP8 grid
     assert_eq!(reference(&c, &mut cov, "none passes"), c.controller.m_max);
     points.push(c);
 
-    // Boost-dominated (CA4): edge slope negative, interval bounded above, m' = 12.
+    // Boost-dominated (CA4): edge slope negative, interval bounded above, m' = 23 at the
+    // fixture margin 1.5 (spec M8 A0; 12 at the former 1.17).
     let mut c = grid_case(0, 539_000 * KAS, KAS as i64);
     c.set_sales(1, 0, 0);
     c.controller.e = 5_000;
     c.controller.g = 1_000;
     assert!(c.expected().math.rule.checks()[0].1 < 0);
-    assert_eq!(reference(&c, &mut cov, "boost-dominated"), 12);
+    assert_eq!(reference(&c, &mut cov, "boost-dominated"), 23);
+    points.push(c);
+
+    // Edge-bound point (M8 S1 review): at margin 1.5 and e = 15 % the whale check binds at
+    // every grid point (q < a), so e = 4,000 (a = 0.444 p) puts the positive-slope edge
+    // branch back in charge: m' - 1 passes the whale check and fails only the edge rule.
+    let mut c = grid_case(10_000_000 * KAS as i64, 0, KAS as i64);
+    c.controller.e = 4_000;
+    let m = reference(&c, &mut cov, "edge-bound (e 4,000)");
+    let rule = c.expected().math.rule;
+    assert!(rule.edge(m) && rule.whale(m - 1) && !rule.edge(m - 1), "edge rule sets m' = {m}");
     points.push(c);
 
     println!("coverage: {cov:?}");

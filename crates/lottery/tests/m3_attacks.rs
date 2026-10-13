@@ -244,17 +244,21 @@ fn da4_jackpot_fixing() {
     let x = c.expected();
     let (x1, y, x2) = (x.fix.x1, x.fix.y, x.fix.x2);
     // One fixture per binding constraint: the J' of (x1, y, x2 + 1) fails exactly it.
-    // (Fixture facts are asserted before any script runs.)
-    let regimes: [(&str, i64, u64, [bool; 3]); 3] = [
-        ("edge", 10_000_000, 0, [true, false, false]),
-        ("whale", 4_000_000, 600_000, [false, true, false]),
-        ("cap", 2_000_000, 0, [false, false, true]),
+    // (Fixture facts are asserted before any script runs.) Spec M8 A0: at the fixture margin
+    // 1.5 and e = 15 % the whale allowance q = 0.5267 p is below the edge allowance
+    // a = 0.629 p, so the edge rule can never bind; the edge regime uses e = 30 %
+    // (a = 0.518 p < q). At 1.17 it was V' = 10,000,000 KAS with the fixture e.
+    let regimes: [(&str, i64, u64, i64, [bool; 3]); 3] = [
+        ("edge", 10_000_000, 0, 3_000, [true, false, false]),
+        ("whale", 4_000_000, 600_000, 1_500, [false, true, false]),
+        ("cap", 2_000_000, 0, 1_500, [false, false, true]),
     ];
     let mut cases = vec![];
-    for (name, v, pot, want) in regimes {
+    for (name, v, pot, e, want) in regimes {
         let mut r = base();
         r.vault.total_assets = v * KAS as i64;
         r.pot = pot * KAS;
+        r.controller.e = e;
         let rx = r.expected();
         assert_eq!(failing(&rx.rule, rx.fix.x2 + 1, rx.fix.y), want, "{name} regime: fix {:?} rule {:?}", rx.fix, rx.rule);
         cases.push((r, (rx.fix.x1, rx.fix.y, rx.fix.x2 + 1)));

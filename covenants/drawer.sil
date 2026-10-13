@@ -51,6 +51,8 @@ contract Drawer(
     int constant TOTAL_MAX = 4611686018427387904;
     int constant DAA_MAX = 500000000000;
     int constant BP = 10000;
+    // Whale-margin floor 1.5 (spec M8 A0, D109; provisional, D108): margin in [MARGIN_MIN, 2 BP].
+    int constant MARGIN_MIN = 15000;
     // Largest accepted template prefix/suffix length argument (rusty-kaspa v2.1.0
     // crypto/txscript/src/lib.rs:78, MAX_SCRIPTS_SIZE = 1,000,000).
     int constant SCRIPT_MAX = 1000000;
@@ -404,7 +406,7 @@ contract Drawer(
         require(ctrl.j <= 5000);
         require(ctrl.g >= 0);
         require(ctrl.g <= 1000);
-        require(ctrl.margin >= BP);
+        require(ctrl.margin >= MARGIN_MIN); // mut:D_margin_min
         require(ctrl.margin <= 2 * BP);
         require(ctrl.cap >= 0);
         require(ctrl.cap <= BP);

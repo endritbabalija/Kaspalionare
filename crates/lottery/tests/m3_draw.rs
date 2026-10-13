@@ -262,9 +262,9 @@ fn dp7_n2_m_minus_one() {
 
 // ---------------------------------------------------------------- DP8-DP11
 
-/// DP8: boost pot below the safe level: y = O'. (With a large vault x1 sits on the edge
-/// rule, which y also loads through G2 = muldiv(x + y, g), so y would be ~0; a 1,000,000 KAS
-/// vault leaves room.)
+/// DP8: boost pot below the safe level: y = O'. (With a large vault x1 sits on the binding
+/// check, the whale check at the fixture margin 1.5 (the edge rule at the former 1.17), which y
+/// also loads through G2 = muldiv(x + y, g), so y would be ~0; a 1,000,000 KAS vault leaves room.)
 #[test]
 fn dp8_boost_below_safe_level() {
     let mut c = sold();
@@ -287,7 +287,8 @@ fn dp9_boost_above_safe_level() {
     run(&c);
 }
 
-/// DP10: the base x_b = muldiv(V', j) fails (here the edge rule): x1 < x_b.
+/// DP10: the base x_b = muldiv(V', j) fails (here the whale check at margin 1.5; the edge rule at
+/// the former 1.17): x1 < x_b.
 #[test]
 fn dp10_base_fails() {
     let c = sold();

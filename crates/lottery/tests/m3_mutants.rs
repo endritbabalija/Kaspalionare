@@ -174,6 +174,11 @@ fn d3_mdraw() {
 }
 
 #[test]
+fn d_margin_min() {
+    killed(D, &["D_margin_min"], ctrl_margin_below_floor()); // spec M8 A0 MF2 (D109)
+}
+
+#[test]
 fn d4_role() {
     killed(D, &["D4_role"], marker_role()); // DA10 (Stage 4)
 }
@@ -723,5 +728,6 @@ fn every_m3_tag_is_tested() {
     // D12_sp; spec M7 retired D7, D19_own and D19_max, replaced by M7D_lock, M7D_mk and
     // M7C_claim). Until the M7 Stage 2 drawer.sil lands, the committed drawer still carries
     // the three retired tags and this test fails on "tag D7 has no mutant test".
-    assert_eq!(n, 85, "M3 tag count changed: update this test and the handoff table");
+    // Spec M8 A0 (D109) added D_margin_min (drawer check 3): 86.
+    assert_eq!(n, 86, "M3 tag count changed: update this test and the handoff table");
 }

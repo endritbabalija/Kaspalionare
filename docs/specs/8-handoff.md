@@ -5,8 +5,8 @@ Each stage agent reads this file first, works only on its stage, stops at a suit
 and updates the sections below before it ends. Handoff completeness beats row count.
 
 ## Status
-- S1 margin floor: todo
-- S2 lottery::index, wallet store, offline builders: todo
+- S1 margin floor: done (commit "M8 S1: whale-margin floor 1.5"; D113)
+- S2 lottery::index, wallet store, offline builders: todo (also: the genesis round-1 whale check, review SF1, see below)
 - S3 tn10 indexer, campaign runner, bundle, fast campaign: todo
 - S4 soak + simnet: todo
 - S5 review and records: todo
@@ -20,7 +20,7 @@ and updates the sections below before it ends. Handoff completeness beats row co
 - before the first testnet submission of S3 (balance, about 2,000 tKAS);
 - before any `git push`;
 - before installing LLVM/clang and protoc;
-- before the CLAUDE.md edit (D122);
+- before the CLAUDE.md edit (D125);
 - before the first kascov.io upload.
 
 **Facts found while planning (verify line numbers before editing):**
@@ -49,7 +49,7 @@ and updates the sections below before it ends. Handoff completeness beats row co
 - **Network coupling:**
   - `tn10/src/anchor.rs` is network-agnostic except for `probe::Ctx` (`probe.rs:49-54`) and its fixed timeouts.
   - The network guard is `tn10/src/net.rs:13-61`.
-  - Fixed fees to replace (D117): `probe.rs:159`, `genesis.rs:601`.
+  - Fixed fees to replace (D120): `probe.rs:159`, `genesis.rs:601`.
 - **Simnet facts (rusty-kaspa v2.1.0):**
   - `skip_proof_of_work` (`params.rs:737`; skipped at `pre_ghostdag_validation.rs:102-105`);
   - the header hash covers nonce and timestamp (`hashing/header.rs:7-35`);
@@ -71,7 +71,7 @@ and updates the sections below before it ends. Handoff completeness beats row co
   4. `cargo test` green.
   5. `m7_measure --release`: worst `close()`/`draw()` masses and the stack headroom at check 24 (≥ 4, D104).
   6. `covenant-reviewer` on the S1 diff (attack the MF5 cost claim, "which rule is off-chain only", negative controls).
-  7. D110 row and the `docs/costs.md` M8 section (before "Spike VDF+ZK").
+  7. D113 row and the `docs/costs.md` M8 section (before "Spike VDF+ZK").
   8. Commit "M8 S1: whale-margin floor 1.5".
 - **S2, `crates/lottery/src/index.rs`:**
   - `Event`/`classify`/`parse_*`;
@@ -91,13 +91,13 @@ and updates the sections below before it ends. Handoff completeness beats row co
   Commit "M8 S3".
 - **S4:**
   - **Soak C8:** unattended about 31 h; the PC stays on; check in at the close (t0 + 20 h) and the draw (t0 + 30.5 h).
-  - **In parallel, simnet:** owner approves the LLVM/protoc install and the CLAUDE.md edit (D122); then `crates/simnet` (in-process node, simnet-only guard, on-demand miner, nonce grinder, SN1–SN5); results in the "Simnet" section of `docs/tn10-mass-check.md`.
+  - **In parallel, simnet:** owner approves the LLVM/protoc install and the CLAUDE.md edit (D125); then `crates/simnet` (in-process node, simnet-only guard, on-demand miner, nonce grinder, SN1–SN5); results in the "Simnet" section of `docs/tn10-mass-check.md`.
 
   Commit "M8 S4".
 - **S5:**
   - `cli-debugger` on one `draw()` and one `claim()`; kascov.io preflight per shape;
   - `covenant-reviewer` on the full M8 diff;
-  - records: DECISIONS D110–D122 plus the review rows, `docs/costs.md` M8, milestone → done, CLAUDE.md commands;
+  - records: DECISIONS D113–D125 plus the review rows, `docs/costs.md` M8, milestone → done, CLAUDE.md commands;
   - delete this file.
 
   Commit "M8: testnet-10 end to end".
@@ -105,9 +105,39 @@ and updates the sections below before it ends. Handoff completeness beats row co
 ## Progress log
 - 2026-10-13 design session: spec approved, plan approved, this handoff created. No code. Next: S1 in a fresh chat (`/milestone 8` finds the spec; start at step 4 for S1).
 (newest at the bottom; one entry per working session: what was done, test evidence, commit)
+- 2026-10-13/14 S1 session (stopped early: low memory killed the third `cargo test`; no commit).
+  - **Tests first.** `crates/lottery/tests/m8_margin.rs`: MF0 (constant); MF1 `close()` 14,999 refused / 15,000 accepted at input 0 (also 20,000 accepted, 20,001 refused); MF2 `draw()` 14,999 refused at input 0, 15,000 accepted, attribution by `first_failing_check` = drawer check 3; MF3 genesis 14,999/15,000/20,000/20,001 -> Err/Ok/Ok/Err (the error names "margin"); MF4 both mutants (`C2_margin_min` via `mutant(Sil::Controller)`, `D_margin_min` via `mutant(Sil::Drawer)`): the 14,999 strike is accepted by input 0 and the 15,000 base by all inputs; MF5 (3 tests, below). Shared attack `common/m3.rs` `ctrl_margin_below_floor()`; `m3_mutants.rs` `d_margin_min` kills `D_margin_min` (passed in run 2). The controller has no truncation-attribution instrument, so for close() "refused at C2_margin_min" is shown by MF1 + MF4 together.
+  - **Fails before** (scripts unchanged, Rust constant only): MF1, MF2 and both MF4s panic "ATTACK ACCEPTED by input 0"; MF3 "margin 14999: expected ok = false, got Ok(())". MF5 passed (pure Rust).
+  - **Implemented:** `covenants/controller.sil` and `covenants/drawer.sil`: `int constant MARGIN_MIN = 15000;` after `BP` (with a comment) and `require(margin >= MARGIN_MIN); // mut:C2_margin_min` / `require(ctrl.margin >= MARGIN_MIN); // mut:D_margin_min`; `game.rs` `pub const MARGIN_MIN: i64 = 15_000`; `genesis.rs:295` `range("margin", c.margin, MARGIN_MIN, 2 * BP)` and its unit-test strike `BP - 1` -> `MARGIN_MIN - 1`.
+  - **Fixtures:** `close.rs:143` and `buy.rs:446` (dummy) 11,700 -> 15,000. `spike_vdf.rs` untouched.
+  - **MF5 result (holds at 1.5; verified in run 2 and standalone):** real-magnitude grid, exhaustive over m' in {2, 10, 50} and V', O' in {0} U {10^k KAS, k = 0..10}: 432 points per margin; price 1 KAS, fixture shares, e 15 %, j 10 %, g 1 %, cap 20 %. Whale-binding points (one more sompi of J_house fails the whale check alone): 16 at 1.17, **154 at 1.5**. At each: (x2, y) passes; x2 + 1 and y + 1 fail `pass` and `pass_exact`; witness_ok accepts and rejects x2 + 1; a 2,000-sompi local scan finds nothing larger; W - (J' + G2' (m' - 1)) is in [0, m') (worst 0 sompi at 1.17, **27 sompi at 1.5**), i.e. jackpot money per ticket within 1/N sompi below q = floor(p w / margin) (q/p = 0.6752 at 1.17, 0.5267 at 1.5). Worked point V' 1,000,000 KAS, m' 10, O' 10^10 KAS at 1.5: J_house 100,000 KAS, J_boost 588,561.09 KAS, money = W = 750,531.59 KAS exactly. `fix_jackpot_brute` equals `fix_jackpot` exactly on a scaled copy (price 3 sompi, m' in {2, 10}, V' in {0, 10^4, 10^6, 10^7}, O' in {0, 10^4, 3x10^5, 2x10^6} sompi, 32 points per margin; whale-binding 2 at 1.17, 5 at 1.5); at full magnitude brute force is infeasible (linear scans over 10^14 sompi). **New fact:** at 1.5 the edge rule binds nowhere on the grid (q = 0.5267 p < a = 0.629 p): every point the edge bound at 1.17 is whale-bound at 1.5, including base lowering (x1 < x_b). The test asserts this.
+  - **Full runs.** Run 1 (fail-fast) stopped at m2_attacks ca4. Run 2 (`cargo test -j 4 --no-fail-fast`, debug): every binary green except m2_game (cp8, 1 failure), m3_attacks (da4, 1), m3_mutants (pin, 1; 91 passed incl. d_margin_min) and spike_vdf (STACK_OVERFLOW, pre-existing, see Known failing). Passed per binary: harness lib 8, covenant_smoke 3, m0_limits 3, m0_mass 5, m0_merkle 2, m0_shapes 6, m7_chain 8, lottery lib 42, m1_attacks 25, m1_buy 14, m1_measure 4, m1_mutants 11, m2_attacks 39, m2_close 8, m2_game 1 (+1 F), m2_measure 5, m2_mutants 25, m2_params 17, m3_attacks 18 (+1 F), m3_draw 21, m3_game 13, m3_measure 7, m3_mutants 91 (+1 F), m4_attacks 21, m4_claim 23, m4_game 4, m4_measure 8, m4_mutants 193 (1 ignored, pre-existing), m5_attacks 21, m5_game 10, m5_measure 5, m5_mutants 261, m5_vault 15, m6_attacks 8, m6_conflict 3, m6_limits 8, m6_measure 10, m6_mutants 9, m7_attacks 19, m7_measure 7, m7_mutants 19, m7_seed 15, **m8_margin 9**. The three failures were then re-derived (see the draft row) but are **not yet re-run**. Run 3 first hit a stale-artifact compile error in m3_game (`MARGIN_MIN` not found, caused by building a HEAD worktree into the shared target dir; m3_game compiled and passed in run 2); after `cargo clean -p lottery -p harness` the rerun was killed for low memory during compilation.
+  - **Next (the S1 resume point):** from `crates/`: `cargo test -j 2 --no-fail-fast` (expect everything green except the spike_vdf debug overflow). If da4's edge regime (e = 3,000) does not give [true, false, false], recompute it: any e with p s_H (1 - e) < q, i.e. e > 2,883 bp, and a vault where the edge rule, not the cap, binds. Then `cargo check -p lottery --no-default-features --features mainnet`. Then step 5: `cargo test -p lottery --release --test m7_measure -- --nocapture --test-threads=1`, and `cargo test -p lottery --release --test spike_vdf -- --nocapture --test-threads=1` (spike_vdf runs only in release). On masses: the margin literal changes from 10000 to 15000, and both are 2-byte script numbers, so redeem sizes should not change. Confirm by measurement; do not assume.
+
+- 2026-10-14 orchestrator (S1 close-out): resumed the S1 agent's handoff. `cargo test -j 2 --no-fail-fast` green in every binary (m2_game 2, m3_attacks 19, m3_mutants 92, m8_margin 9, …) except the pre-existing debug `spike_vdf` overflow; `spike_vdf --release` 14/14; mainnet `cargo check` builds; release `m7_measure` re-measured (D113). Owner decisions: floor 1.5 now (RSD separate), M8 rows renumbered D113–D125, review SF1 fixed in S2. covenant-reviewer: no must-fix; SF2 fixed (cp8 edge-bound point, mutant `s1 = qAllow·N − g2Hat` killed by hand), SF3 records written, notes applied. Records: DECISIONS rows (renumbering, D113, design 4.6 proposal, S1 review), `docs/costs.md` "M8" section. Next: S2 in a fresh agent.
+  - **S2 added task (review SF1, owner 2026-10-14):** genesis `validate()` must also require `J + G2(m − 1) <= q N m` and `J_house + G2(m − 1) <= a N m` for round 1 (round-1 shares, e, margin); write the attack test first (the default fixture, J(1) 1,000,000 KAS at m 10, is 45 % over the limit and must be refused), then give tests that need a large J explicit fixture values rather than loosening anything. IX8 (bundle-verify) runs the same validation.
 
 ## PENDING DECISIONS rows (drafts; copied into docs/DECISIONS.md at S5 or at the stage's commit)
+- D113 and the S1 review row were moved into `docs/DECISIONS.md` at the S1 commit (2026-10-14). Nothing pending.
+
+## Owner notes
+- 2026-10-13, soak scheduling. The owner's laptop need not stay on for 30 h. Offer two modes:
+  - **(A)** plugged in with sleep off;
+  - **(B)** three sittings:
+    1. t0: the round-6 buys, with the indexer running (about 15 min);
+    2. one indexer catch-up between about t0 + 8 h and t0 + 24 h, so that its resume block is never older than the pruning window (about 5 min);
+    3. at about t0 + 29.5 h: `close()`, wait for the deletion evidence (about t0 + 30.5 h), then `draw()`, claim and `refresh()` (about 1.5 h).
+
+  In (B) the close moves from spec C8's "about t0 + 20 h" to the last sitting. Constraint: the draw must be ≥ t0 + 30 h (deletion) and ≤ close DAA + 600 + F (12 h). Record this as a C8 amendment.
+  - **Verify in S3:** does `get_virtual_chain_from_block` fail for a start hash below the pruning point?
+  - **The runner must support (B):** `campaign status` prints the next sitting's time window.
 
 ## Open questions for the owner
+- (S1, RESOLVED 2026-10-14) Numbering: the owner renumbered the M8 decisions to D113–D125 (spec 8, milestones and this file updated).
+- (S1, RESOLVED 2026-10-14) Floor ordering versus research row D112: the owner chose to keep the 1.5 floor now as D109 planned; it stays provisional (one constant per script) and RSD (D111, D112) remains a separate release-gate decision.
+- (S1, RECORDED 2026-10-14) design.md 4.6 vs margin 1.5: proposal row in `docs/DECISIONS.md` ("Proposed design edit … design 4.6 at margin above 1.256"); the owner applies or rejects it.
 
 ## Known failing / skipped tests
+- `spike_vdf` `sv_measure_masses_and_stack` overflows its stack in a debug build (STATUS_STACK_OVERFLOW, 0xc00000fd). **Pre-existing:** reproduced at HEAD 93d5413 in a temporary worktree (2026-10-14). CLAUDE.md runs spike_vdf with `--release`. Not fixed (outside S1).
+- `m4_mutants`: 1 ignored (pre-existing).
+- Re-derived after run 2, not yet re-run: `m2_game` cp8, `m3_attacks` da4, `m3_mutants` every_m3_tag_is_tested.

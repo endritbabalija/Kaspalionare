@@ -443,7 +443,7 @@ fn dummy_controller() -> ControllerState {
         e: 1_500,
         j: 1_000,
         g: 100,
-        margin: 11_700,
+        margin: 15_000,
         m_min: 2,
         m_max: 50,
         cap: 2_000,

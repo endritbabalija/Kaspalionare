@@ -35,7 +35,7 @@ use kaspa_consensus_core::tx::GenesisCovenantGroup;
 use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, spk_of};
 use crate::close::{CloseCase, z18};
 use crate::game::{
-    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, M_DRAW, M_HARD, SHARE_UNIT, SHARES_MAX, S_F_CAP, S_R_CAP,
+    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, MARGIN_MIN, M_DRAW, M_HARD, SHARE_UNIT, SHARES_MAX, S_F_CAP, S_R_CAP,
     TOTAL_MAX, VOID_MIN, muldiv,
 };
 use crate::params::xonly;
@@ -292,7 +292,7 @@ impl GenesisCase {
         range("e", c.e, 0, 5_000)?;
         range("j", c.j, 0, 5_000)?;
         range("g", c.g, 0, 1_000)?;
-        range("margin", c.margin, BP, 2 * BP)?;
+        range("margin", c.margin, MARGIN_MIN, 2 * BP)?;
         range("cap", c.cap, 0, BP)?;
         for (name, v) in [("jackpot", c.jackpot), ("j_boost", c.j_boost), ("g2", c.g2), ("liability", c.liability), ("v_rec", c.v_rec), ("acc", c.acc)] {
             range(name, v, 0, TOTAL_MAX)?;
@@ -610,7 +610,7 @@ mod tests {
             ("st1", |g| g.controller.st[0] = -1),
             ("e", |g| g.controller.e = 5_001),
             ("g", |g| g.controller.g = 1_001),
-            ("margin", |g| g.controller.margin = BP - 1),
+            ("margin", |g| g.controller.margin = MARGIN_MIN - 1),
             ("cap", |g| g.controller.cap = BP + 1),
             ("v_rec", |g| g.controller.v_rec = -1),
             ("reserve", |g| g.controller.reserve = 0),

@@ -107,6 +107,8 @@ contract Controller(
     // readInputStateWithTemplate offset arithmetic far from overflow (R8).
     int constant SCRIPT_MAX = 1000000;
     int constant BP = 10000;
+    // Whale-margin floor 1.5 (spec M8 A0, D109; provisional, D108): margin in [MARGIN_MIN, 2 BP].
+    int constant MARGIN_MIN = 15000;
     int constant PRICE_MAX = 100000000000;
     int constant DEPOSIT_MAX = 10000000000;
     int constant RESERVE_MAX = 10000000000;
@@ -233,7 +235,7 @@ contract Controller(
         require(j <= 5000);
         require(g >= 0);
         require(g <= 1000);
-        require(margin >= BP);
+        require(margin >= MARGIN_MIN); // mut:C2_margin_min
         require(margin <= 2 * BP);
         require(cap >= 0);
         require(cap <= BP);

@@ -25,6 +25,10 @@ pub const DAA_MAX: i64 = 500_000_000_000;
 pub const M_HARD: i64 = 255;
 pub const S_F_CAP: i64 = 1_000;
 pub const S_R_CAP: i64 = 1_500;
+/// Whale-margin floor (spec M8 A0, D109): `close()` (controller.sil), `draw()` (drawer.sil)
+/// and genesis require margin >= MARGIN_MIN (1.5); the upper bound stays 2 x BP.
+/// Provisional until the seed-fairness research is decided (D108, D109).
+pub const MARGIN_MIN: i64 = 15_000;
 
 /// floor(x x s / 10^4) without a 128-bit intermediate: exact for 0 <= x <= 2^62 and
 /// 0 <= s <= 10^4 (spec A6). Maximum 2^62 + 10^4.
@@ -1286,21 +1290,24 @@ mod tests {
 
     /// The boost-dominated case of the revised D25 (CA4): e = 5,000, g = 1,000, boost
     /// 539,000 KAS, no house estimate, price 1 KAS, m in [2, 50]. The passing set is an
-    /// interval bounded above that does not reach m_max; the unique reference is m = 12.
+    /// interval bounded above that does not reach m_max; the unique reference is m = 23 at the
+    /// fixture margin 1.5 (spec M8 A0; m = 12 at the former 1.17): the whale check gives
+    /// lo = ceil((J - G2) / (q N - G2)) = ceil(485,100 / 21,153.16) = 23, the edge rule
+    /// hi = floor(53,900 / 1,172.78) = 45.
     #[test]
     fn boost_dominated_reference_is_unique() {
         let sh = Shares::TEST;
         let rule = SizeRule {
             est: estimate(0, 0, 539_000 * KAS, 0, 1_000, 1_000),
             a: allowance(KAS, sh.s_h(), 5_000),
-            q: whale_allowance(KAS, sh.w(), 11_700),
+            q: whale_allowance(KAS, sh.w(), MARGIN_MIN),
             m_min: 2,
             m_max: 50,
         };
         assert!(rule.checks()[0].1 < 0, "edge slope negative");
-        assert_eq!(rule.choose(), 12);
-        assert_eq!(rule.choose_brute(), 12);
-        assert!(rule.pass(12) && !rule.pass(11) && !rule.pass(50));
+        assert_eq!(rule.choose(), 23);
+        assert_eq!(rule.choose_brute(), 23);
+        assert!(rule.pass(23) && !rule.pass(22) && rule.pass(45) && !rule.pass(46) && !rule.pass(50));
         let passing: Vec<i64> = (2..=50).filter(|&x| rule.pass(x)).collect();
         assert!(passing.windows(2).all(|w| w[1] == w[0] + 1), "an interval: {passing:?}");
         assert!(*passing.last().unwrap() < 50);
@@ -1329,21 +1336,28 @@ mod tests {
     #[test]
     fn worked_example_design_4_6() {
         // Design 4.6: p = 1 KAS, Ĵ_house = 1,000,000 KAS, G2 = 10,000 KAS, no boost -> m = 13
-        // (the design's s_H = 74 %, e = 15 %).
+        // (the design's s_H = 74 %, e = 15 %). The design's example holds for any margin
+        // <= 1.256 (design 4.6), so it is checked at the former fixture margin 1.17. At the
+        // floor 1.5 (spec M8 A0) the whale check binds instead: lo = ceil(990,000 KAS /
+        // (q N - G2) = 65,053.16 KAS) = 16.
         let sh = Shares::TEST;
         let est = estimate(10_000_000 * KAS, 0, 0, 0, 1_000, 100);
         assert_eq!((est.j_house, est.g2), (1_000_000 * KAS, 10_000 * KAS));
-        let rule = SizeRule {
-            est,
-            a: allowance(KAS, sh.s_h(), 1_500),
-            q: whale_allowance(KAS, sh.w(), 11_700),
-            m_min: 2,
-            m_max: 50,
-        };
-        assert_eq!(rule.a, 62_900_000);
-        assert_eq!(rule.choose(), 13);
-        assert_eq!(rule.choose_brute(), 13);
-        assert!(rule.pass(13) && !rule.pass(12));
+        for (margin, m) in [(11_700, 13), (MARGIN_MIN, 16)] {
+            let rule = SizeRule {
+                est,
+                a: allowance(KAS, sh.s_h(), 1_500),
+                q: whale_allowance(KAS, sh.w(), margin),
+                m_min: 2,
+                m_max: 50,
+            };
+            assert_eq!(rule.a, 62_900_000);
+            assert_eq!(rule.choose(), m, "margin {margin}");
+            assert_eq!(rule.choose_brute(), m);
+            assert!(rule.pass(m) && !rule.pass(m - 1));
+            // Which check sets m: the edge rule at 1.17, the whale check at 1.5.
+            assert_eq!(rule.edge(m - 1), margin == MARGIN_MIN);
+        }
     }
 
     #[test]

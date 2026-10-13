@@ -854,6 +854,20 @@ Worst `draw()` at the committed drawer (64,629 B): compute 206,523 (41.3 %), tra
 
 **D83 re-confirmation (milestone M7 criterion; spec 7 A10 item 8).** Every row of the milestone list is re-run with the final M7 `draw()` and `close()` and stays within 90 %: **K = 16, m_max = M_DRAW = M_CLAIM = 50, B_MAX = 4 and R = 1.69 KAS are final.** Tightest: `close()` storage worst case 89.9 % (sets R), `close()` K = 16 transient 86.5 % (sets K), the drawer stack at its 4-slot floor (sets how much more can go into `draw()`).
 
+## M8: testnet-10 end to end (S1: whale-margin floor 1.5, D113)
+
+**S1 re-measure (release `m7_measure`, 2026-10-14).** The floor changes one constant and one comparison operand in `controller.sil` and `drawer.sil`; both redeem scripts keep their size (controller 27,624 B, drawer 64,629 B). The fixtures now run at margin 1.5.
+
+| transaction | compute | transient | storage | % c / t / s | M7 | Δ |
+|---|---|---|---|---|---|---|
+| `close()` K = 16, sales in every shard (M2-a shape) | 293,744 | 864,616 | 402,301 | 58.7 / **86.5** / 80.5 | 293,743 / 864,612 / 402,301 | +1 / +4 / 0 |
+| `close()` K = 16, storage worst case | 293,743 | 864,612 | **449,692** | 58.7 / 86.5 / **89.9** | unchanged | 0 |
+| `draw()` worst (DP21 with the anchor) | 206,522 | 527,008 | 71,009 | 41.3 / 52.7 / 14.2 | 206,523 / 527,012 / 71,009 | −1 / −4 / 0 |
+
+The ±1 / ±4 grams are one signature-script byte (a minimally encoded argument of the re-derived fixture changing length): 1 compute gram and 4 transient grams per byte. Drawer stack headroom at check 24: **4** (5 fails to compile, 245 > 244 combined stack items), the D104 floor, with no slack. K = 16, m_max = 50, B_MAX = 4 and R = 1.69 KAS stay final (D83).
+
+**Margin floor note closed (MF5).** At 1.5, wherever neither the edge rule nor the cap binds, `fix_jackpot` gives the largest jackpot the whale check allows, and jackpot money per ticket is within 1/N sompi below q = ⌊p w / margin⌋ (q / p = 0.5267 at the fixture shares; 0.6752 at 1.17). At 1.5 the edge rule is never the binding check (q < a = 0.629 p).
+
 ## Spike VDF+ZK: the seed proof inside `draw()` (local engine; spec `docs/specs/spike-vdf.md`)
 
 Measured 2026-10-13 by `cargo test -p lottery --release --test spike_vdf -- --nocapture --test-threads=1`. Test-only drawer variants, compiled in memory from a patch of the committed `drawer.sil` (unchanged). The VDF output and proof follow the 272-byte anchor inside the `anchor` argument, so the variants add no entry parameter. V1 = plain Groth16 (`g16.verify`, 4 public inputs: the X.hash halves and the MinRoot output (x_T, y_T); real proof from a local `ark-groth16` 0.6 setup, T = 64). V2 = RISC Zero receipt wrapped in Groth16 (`r0.g16.verify`, SilverScript's fixture receipt; the journal binding sha256(X.hash || y) is computed but the fixture's journal is verified). V3 = RISC Zero succinct (rusty-kaspa's fixture receipt, seal 222,668 B).

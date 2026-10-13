@@ -187,6 +187,19 @@ fn dp17_worked_example_design_4_6() {
     assert!(f.x2 + muldiv(f.x2, 100) * 12 <= rule.e_lim);
     assert!(!rule.pass(f.x2 + 1, 0));
     assert_eq!(f, fix_jackpot_brute_bounded(&rule, v, 0, 1_000));
+    // The design's example holds for margins <= 1.256 (design 4.6), so the check above stays at
+    // 1.17. At the fixture floor 1.5 (spec M8 A0) close() picks m' = 16 for the same vault
+    // (game.rs worked_example_design_4_6) and the top-up stops at the whale check instead.
+    let c = ctrl(KAS, 16, 500, 1_000, 1_500, 100, MARGIN_MIN, 2_000);
+    let rule = JackpotRule::new(&c, v);
+    let f = fix_jackpot(&rule, v, 0, 1_000);
+    assert_eq!((f.x_b, f.x1, f.y), (1_000_000 * KAS, 1_000_000 * KAS, 0));
+    // W = q N m' = 1,200,850.5 KAS; x2 (1 + 0.01 x 15) <= W: about 1,044,217 KAS.
+    assert_eq!(f.x2 / KAS, 1_044_217);
+    let l = |x: i64| x + muldiv(x, 100) * 15;
+    assert!(l(f.x2) <= rule.w_lim && l(f.x2 + 1) > rule.w_lim && l(f.x2 + 1) <= rule.e_lim, "whale binds, not the edge");
+    assert!(!rule.pass(f.x2 + 1, 0));
+    assert_eq!(f, fix_jackpot_brute_bounded(&rule, v, 0, 1_000));
 }
 
 /// Brute force is too slow at KAS magnitudes; check the top-up by a local scan instead.

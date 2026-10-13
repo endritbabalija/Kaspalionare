@@ -142,8 +142,10 @@ fn ca4_wrong_m_next() {
 
 #[test]
 fn ca4_boost_dominated_m_max_rejected() {
-    // Check 19: e = 5,000, g = 1,000, boost 539,000 KAS, no house estimate: reference m = 12;
-    // m_max = 50 (which the old witness form also accepted) is rejected.
+    // Check 19: e = 5,000, g = 1,000, boost 539,000 KAS, no house estimate: reference m = 23
+    // at the fixture margin 1.5 (spec M8 A0; m = 12 at the former 1.17; game.rs
+    // boost_dominated_reference_is_unique); m_max = 50 (which the old witness form also
+    // accepted) is rejected.
     let mut good = CloseCase::new(4);
     good.controller.e = 5_000;
     good.controller.g = 1_000;
@@ -151,9 +153,9 @@ fn ca4_boost_dominated_m_max_rejected() {
     good.controller.j_boost = 0;
     good.pot = 539_000 * KAS;
     let x = good.expected();
-    assert_eq!(x.m_next, 12);
+    assert_eq!(x.m_next, 23);
     assert!(!x.math.rule.pass(50));
-    for bad in [11, 13, 50] {
+    for bad in [22, 24, 50] {
         case_attack(&good, &with_m(&good, bad));
     }
 }

@@ -226,6 +226,14 @@ pub fn ctrl_m_above() -> Atk {
     Atk::case(DRW, base(), |c| c.controller.m = M_DRAW + 1)
 }
 
+/// Controller (round r + 1) with margin 14,999 bp, one below MARGIN_MIN (spec M8 A0, D109;
+/// D_margin_min, MF2). The good draw has margin 15,000 exactly.
+pub fn ctrl_margin_below_floor() -> Atk {
+    let mut good = base();
+    good.controller.margin = 15_000;
+    Atk::case(DRW, good, |c| c.controller.margin = 14_999)
+}
+
 /// The marker input with role 0x07 (D4_role; CL4_role at input 3).
 pub fn marker_role() -> Atk {
     Atk::built(DRW, base(), |b, c| {
