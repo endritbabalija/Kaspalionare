@@ -429,21 +429,29 @@ async fn merged_poll(
     Err(format!("{op}: no chain-merged UTXO entry within 300 s ({last})"))
 }
 
-/// M3 (spec M3-g): genesis -> buy -> close -> `draw()` at K = 16 with the real scripts, each
-/// built by the `lottery` builder and checked in the local v2.1.0 engine before submission.
+/// M3 (spec M3-g), M7 (spec D103): genesis -> buy -> close -> `draw()` at K = 16 with the real
+/// scripts, each built by the `lottery` builder and checked in the local v2.1.0 engine before
+/// submission.
 /// - Genesis as close-m2 (J(1) = 10 KAS, V0 = 60 KAS) but with T = virtual DAA + 600: buy()
 ///   needs the shard created before T (shard.sil check 6), close() needs lock_time = T final,
 ///   so the probe waits for T (about a minute at 10 BPS) between the buy and the close.
-/// - buy(): shard 0 sells the round 1 jackpot combination of the TEST-ONLY seed below, so
-///   the draw creates a jackpot pool (and lower-tier pools from the 1 KAS sale).
-/// - close(): K = 16, funded by the buy change; it sets seed_ref = own + seed_offset (600 DAA,
-///   about a minute at 10 BPS), so the probe waits for the virtual DAA score to pass it.
-/// - draw_test_seed(): drawer, marker, vault, controller and one funding input (the close
-///   caller output); lock_time = seed_ref. Every input's entry (and creation DAA score) is
-///   the node's own, read only after a chain block merged the creating transaction
-///   (`merged`, O-S4-4), re-read just before submission, and the draw is rebuilt if it moved.
+/// - buy(): shard 0 sells one fixed combination (M7: the outcome is unknown until the anchor
+///   block exists, so the draw is normally a "jackpot not held" draw, DP4 shape; the lower-tier
+///   pools are still created from the 1 KAS sale).
+/// - close(): K = 16, funded by the buy change. D = the marker's creation DAA score (the
+///   chain block that accepted close()) + seed_offset (600 DAA, spec M7 D93).
+/// - draw(): drawer, marker, vault, controller and one funding input (the close caller
+///   output); lock_time = D. The anchor X is the first chain block with DAA >= D, found on the
+///   virtual chain (`anchor::find_anchor`); X's and P's proof fields are rebuilt from RPC and
+///   self-checked against the headers (`anchor::anchor_from_rpc`, D103); the local engine runs
+///   the draw against a `ChainSim` of the real P and X (`ChainSim::from_real_chain`). Every
+///   input's entry (and creation DAA score) is the node's own, read only after a chain block
+///   merged the creating transaction (`merged`, O-S4-4), re-read just before submission, and
+///   the draw is rebuilt if it moved.
+/// - Void (`void-m7`): the same with a TEST-ONLY genesis (`allow_short_void_window`,
+///   draw_window = 1,200 DAA) and `draw()` with an empty anchor at lock_time = D + 1,200.
 /// Locked on testnet afterwards: round 2's objects, the drawer', vault', controller', the
-/// new pools (no claim path in M3) and the ticket. The caller output is ours.
+/// new pools and the ticket. The caller output is ours.
 /// The round-1 state the M3/M4 chain probes reach: templates, covenant ID, the
 /// buy (its ticket is output 1 of `bs`), the draw case and transaction, and the round
 /// result read back from the draw transaction bytes. `*_start` are sink hashes taken before
@@ -462,6 +470,8 @@ pub struct Drawn {
     /// its sink start hash.
     pub dep: Option<(lottery::vault::DepositCase, Sent, kaspa_rpc_core::RpcHash)>,
     pub wdr: Option<(lottery::vault::WithdrawCase, Sent, kaspa_rpc_core::RpcHash)>,
+    /// M7: the real anchor (X, P) the draw used; `None` for a void.
+    pub anchor: Option<std::sync::Arc<crate::anchor::RpcAnchor>>,
 }
 
 /// M5 vault requests sent between genesis and the buy (`round1_drawn_with`): a deposit of
@@ -472,39 +482,46 @@ pub struct VaultRequests {
     pub w: i64,
 }
 
-pub async fn draw_m3(ctx: &mut Ctx) -> Result<(), String> {
-    match round1_drawn(ctx, "draw-m3").await {
-        Ok(_) => Ok(()),
-        // As before the M4 refactor: a rejected draw is a report row, not a probe error.
-        Err(e) if e == "draw-m3 draw rejected" => Ok(()),
-        Err(e) => Err(e),
-    }
+/// M7 (spec D103): `probe draw-m7` (also run as `probe draw-m3`: the TEST-ONLY seed path of
+/// M3 is deleted, D101). A rejected draw is a report row and an error: the stop rule D104
+/// applies to any rejection other than fees or the resolver.
+pub async fn draw_m7(ctx: &mut Ctx, tag: &str) -> Result<(), String> {
+    round1_drawn(ctx, tag).await.map(|_| ())
 }
 
-/// Genesis -> buy -> close -> draw_test_seed() of round 1 with the real scripts (the draw-m3
-/// sequence); `tag` names the probe in every report row and error.
-pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
-    round1_drawn_with(ctx, tag, None).await
+/// M7 (spec D103): `probe void-m7`. Genesis with the TEST-ONLY `allow_short_void_window`
+/// (draw_window = 1,200 DAA; refused by `GenesisCase::validate` unless the network is testnet
+/// or devnet), buy, close, then `draw()` in void mode (empty anchor) once the virtual DAA
+/// score passes D + 1,200.
+pub async fn void_m7(ctx: &mut Ctx) -> Result<(), String> {
+    round1_drawn_with(ctx, "void-m7", None, true).await.map(|_| ())
 }
+
+/// Genesis -> buy -> close -> draw() of round 1 with the real scripts and the real anchor
+/// (the draw-m7 sequence); `tag` names the probe in every report row and error.
+pub async fn round1_drawn(ctx: &mut Ctx, tag: &str) -> Result<Drawn, String> {
+    round1_drawn_with(ctx, tag, None, false).await
+}
+
+/// TEST-ONLY draw window of `void-m7` (DAA): the void lock D + 1,200 is about 2 minutes after D.
+pub const VOID_M7_DRAW_WINDOW: i64 = 1_200;
 
 /// `round1_drawn` with, if `vr` is set, a `request_deposit()` and a `request_withdraw()`
 /// (both with the real vault and position scripts) between genesis and the buy, so the draw
-/// converts both and writes a settlement record (spec M5-f).
-pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequests>) -> Result<Drawn, String> {
+/// converts both and writes a settlement record (spec M5-f); with `void`, a TEST-ONLY short
+/// draw window at genesis and a void instead of a draw (spec M7 D96, D103).
+pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequests>, void: bool) -> Result<Drawn, String> {
     use kaspa_consensus_core::tx::TransactionOutpoint as Op;
     use kaspa_rpc_core::api::rpc::RpcApi;
     use lottery::buy::{BuyCase, Templates, b_max};
     use lottery::close::{CloseCase, FundingIn, ShardIn};
     use lottery::combo::{Combo, unrank};
     use lottery::draw::{DrawCase, RoundResult};
-    use lottery::game::seed_numbers;
     use lottery::genesis::{GenesisCase, covenant_id};
     use lottery::smt::Tree;
     use lottery::state::Payout;
 
     const K: usize = 16;
-    // TEST-ONLY seed (D42): randomness is parked; this is not a seed source.
-    const TEST_ONLY_SEED: [u8; 32] = [0x5e; 32];
     let daa = ctx.client.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
     let t = Templates::get(b_max());
     let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
@@ -523,6 +540,13 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     for s in &mut g.shards {
         s.deadline = deadline;
     }
+    if void {
+        // TEST-ONLY (spec M7 D103): a void after 2 minutes instead of 24 h. validate() refuses
+        // the flag unless the network is testnet or devnet (GenesisCase.network = Testnet).
+        g.allow_short_void_window = true;
+        g.drawer.draw_window = VOID_M7_DRAW_WINDOW;
+        g.validate_with(&t).map_err(|e| format!("{tag}: genesis refused: {e}"))?;
+    }
     let mut gf = g.build_with(t.clone()).finish();
     g.fee = lottery_fee(&gf);
     gf = g.build_with(t.clone()).finish();
@@ -530,7 +554,20 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     let cov = covenant_id(&gf);
     let gs = sent_of(&gf);
     let g_start = sink(ctx).await?;
-    if !ctx.submit(&format!("setup: {tag} genesis, K = {K}, real templates, R = {:.2} KAS", g.reserve() as f64 / KAS as f64), &gs, true).await? {
+    if !ctx
+        .submit(
+            &format!(
+                "setup: {tag} genesis, K = {K}, real templates, R = {:.2} KAS, seed_offset {}, draw_window {}{}",
+                g.reserve() as f64 / KAS as f64,
+                g.controller.seed_offset,
+                g.drawer.draw_window,
+                if void { " (TEST-ONLY allow_short_void_window)" } else { "" }
+            ),
+            &gs,
+            true,
+        )
+        .await?
+    {
         return Err(format!("{tag} genesis rejected"));
     }
     let gid = gs.tx.id();
@@ -646,16 +683,17 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         wdr = Some((wc, ws, w_start));
     }
 
-    // ---- buy(): the jackpot combination of round 1 on shard 0
+    // ---- buy(): one fixed combination on shard 0 (M7: the outcome is unknown until the
+    // anchor block exists, after close()).
     let m = g.controller.m;
-    let sn = seed_numbers(&cov.as_bytes(), g.controller.round, &TEST_ONLY_SEED, m);
+    let combo = Combo::new(unrank(0), 1);
     let mut bc = BuyCase::new(t.b_max).with_tree(Tree::new(m as usize));
     assert_eq!(bc.shard.root, g.shards[0].root, "genesis shard 0 holds the empty tree");
     bc.shard = g.shards[0].clone();
     bc.reserve = g.reserve();
     bc.shard_daa = gdaa;
     bc.cov = cov;
-    bc.bundle = vec![Combo::new(unrank(sn.rank), sn.bonus)];
+    bc.bundle = vec![combo];
     bc.payout = me;
     bc.funding = vec![buy_funding.entry.amount];
     bc.funding_sk = ctx.sk;
@@ -671,7 +709,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     bf.run().map_err(|(i, e)| format!("local engine rejects {tag} buy at input {i}: {e:?}"))?;
     let bs = sent_of(&bf);
     let b_start = sink(ctx).await?;
-    if !ctx.submit(&format!("setup: {tag} buy() of the jackpot combination {:?} + {} on shard 0", unrank(sn.rank), sn.bonus), &bs, true).await? {
+    if !ctx.submit(&format!("setup: {tag} buy() of the fixed combination {:?} + 1 on shard 0", unrank(0)), &bs, true).await? {
         return Err(format!("{tag} buy rejected"));
     }
     let bid = bs.tx.id();
@@ -721,15 +759,12 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     let cn = cs.tx.outputs.len() - 1;
     let caller = merged(ctx, c_start, Op::new(cid, cn as u32), &cs.tx.outputs[cn].script_public_key).await?.0;
     let cdaa = caller.entry.block_daa_score;
-    // M7 Stage 1a (minimal, so the workspace builds): D = the marker's creation DAA score +
-    // seed_offset (spec M7 D93) replaces the marker's removed seed_ref. STAGE 4: the draw
-    // below still uses a fabricated anchor (DrawCase's default ChainSim with X.hash =
-    // TEST_ONLY_SEED), which the local engine accepts but testnet-10 rejects at drawer check
-    // 8; Stage 4 replaces it with `anchor_from_rpc` (D103).
-    let seed_ref = lottery::game::anchor_daa(cdaa as i64, x.controller.seed_offset);
-    println!("close {cid} at DAA {cdaa}; D {seed_ref}");
+    // Spec M7 D93: D = the marker's creation DAA score (the chain block that accepted close())
+    // + seed_offset. The marker (close output K + 2) and the caller output share that score.
+    let d_ref = lottery::game::anchor_daa(cdaa as i64, x.controller.seed_offset);
+    println!("close {cid} at DAA {cdaa}; D {d_ref}{}", if void { format!("; void lock D + draw_window = {}", d_ref + g.drawer.draw_window) } else { String::new() });
 
-    // ---- draw_test_seed()
+    // ---- draw() (or the void)
     let mut d = DrawCase::new_with(K, &t);
     d.drawer = g.drawer.clone();
     d.drawer_daa = gdaa;
@@ -744,25 +779,64 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     let roots = d.marker.roots.clone();
     d.sync_roots();
     assert_eq!(d.marker.roots, roots, "the marker roots are the shard trees' roots");
-    d.x_hash = TEST_ONLY_SEED; // STAGE 4: the real anchor X.hash from RPC.
     d.cov = cov;
     d.funder = me;
     d.funding_sk = ctx.sk;
     d.funding = vec![FundingIn { value: caller.entry.amount, daa: cdaa }];
     d.absorbed = vec![];
-    d.fix_lock_time();
+    d.set_void(void);
+    assert_eq!(d.d(), d_ref, "DrawCase D = marker creation DAA + seed_offset");
     let dops = vec![Op::new(gid, K as u32 + 3), Op::new(cid, K as u32 + 2), vault_in.0, Op::new(cid, 0), caller.op];
     let draw_fin = |d: &DrawCase| {
         let mut b = d.build_with(t.clone());
         b.outpoints = dops.clone();
         b.finish()
     };
-    // Wait for the lock time (D51): the virtual DAA score must pass seed_ref.
-    wait_daa(ctx, seed_ref as u64 + 20, "seed_ref").await?;
+    // Lock time (D51, spec M7 check 7): a draw needs tx.daa >= D, a void D + draw_window.
+    wait_daa(ctx, d.lock_time + 20, if void { "void lock D + draw_window" } else { "D" }).await?;
+    let anchor = if void {
+        None
+    } else {
+        // The anchor X (first chain block with DAA >= D) and P, from RPC, self-checked
+        // (D103). c_start is the sink before close() was submitted, so its DAA is < D.
+        let a = crate::anchor::rpc_anchor(ctx, c_start, d_ref as u64).await?;
+        // A few confirmations of X before the draw is built (X must stay a chain block).
+        crate::anchor::wait_blue_score(ctx, a.x.sim.blue_score + 50).await?;
+        let sim = harness::ChainSim::from_real_chain(harness::Hash::from_bytes(a.p.fields.parent_commit), &[a.p.sim, a.x.sim]);
+        d.sim = Some(std::sync::Arc::new(sim));
+        d.x_hash = a.proof.x_hash();
+        if d.anchor_bytes() != a.proof.to_bytes() || d.x_hash() != a.proof.x_hash() {
+            return Err(format!("{tag}: the builder's anchor bytes differ from the RPC proof"));
+        }
+        let row = format!(
+            "| anchor for D = {}: X `{}` DAA {} blue score {} (mergeset {} blues + {} reds, coinbase lane active {}); P `{}` DAA {} blue score {} (mergeset {} + {}); mergeset order matched: X [{}], P [{}] = {}; SeqCommit(X) `{}` and SeqCommit(P) `{}` recomputed = headers | | | | | | | | |",
+            a.d,
+            a.x.sim.hash,
+            a.x.sim.daa_score,
+            a.x.sim.blue_score,
+            a.x.mergeset_blues,
+            a.x.mergeset_reds,
+            a.x.lane_active,
+            a.p.sim.hash,
+            a.p.sim.daa_score,
+            a.p.sim.blue_score,
+            a.p.mergeset_blues,
+            a.p.mergeset_reds,
+            a.x.order,
+            a.p.order,
+            crate::anchor::ORDERS[a.x.order],
+            a.x.header_commit,
+            a.p.header_commit
+        );
+        println!("{row}");
+        ctx.report.push(row);
+        Some(std::sync::Arc::new(a))
+    };
     // O-S4-4 (Stage 5): build the draw only from the node's own UTXO entries of inputs whose
     // creating transaction a chain block has merged (`merged`), then re-read them just
     // before submission; if any entry changed (e.g. a reorganisation moved the merging
-    // chain block), rebuild from the new entries instead of submitting.
+    // chain block), rebuild from the new entries instead of submitting. A moved marker entry
+    // moves D and the anchor: that is an error, not a rebuild.
     let starts = [g_start, c_start, vault_in.3, c_start, c_start];
     let spks: Vec<_> = draw_fin(&d).entries.iter().map(|e| e.script_public_key.clone()).collect();
     let mut built = None;
@@ -776,6 +850,9 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         d.vault_daa = node[2].block_daa_score;
         d.controller_daa = node[3].block_daa_score;
         d.funding = vec![FundingIn { value: node[4].amount, daa: node[4].block_daa_score }];
+        if d.d() != d_ref {
+            return Err(format!("{tag}: the marker's node entry DAA moved ({} -> {}); D and the anchor changed", cdaa, d.marker_daa));
+        }
         d.fix_lock_time();
         let df = draw_fin(&d);
         d.fee = lottery_fee(&df);
@@ -807,20 +884,33 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         println!("attempt {attempt}: a node entry changed between build and submission; rebuilding");
     }
     let df = built.ok_or(format!("{tag}: node entries kept changing; not submitted"))?;
+    // X must still be a chain block when the draw is submitted (else BlockNotSelected).
+    if let Some(a) = &anchor {
+        let xb = ctx.client.get_block(a.x.sim.hash, false).await.map_err(|e| e.to_string())?;
+        if !xb.verbose_data.map(|v| v.is_chain_block).unwrap_or(false) {
+            return Err(format!("{tag}: X {} left the selected chain before submission", a.x.sim.hash));
+        }
+    }
     let dx = d.expected();
     let ds = sent_of(&df);
     let d_start = sink(ctx).await?;
     let ok = ctx
         .submit(
             &format!(
-                "{}draw_test_seed() {} real scripts, K = {K}, a = 0, np = {}, h_J = {}, n2 = {}, fee paid {}, R = {:.2} KAS{}",
-                if tag == "draw-m3" || tag == "vault-m5" { "" } else { "setup: " },
-                if vr.is_some() { "M5" } else { "M3" },
+                "{}{} {} real scripts, K = {K}, a = 0, np = {}, h_J = {}, n2 = {}, fee paid {}, R = {:.2} KAS, lock_time {}{}{}",
+                if tag == "claim-m4" { "setup: " } else { "" },
+                if void { "void: draw() with an empty anchor (D96)" } else { "draw() with the real anchor (D93-D95)" },
+                if vr.is_some() { "M5+M7" } else { "M7" },
                 dx.np(),
                 dx.h_j,
                 dx.n2,
                 dx.fee.paid,
                 d.reserve() as f64 / KAS as f64,
+                d.lock_time,
+                match &anchor {
+                    Some(a) => format!(", X DAA {} (D = {d_ref})", a.x.sim.daa_score),
+                    None => format!(", D = {d_ref}, D + draw_window = {}", d_ref + d.drawer.draw_window),
+                },
                 if dx.rec {
                     format!(
                         ", conversion: D = {:.2} KAS -> mint {} shares (refund {}), W = {} -> wc = {}, out_c = {:.4} KAS, record at output {}",
@@ -841,27 +931,34 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
         )
         .await?;
     if !ok {
-        return Err(format!("{tag} draw rejected"));
+        return Err(format!("{tag} draw rejected (stop rule D104: the node error is in the row above)"));
     }
     let rr = RoundResult::from_tx(&ds.tx, &t).map_err(|e| format!("round result: {e}"))?;
     let pools: Vec<(u8, i64, u64)> = rr.pools.iter().map(|p| (p.tier, p.slice, p.value)).collect();
-    println!("round result: round {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?}", rr.round, rr.win, rr.d_claim);
+    let xh = harness::Hash::from_bytes(rr.x_hash);
+    println!("round result: round {}, void {}, X.hash {xh}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?}", rr.round, rr.void, rr.win, rr.d_claim);
     ctx.report.push(format!(
-        "| round result from the draw tx bytes: round {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?} | | | | | | | | `{}` |",
+        "| round result from the draw tx bytes: round {}, void {}, X.hash `{xh}`, mk_daa {}, win {:?}, D_claim {}, pools (tier, slice, value) {pools:?} | | | | | | | | `{}` |",
         rr.round,
+        rr.void,
+        rr.mk_daa,
         rr.win,
         rr.d_claim,
         ds.tx.id()
     ));
-    Ok(Drawn { t, cov, bc, bs, b_start, d, ds, d_start, rr, dep, wdr })
+    Ok(Drawn { t, cov, bc, bs, b_start, d, ds, d_start, rr, dep, wdr, anchor })
 }
 
-/// M4 (spec M4-i): genesis -> buy -> close -> draw (the draw-m3 sequence, K = 16, real
-/// scripts) -> one `claim()` with the real ticket and pool scripts through the public
-/// mempool.
-/// - The buy holds the round 1 jackpot combination of the TEST-ONLY seed on a b = 1 ticket
-///   (buy output 1), so the draw creates a jackpot pool with slice J and h_J = 1: the claim
-///   is FINAL (D56): pool' = R, payout = J + d to our key, the ticket is consumed.
+/// M4 (spec M4-i), M7 Stage 4: genesis -> buy -> close -> draw (the draw-m7 sequence, K = 16,
+/// real scripts, the real anchor) -> one `claim()` with the real ticket and pool scripts
+/// through the public mempool, **if the ticket wins**.
+/// - M7 change (D101 deleted the TEST-ONLY seed): the outcome is fixed by the anchor block,
+///   which exists only after close(), so no winning ticket can be prepared. The b = 1 ticket
+///   (buy output 1) holds one fixed combination; the claim runs only if that combination falls
+///   into a tier whose pool the draw created (lower tiers: 4 matches, or 3 matches with the
+///   bonus; about 0.3 % at m = 10), else the probe records that the claim was not exercised
+///   and stops without error. The M4 testnet run (`results-claim-m4.md`, 2026-10-11) stays the
+///   claim evidence: `ticket.sil` and `pool.sil` changed only in comments in M7.
 /// - Inputs (S5-5): the ticket (buy output 1), the jackpot pool (its draw output) and one
 ///   funding input (the draw's caller output), each the node's own entry read only after a
 ///   chain block merged the creating transaction (`merged`), re-read just before submission
@@ -875,16 +972,34 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
     use kaspa_consensus_core::tx::TransactionOutpoint as Op;
     use lottery::claim::ClaimCase;
     use lottery::close::FundingIn;
-    use lottery::game::ClaimMode;
-    use lottery::state::TIER_JACKPOT;
+    use lottery::game::{ClaimMode, tier_of};
 
     const TAG: &str = "claim-m4";
     let r = round1_drawn(ctx, TAG).await?;
     let t = r.t.clone();
     let did = r.ds.tx.id();
 
-    // ---- the claim's inputs: ticket, jackpot pool, funding (the draw's caller output)
-    let p = r.rr.pools.iter().position(|p| p.tier == TIER_JACKPOT).ok_or("claim-m4: the draw created no jackpot pool")?;
+    // ---- does the ticket win? (its only combination against the drawn numbers)
+    let combo = r.bc.bundle[0];
+    let tier = tier_of(&combo.bytes(), &r.rr.win);
+    let p = match tier.and_then(|tc| r.rr.pools.iter().position(|p| p.tier == tc)) {
+        Some(p) => p,
+        None => {
+            let note = format!(
+                "{TAG}: the ticket's combination {:?} does not win against {:?} drawn from X {} (tier {tier:?}; pools {:?}); claim() not exercised (M7: no winning ticket can be prepared before the anchor exists)",
+                combo.bytes(),
+                r.rr.win,
+                r.anchor.as_ref().map(|a| a.x.sim.hash.to_string()).unwrap_or_default(),
+                r.rr.pools.iter().map(|p| p.tier).collect::<Vec<_>>()
+            );
+            println!("{note}");
+            ctx.report.push(format!("| {note} | | | | | | | | |"));
+            return Ok(());
+        }
+    };
+    println!("{TAG}: the ticket wins tier {tier:?}; claiming from pool {p}");
+
+    // ---- the claim's inputs: ticket, the winning tier's pool, funding (the draw's caller output)
     let pool = r.rr.pool_state(p);
     let pool_op = r.rr.pools[p].outpoint;
     let ticket = r.bc.ticket();
@@ -929,7 +1044,7 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
             return Err(format!("{TAG}: the reference rejects the claim: {:?}", x.rejects));
         }
         if x.mode != ClaimMode::Final {
-            return Err(format!("{TAG}: expected a FINAL claim (b = 1), got {:?}", x.mode));
+            return Err(format!("{TAG}: expected a FINAL claim (b = 1, the ticket is consumed), got {:?}", x.mode));
         }
         let cf = claim_fin(&c);
         c.fee = lottery_fee(&cf);
@@ -964,7 +1079,8 @@ pub async fn claim_m4(ctx: &mut Ctx) -> Result<(), String> {
     let cs = sent_of(&cf);
     ctx.submit(
         &format!(
-            "claim() M4 real scripts, FINAL on the jackpot pool: K = {}, m = {}, h = {}, prize {:.4} KAS, payout {:.4} KAS, pool' {:.4} KAS (R)",
+            "claim() M4 real scripts after the M7 draw, FINAL on the tier {} pool: K = {}, m = {}, h = {}, prize {:.4} KAS, payout {:.4} KAS, pool' {:.4} KAS",
+            c.pool.tier,
             c.k(),
             c.pool.m,
             x.h,
@@ -1016,7 +1132,7 @@ pub async fn vault_m5(ctx: &mut Ctx) -> Result<(), String> {
         return Err(format!("{TAG}: D = {} < MIN_DEPOSIT = {MIN_DEPOSIT}", vr.d));
     }
     println!("{TAG}: D = {} sompi, w = wmin({v0}, {s0}) = {} shares", vr.d, vr.w);
-    let r = round1_drawn_with(ctx, TAG, Some(vr)).await?;
+    let r = round1_drawn_with(ctx, TAG, Some(vr), false).await?;
     let t = r.t.clone();
     let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
     let rec = r.rr.record.clone().ok_or("vault-m5: the draw wrote no record")?;

@@ -335,3 +335,113 @@ Untagged lines Stage 2 also needs (each exercised by a test): `require(mkDaa >= 
 - The stack headroom is exactly 4: any further drawer local live across check 24 triggers D104.
 - The `tn10` draw probes (`draw-m3`, `claim-m4`, `vault-m5`) still build a fabricated anchor (Stage 1a note): the new drawer will reject them on testnet-10 at check 8 until Stage 4's `anchor_from_rpc`.
 - Baseline trick: `git worktree add --detach <scratch>/base <rev>` with `CARGO_TARGET_DIR=<scratch>/base-target` (never the shared `crates/target`, CLAUDE.md gotcha); about 10 minutes to build.
+
+### Stage 3 — Measurements and the D83 re-confirmation (done; nothing committed)
+
+**What was done.** `m7_measure.rs` extended so it covers every row of the milestone entry ("K, R and m_max are re-confirmed") and the void rows; run; `docs/costs.md` gains the section "M7: real seed (anchor proof, void; D83 re-confirmation)" with every number, its percent of the limit and the M6 value it replaces. Scripts, `docs/design.md`, `docs/DECISIONS.md`, `crates/tn10` and `docs/tn10-mass-check.md` untouched. No stop rule (D104) fired.
+
+**Files changed.**
+- `crates/lottery/tests/m7_measure.rs`: module doc lists the coverage map; `Row` gains the M6 "leg units" column (vault, input 2, on draw and void rows); M7-a prints the priority mass in the fee table and the M6-h storage-supremum fee line; M7-b adds the void fee rows (S covering the fee); M7-c adds the `close()` storage worst-case row as a full M6-a row (asserted equal to the M2-c grid's storage and ≤ 90 %), the M6-h `close()` fee rows, and the full M6-b columns (controller units / sigscript, R(K), storage at R(K)), runs K = 16.. until transient passes 100 %, records the largest K within 90 % and 100 % per limit, asserts the K = 16 variant is hash-identical to the committed templates and that K = 16 is the largest K within 90 % of transient; M7-d adds the M6-b `draw()`/`claim()` transient estimates at K_MAX 16–19 (same formula, M7 baselines); M7-e adds the M6-g `r_draw`/binding line and asserts the close supremum ≤ 90 % and R ≥ r_draw. New imports: `accept_m4`, `ClaimMode`, `M_CLAIM`.
+- `docs/costs.md`: the M7 section (before "Scripts (M0 probes)"). The M6 section is left as written (its "provisional, D83" marks are superseded by the M7 section's verdict; Stage 6 may edit them when it records D83's outcome).
+
+**Rows measured (milestone list → test).**
+- M6-a `draw()` worst and typical + dependent M6-h fee rows → `m7a_sizes_draw_masses_and_fees` (also redeem sizes, marker delta vs `tests/fixtures/marker_pre_m7.sil`).
+- Void worst and typical (spec M7-b) + their fee rows → `m7b_void_masses`.
+- M6-a `close()` rows (M2-a, storage worst case) + M6-h `close()` fee rows, M6-b K frontier, M6-c B_MAX frontier → `m7c_close_k16_and_frontiers`.
+- M6-b `draw()` estimates at K_MAX variants (+ the measured drawer-only K_MAX 17 draw), M6-d `draw()` rows at the M_DRAW variants → `m7d_draw_frontiers`.
+- M6-g `close()` storage worst case and the `draw()` storage supremum (draw and void, with the record) → `m7e_r_recheck`.
+- M6-j drawer sensitivity and byte budget → `m7f_drawer_sensitivity`; stack headroom at check 24 → `m7f_stack_headroom`.
+
+**Commands and results** (from `crates/`, release, `-j 2`).
+- `cargo test -p lottery --release -j 2 --test m7_measure -- --nocapture --test-threads=1`: **7 passed, 0 failed** (12.8 s).
+- `cargo test -p lottery --release -j 2 --test m6_measure -- --nocapture --test-threads=1`: **10 passed**; every M6 A5a "valid" row (genesis, buy, set_params, claims, returns, refreshes, vault requests, settlements, M6-d buy/claim) is identical to `docs/costs.md` M6; tightest (genesis excluded) 58.7 % / 86.5 % / 89.9 %, the same values as M7-c.
+
+**Key numbers (M7 → M6).**
+- Redeems: drawer 64,643 (65,234), marker 1,389 (2,104; state −9, code −706), controller 27,624 (27,694).
+- `draw()` worst: 206,569 / 527,196 / 71,009 = **41.3 / 52.7 / 14.2 %** (41.7 / 53.2 / 14.2); input 0 1,809,407 units / 78,733 B; vault leg 459,796; priority fee 0.26360 KAS, C_draw covers it from S = 52.72 KAS (53.16). Typical 28.0 / 44.4 / 18.6 % (28.2 / 44.9 / 18.6), S = 44.41 (44.86).
+- Void worst (a = 7, 8 funding inputs, record, fee paid): 185,144 / 480,256 / 71,005 = **37.0 / 48.0 / 14.2 %**, 14 outputs, S = 48.03 KAS. Typical 24.6 / 40.4 / 6.7 %, S = 40.37.
+- `close()` K = 16 (M2-a): 293,743 / 864,612 / 402,301 = 58.7 / **86.5** / 80.5 % (58.9 / 86.8 / 80.5); transient headroom 35,388 grams (32,284); S covering its fee 86.46 KAS (86.77). Storage worst case **449,692 = 89.9 %** (unchanged), S = 89.94.
+- K frontier (transient): 86.5 / 91.6 / 96.7 / 101.9 % at K = 16 / 17 / 18 / 19 → largest K within 90 % = **16**, within 100 % = 18 (unchanged). B_MAX frontier (close transient): 73.9 / **86.5** / 99.0 % at 3 / 4 / 5.
+- `draw()` estimates at K_MAX 17 / 18 / 19: 54.1 / 55.5 / 56.9 % transient (M6 54.6 / 56.0 / 57.4). M_DRAW variants: committed m = 10 / 25 / 50 at 52.2 / 52.4 / 52.7 % transient; M_DRAW 25 drawer at m = 25: 40.5 / 51.6 %.
+- R: close supremum 449,692 (89.9 %), draw/void supremum with the record 327,684 (65.5 %, f_min 1 KAS) / 417,684 (83.5 %, f_min 0.1 KAS); R(16) = 168,888,889 → 1.69 KAS; draw alone needs 1.529 KAS.
+- Drawer sensitivity: 1.506 / 4.000 (M_DRAW pair, 1,975 B), 1.811 / 4.006 (K_MAX pair, 1,235 B) compute / transient grams per byte; byte budget to 90 %: **93,050 B** transient (binding), 134,393 B compute (M6: 91,950 / 122,154).
+- Stack headroom at check 24: **4 free slots** (5th → 245 > 244), exactly the D104 floor.
+
+**Verdict.** No D104 stop rule fires: every final shape ≤ 90 % (genesis exempt and unchanged), `close()` at K = 16 ≤ 90 %, stack headroom = 4. **K = 16, m_max = M_DRAW = M_CLAIM = 50, B_MAX = 4 and R = 1.69 KAS are final** (spec 7 A10 criterion 8 met).
+
+**Draft DECISIONS rows (PENDING; the orchestrator records them in Stage 6).**
+- PENDING S3-1 (measured row, style of the 2026-10-13 "M6 measured" row): | 2026-10-13 | **M7 measured; K = 16, m_max = M_DRAW = M_CLAIM = 50, B_MAX = 4 and R = 1.69 KAS are final (D83 re-confirmed, D104 not fired)** (`docs/costs.md` M7, real scripts after M7 Stage 2): redeems drawer 65,234 → **64,643 B** (`draw`, anchor proof and void; check 19's `own` loop removed), marker 2,104 → **1,389 B** (no `seed_ref`, no `refresh()`), controller 27,694 → **27,624 B**; every other template and every M6 A5a "valid" row unchanged (re-measured by `m6_measure`). Worst `draw()` (DP21 with the 304-byte anchor) 206,569 / 527,196 / 71,009 (**41.3 / 52.7 / 14.2 %**), typical 28.0 / 44.4 / 18.6 %; void worst (a = 7, record, fee paid) **37.0 / 48.0 / 14.2 %**, typical 24.6 / 40.4 / 6.7 %. `close()` K = 16 58.7 / **86.5** / 80.5 % (35,388 grams of transient headroom), storage worst case **89.9 %** (unchanged, sets R = 4C(K + 3)/(0.9 L) → 1.69 KAS; `draw()`/void supremum 65.5 / 83.5 % at f_min 1 / 0.1 KAS). K frontier (close transient) 86.5 / 91.6 / 96.7 / 101.9 % at K = 16–19: largest K within 90 % = 16, within 100 % = 18; B_MAX frontier 73.9 / 86.5 / 99.0 % at 3 / 4 / 5; `draw()` at K_MAX 17–19 54.1–56.9 % transient (estimates); m = 50 worst `draw()` 41.3 / 52.7 / 14.2 %. Fees (S at which C = 50 bp × S covers the priority fee): close 86.46 KAS (89.94 storage worst case), draw 52.72 / 44.41, void 48.03 / 40.37, draw storage supremum 83.54. Drawer byte budget to 90 %: 93,050 B (transient binds); stack headroom at check 24 measured **4 free slots** (the D104 floor; any further value live across check 24 stops). **Supersedes** the provisional reading of K, R and m_max in D83 | Measured | 8.3, 12 |
+- PENDING S3-2 (test scope, mechanical): `m7_measure` M7-c extends M6-b to the full M6 column set and runs K = 16.. until transient passes 100 % (K = 19), M7-d carries the M6-b `draw()`/`claim()` estimates with M7 baselines (the claim estimate is unchanged in substance: ticket and pool did not change); a full `draw()` at K_MAX > 16 is still not built (the Rust `DrawCase` holds 16 roots; as in M6, estimates only).
+
+**Left open / for later stages.**
+- The `close()` storage worst case is 89.9 % (308 grams below 90 %) and the drawer stack is at its floor (4 slots): both are unchanged in kind from M6, but any later change that adds a `close()` output or a drawer value live across check 24 trips D104. Worth one line in the Stage 6 DECISIONS row (included above).
+- The M6 section of `docs/costs.md` still marks K, R and m_max "provisional (D83)"; Stage 6 can add a pointer to the M7 section when it records S3-1 (not edited here to keep the M6 record as measured).
+- The testnet-10 masses of `draw-m7`/`void-m7` (Stage 4) are not part of this stage; the local numbers above are the mainnet-parameter masses.
+- Stage 2 findings still PENDING for the orchestrator: S1b-1 (drop the second opcode call, on P.hash; not measured here), S2-5 (genesis allows seed_offset = 0).
+
+### Stage 4 — Testnet-10 (done; nothing committed)
+
+**What was built.** The testnet path of spec D103/A9: the anchor proof of a real block rebuilt from RPC and self-checked, the anchor search, the `draw-m7` and `void-m7` probes, and `claim-m4` / `vault-m5` moved onto the real anchor. All four probes were run on testnet-10; every draw and the void were accepted. No stop rule (D104) fired. `covenants/`, `docs/design.md`, `docs/DECISIONS.md`, `crates/lottery/tests/m7_measure.rs` and `docs/costs.md` were not touched.
+
+**Files changed.**
+- `crates/tn10/Cargo.toml`: + `kaspa-hashes.workspace`, `kaspa-seq-commit.workspace`, `kaspa-smt` (git rusty-kaspa, rev `01b532e8b553523216471682649693af92f0fd16`, the pinned rev). `crates/Cargo.lock`: +3 lines (tn10's new deps; the crates were already in the lock from Stage 0).
+- `crates/tn10/src/anchor.rs` (new):
+  - `anchor_from_rpc(ctx, hash) -> RpcBlockProof`: `BlockFields`, a `SimBlock`, the selected parent, the matched mergeset order, mergeset sizes, lane activity and the header commitment;
+  - `find_anchor(ctx, start, d) -> (X, P)`;
+  - `wait_blue_score`;
+  - `rpc_anchor(ctx, start, d) -> RpcAnchor { d, x, p, proof: AnchorProof }`;
+  - `ORDERS` (the four mergeset orders tried).
+  Every RPC/consensus path is cited in the module doc against `refs/rusty-kaspa-v2.1.0`.
+- `crates/tn10/src/cases.rs`:
+  - `round1_drawn_with(ctx, tag, vr, void)`. The TEST-ONLY seed is gone. The buy holds the fixed combination `unrank(0)` + 1. After `close()` the probe sets D = marker creation DAA + seed_offset and waits for the lock (draw: D; void: D + draw_window). In draw mode it calls `rpc_anchor` from the pre-close sink, waits for 50 blue score on X, sets `DrawCase.sim = ChainSim::from_real_chain(P's parent commitment, [P, X])` and asserts `anchor_bytes()` equals the RPC proof. It refuses to continue if the marker's node entry DAA moves (D would move), and checks that X is still a chain block right before submission. It reports an anchor row and the round result (X.hash, mk_daa, void).
+  - `draw_m7(ctx, tag)`, `void_m7(ctx)`, `VOID_M7_DRAW_WINDOW = 1_200` (`void-m7` sets `allow_short_void_window` and calls `validate_with` first).
+  - `claim_m4` is opportunistic (see below). `vault_m5` passes `void = false`. `Drawn.anchor` was added.
+- `crates/tn10/src/main.rs`:
+  - `mod anchor`;
+  - probes `draw-m7` and `void-m7`, both in `all`;
+  - `draw-m3` is kept as a name that runs the draw-m7 sequence (not in `all`);
+  - new command `anchor-check [n]`: it rebuilds a fresh anchor and runs every self-check without submitting; with n it also rebuilds the next n chain blocks and tallies their mergeset sizes and matched orders.
+- `crates/harness/src/chain.rs`: + `ChainSim::from_real_chain(root_parent_commit, &[SimBlock])` (deviation S4-1).
+- `docs/tn10-mass-check.md`: new section "M7: real anchor `draw()`, void, and the M4/M5 probes on top of it" with every txid, mass and fee, the anchors, the order evidence and the comparison with `docs/costs.md` M7.
+- `crates/tn10/results-{draw-m7,void-m7,vault-m5,claim-m4}.md` were written by the tool. They are git-ignored (`.gitignore:19`), so `docs/tn10-mass-check.md` is the record. `results-vault-m5.md` and `results-claim-m4.md` were overwritten (the M6 versions are in `docs/tn10-mass-check.md`).
+
+**Probe results** (testnet-10, all nodes v2.1.0; balance 7,333.81 → 6,914.69 KAS).
+
+| probe | key tx | txid | compute / transient / storage | anchor |
+|---|---|---|---|---|
+| `anchor-check 300` | (none submitted) | — | — | 97 consecutive chain blocks + 2 anchors rebuilt, all = header |
+| `draw-m7` | `draw()` real anchor, np = 3, D = 595,638,059 | `52fe7e03ccee64e39d33565a90f9e529d9c375e158fd4f1cf5c73f764baaf63f` | 139,937 / 444,148 / 126,973 (fee 0.2222 KAS) | X `9977b8a0…5551` DAA 595,638,059 bs 584,060,591; P `06972b59…b557` DAA 595,638,058 |
+| `void-m7` | void, lock D + 1,200 = 595,641,699 | `a8ce26db4455343dedc58b59326a938cfbd29deb49ad41e868028913cbafdd6e` | 123,120 / 403,720 / 50,204 (fee 0.2020 KAS) | none (empty anchor) |
+| `vault-m5` | converting `draw()` + record, then 2 settlements | draw `e9c097ec2d80632cab791289f5d56c7cb7bb341532e95164ef93c3455f7e0aaa` | 140,498 / 444,512 / 130,332 (fee 0.2224 KAS) | X `dcd34e71…2a49` DAA 595,645,338; P `d9498100…4daf` DAA 595,645,335 |
+| `claim-m4` | `draw()` real anchor; claim not exercised (no win) | `fb96ea4a0037221e1eed908c7f448d32e0315c9607351633c0124acc19fc1d6d` | 139,937 / 444,148 / 126,964 | X `9783a6d8…3ee9` DAA 595,647,293; P `65d80357…16ba` DAA 595,647,291 |
+
+The setup txids (genesis, buy, close, requests, settlements, the D10 negative case, rejected by the node as before) are in `docs/tn10-mass-check.md`. The masses equal the local Stage 2/3 numbers: typical draw 28.0 / 44.4 %, typical void 24.6 / 40.4 %, `close()` K = 16 58.7 / 86.5 %.
+
+**Confirmed RPC/consensus facts.**
+- **Mergeset order** for `miner_payload_root`: the selected parent first, then the rest of the mergeset (blues and reds together) ascending by (blue_work, hash), i.e. `consensus_ordered_mergeset` (`consensus/src/model/stores/ghostdag.rs:116-180`, `utxo_validation.rs:116-125, 465-490`, `processes/ghostdag/ordering.rs:38-42`; `Hash` is ordered as bytes, `crypto/hashes/src/lib.rs:38`). It matched the node in 105 of 105 blocks: 97 scanned plus 8 probe X/P, with mergesets of 1–5 blues. The three alternative orders were never needed. **No red block appeared**, so the place of reds in the order is from the source only (open item below).
+- The leaf is `miner_payload_leaf(block hash, header.blue_work.to_be_bytes(), coinbase payload)`, one per mergeset block (blues and reds), the coinbase being transaction 0 of the RPC block. The context hash uses the **selected parent's** timestamp with the block's own DAA and blue score (`utxo_validation.rs:614-618`), as A3 encodes it.
+- `GetSeqCommitLaneProof(hash, COINBASE_LANE_KEY)` works through the public wRPC (Borsh) resolver nodes. `parent_seq_commit` = the selected parent's `accepted_id_merkle_root`. The coinbase lane was active in every block (lane entry present). `lanes_root = OwnedSmtProof::from_bytes(smt_proof).compute_root::<SeqCommitActiveNode>(COINBASE_LANE_KEY, smt_leaf_hash(tip, bs))` and `activity_root = activity_root_hash(inactivity_shortcut, lanes_root)` reproduce the header commitment.
+- The verbose `selected_parent_hash` equals `header.direct_parents()[0]` (the post-Toccata rule of `consensus/core/src/header.rs:220-227`) in every block checked.
+- **Activation state:** KIP-21 semantics are live on testnet-10 at DAA ≈ 595.6 M. The opcode returned the KIP-21 commitments of X and P (three draws accepted and mined), and every `accepted_id_merkle_root` read is the KIP-21 recomputation. v2.1.0 has no Toccata activation parameter (`consensus/core/src/config/params.rs:796-798`). A0 point 4 is answered: no stop.
+- Mempool relay: the drawer's `OpChainblockSeqCommit` is evaluated at mempool admission (the draws were accepted by `submit_transaction` and mined within 1.7 s), consistent with `utxo_validation.rs:445`.
+- X fell at exactly DAA = D in all three draws. P was D − 1 once and D − 2 / D − 3 twice (DAA steps of 2 and 3 along the chain). So the "first chain block with DAA ≥ D" rule and the `dP < D` check were exercised with jumps on the real chain.
+
+**Deviations (draft DECISIONS rows, PENDING).**
+- PENDING S4-1 (harness API, outside the planned Stage 4 file list): `harness::ChainSim::from_real_chain(root_parent_commit, blocks)` lets the local engine replay a real anchor. The first block's selected parent is outside the sim; only its commitment is registered, so the accessor reports it as unknown, as for a pruned block. Without it the local pre-check (and the dry-run budget sizing of input 0) cannot reproduce real commitments, because a `ChainSim` root commits to ZERO_HASH. It is a pure addition; `cargo test -p harness --lib` 8/8 and the workspace build are green.
+- PENDING S4-2 (probe semantics): `claim-m4` cannot prepare a winning ticket now that the TEST-ONLY seed is deleted (D101); the outcome is fixed by X, which exists only after `close()`. The probe now claims only if its fixed b = 1 ticket wins a tier whose pool exists (≈ 0.3 % at m = 10), and otherwise records "claim() not exercised" and ends without error. The 2026-10-11 and M6 RV-1 `claim-m4` runs remain the claim evidence (`ticket.sil` and `pool.sil` changed only in comments in M7). Alternative for the owner: a claim probe could buy many combinations to raise the odds (≈ 3.8 % per combination if lower-tier pools existed for tiers 5 and 6, but st4 = st5 = 0 in the fixture, so only 4 matches or 3 + bonus pay).
+- PENDING S4-3 (probe CLI): `probe draw-m3` now runs the draw-m7 sequence (its name is kept for the CLAUDE.md command list); `all` runs `draw-m7` and `void-m7` instead of `draw-m3`. New command `tn10 anchor-check [n]` (read-only). Stage 6 should update the CLAUDE.md tn10 line (probes `draw-m7`, `void-m7`, `anchor-check`; `draw-m3` = alias).
+- PENDING S4-4 (probe policy): the draw is built only after X has 50 blue score of confirmations, and X's chain membership is checked again right before submission; a moved marker entry (a reorg of the close) is an error, not a rebuild, because D would move. Builder policy for indexers and callers: never build a draw on an anchor whose X is still at the tip.
+
+**Open items.**
+- **Reds in the mergeset order are unobserved.** No red block occurred in the 105 blocks checked, so placing reds together with blues by (blue_work, hash) rests on `consensus_ordered_mergeset` alone. If a draw's X ever has reds and the self-check fails, `anchor_from_rpc` tries the alternatives (including "blues then reds") and reports which one matched; a mismatch for all four is an error before any transaction is built. A longer `anchor-check` scan during a period with reds would close this.
+- `draw-m7-late` (the 13 h `BlockIsTooDeep` rejection) was not run (optional, D103); the out-of-window case is covered locally by SA3.
+- The void probe uses the TEST-ONLY window, so a draw was still valid when the void was accepted; void/draw exclusivity at draw_window = 2F is local only (SP9).
+- Stage 1b's S1b-1 (the second opcode call, on P) is still PENDING. On testnet both calls succeed; the P call costs nothing visible here.
+- Stage 5 should review `crates/tn10/src/anchor.rs` (the self-checks are the safety net: nothing is submitted unless the recomputation equals the header) and `ChainSim::from_real_chain`.
+
+**Commands (from `crates/`).**
+- `cargo build -p tn10 --release -j 2`: clean (no warnings).
+- `cargo run -p tn10 --release -- info`: key present, 7,333.81 KAS before, 6,914.69 after.
+- `cargo run -p tn10 --release -- anchor-check 300`: OK; 97 blocks, order [0] 97/97.
+- `cargo run -p tn10 --release -- probe draw-m7`, `probe void-m7`, `probe vault-m5`, `probe claim-m4`: all exit 0, all on the first attempt (no resolver timeouts).
+- `cargo build --workspace --tests -j 2`: finished; only the pre-existing `m0_mass` unused-variable warnings. `cargo test -p harness --lib -j 2`: 8 passed.

@@ -192,6 +192,30 @@ impl ChainSim {
         sim
     }
 
+    /// A chain of real blocks, oldest first, each the selected parent of the next, for
+    /// replaying a real anchor in the local engine (tn10 `draw-m7`, spec M7 D103). The first
+    /// block's selected parent is outside the sim: only its commitment `root_parent_commit`
+    /// is known (as KIP-21 commits it in the first block), so the accessor reports that parent
+    /// as unknown, as for any pruned block. Every block is on the chain; the point of view is
+    /// the last block's blue score. Panics if a block's parent is not the previous block.
+    pub fn from_real_chain(root_parent_commit: Hash, blocks: &[SimBlock]) -> Self {
+        assert!(!blocks.is_empty(), "ChainSim::from_real_chain needs at least one block");
+        let mut sim = Self::empty(default_finality_depth());
+        assert!(blocks[0].parent != ZERO_HASH, "the first block's parent must be a real (external) hash");
+        sim.commits.insert(blocks[0].parent, root_parent_commit);
+        for (i, b) in blocks.iter().enumerate() {
+            if i > 0 {
+                assert_eq!(b.parent, blocks[i - 1].hash, "ChainSim::from_real_chain: block {i}'s parent is not block {}", i - 1);
+            }
+            sim.insert(*b);
+            sim.chain.insert(b.hash);
+        }
+        let last = blocks[blocks.len() - 1];
+        sim.tip = last.hash;
+        sim.pov_blue_score = last.blue_score;
+        sim
+    }
+
     /// Append one chain block on the tip with DAA score `tip.daa + daa_delta` and blue score
     /// `tip.blue + blue_delta` (`blue_delta ≥ 1`); `hash` = `None` fabricates one. Moves the
     /// point of view to the new tip. Returns the new block's hash.

@@ -5,6 +5,7 @@
 //! as TN10_PRIVATE_KEY; the endpoint comes from TN10_WRPC_URL, or the public
 //! resolver when unset.
 
+mod anchor;
 mod cases;
 mod net;
 mod probe;
@@ -102,6 +103,44 @@ async fn info() -> Result<(), String> {
     Ok(())
 }
 
+/// M7 Stage 4 (spec D103): rebuild the anchor proof of a fresh real block from RPC and run
+/// every self-check (mergeset order, parent commitment, full KIP-21 recomputation against the
+/// header) without submitting anything. D = the sink's DAA score + 100 (about 10 s ahead).
+/// With `n` > 0, also rebuilds and checks the next `n` chain blocks after the start and
+/// tallies their mergeset sizes and the mergeset order that matched.
+async fn anchor_check(n: usize) -> Result<(), String> {
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    let env = load_env();
+    let kp = keypair(&env)?;
+    let client = net::connect(env.get(URL_VAR).cloned()).await?;
+    let ctx = probe::Ctx { client, addr: address(&kp), sk: kp.secret_bytes(), report: vec![] };
+    let start = ctx.client.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
+    let sdaa = ctx.client.get_block(start, false).await.map_err(|e| e.to_string())?.header.daa_score;
+    let a = anchor::rpc_anchor(&ctx, start, sdaa + 100).await?;
+    println!("anchor-check OK: D = {}, X {} (DAA {}), P {} (DAA {}); every self-check passed", a.d, a.x.sim.hash, a.x.sim.daa_score, a.p.sim.hash, a.p.sim.daa_score);
+    if n > 0 {
+        let vc = ctx.client.get_virtual_chain_from_block(start, false, None).await.map_err(|e| e.to_string())?;
+        let mut tally = std::collections::BTreeMap::<(usize, usize), (usize, usize)>::new(); // (blues, reds) -> (blocks, order-0 matches)
+        let mut orders = [0usize; anchor::ORDERS.len()];
+        for h in vc.added_chain_block_hashes.iter().take(n) {
+            let b = anchor::anchor_from_rpc(&ctx, *h).await?;
+            orders[b.order] += 1;
+            let e = tally.entry((b.mergeset_blues, b.mergeset_reds)).or_default();
+            e.0 += 1;
+            e.1 += (b.order == 0) as usize;
+        }
+        let checked: usize = orders.iter().sum();
+        println!("anchor-check scan: {checked} consecutive chain blocks after {start} rebuilt; every recomputation = header");
+        for (i, c) in orders.iter().enumerate() {
+            println!("  order [{i}] {}: {c} blocks", anchor::ORDERS[i]);
+        }
+        for ((bl, rd), (c, o0)) in &tally {
+            println!("  mergeset {bl} blues + {rd} reds: {c} blocks, consensus order matched in {o0}");
+        }
+    }
+    Ok(())
+}
+
 async fn run_probes(which: &str) -> Result<(), String> {
     let env = load_env();
     let kp = keypair(&env)?;
@@ -118,7 +157,10 @@ async fn run_probes(which: &str) -> Result<(), String> {
     if all || which == "buy-m1" { cases::buy_m1(&mut ctx).await?; }
     if all || which == "claim" { cases::claim(&mut ctx).await?; }
     if all || which == "close-m2" { cases::close_m2(&mut ctx).await?; }
-    if all || which == "draw-m3" { cases::draw_m3(&mut ctx).await?; }
+    // M7: draw-m3 runs the draw-m7 sequence (the TEST-ONLY seed is deleted, D101).
+    if which == "draw-m3" { cases::draw_m7(&mut ctx, "draw-m3").await?; }
+    if all || which == "draw-m7" { cases::draw_m7(&mut ctx, "draw-m7").await?; }
+    if all || which == "void-m7" { cases::void_m7(&mut ctx).await?; }
     if all || which == "claim-m4" { cases::claim_m4(&mut ctx).await?; }
     if all || which == "vault-m5" { cases::vault_m5(&mut ctx).await?; }
     // M6: not in `all` (it locks about 160 KAS: an instance genesis and 30 accepted buys).
@@ -162,8 +204,9 @@ async fn run() -> ExitCode {
     let res = match args.first().map(String::as_str) {
         Some("keygen") => keygen(),
         Some("info") => info().await,
+        Some("anchor-check") => anchor_check(args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0)).await,
         Some("probe") => run_probes(args.get(1).map(String::as_str).unwrap_or("all")).await,
-        _ => Err("usage: tn10 <keygen | info | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|claim-m4|vault-m5|conflict-m6|close16|close32|close62]> (conflict-m6 is not part of all)".into()),
+        _ => Err("usage: tn10 <keygen | info | anchor-check | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62]> (conflict-m6 is not part of all)".into()),
     };
     match res {
         Ok(()) => ExitCode::SUCCESS,

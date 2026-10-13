@@ -15,6 +15,10 @@ harness = { path = "../harness" }
 lottery = { path = "../lottery" }
 kaspa-consensus-core.workspace = true
 kaspa-txscript.workspace = true
+# M7 Stage 4 (spec D103): rebuild a real block's KIP-21 anchor proof from RPC.
+kaspa-hashes.workspace = true
+kaspa-seq-commit.workspace = true
+kaspa-smt = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }

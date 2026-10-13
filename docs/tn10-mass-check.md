@@ -403,3 +403,100 @@ Round result: round 1, win [10, 13, 15, 17, 28, 1], D_claim 601,722,479, the sam
 Locked on testnet by the re-runs (no further entry exercised): for each of the four `claim-m4` and `vault-m5` runs (the first M6 runs and the RV-1 re-runs, genesis `945762f9…`, `7d665112…`, `db4851b9…`, `7722bd38…`), the round 2 objects, drawer', vault' and the four pools, and in both `vault-m5` runs also the new position and position'; for both `buy-m1` runs, the shard successors and the tickets. Payouts, referrals, refunds and changes are ours.
 
 **Balance (all M6 runs):** 8,022.88 testnet KAS before; 7,542.77 after `conflict-m6` runs 2 and 3, both `buy-m1` runs and the first `claim-m4` and `vault-m5` runs (480.11 KAS locked or paid in fees); **7,333.81 after the RV-1 re-runs of `vault-m5` and `claim-m4`** (208.96 KAS), 689.07 KAS in total.
+
+## M7: real anchor `draw()`, void, and the M4/M5 probes on top of it (spec D103, A9; 2026-10-13)
+
+All runs: `cargo run -p tn10 --release -- <command>` from `crates/`, public testnet-10 nodes found by the resolver (all version **2.1.0**, network `testnet-10`, synced, UTXO index on), the M7 templates (drawer `draw()` with the 304-byte anchor proof and the void mode, marker without `seed_ref`/`refresh()`; the Stage 2 scripts). Every transaction is built by the `lottery` builders and checked in the local v2.1.0 engine before submission; every input is the node's chain-merged entry (M3 S5-5). Balance before: 7,333.81 testnet KAS; after the four runs below: **6,914.69** (419.12 KAS locked or paid in fees).
+
+**How the anchor is built (`crates/tn10/src/anchor.rs`).**
+- `find_anchor(start, D)`: `GetVirtualChainFromBlock(start)` from the sink taken before `close()` was submitted, then a binary search over the added chain blocks by header DAA (non-decreasing along the chain) for the first block X with DAA ≥ D. P = X's verbose `selected_parent_hash`; it must equal the previous added chain block and have DAA < D. A start that a reorg removed is handled (the walk continues from the fork point; seen once, in `claim-m4`: "5 removed chain blocks").
+- `anchor_from_rpc(hash)`, for X and for P: `GetBlock(hash)` (header: `accepted_id_merkle_root` = SeqCommit, DAA, blue score; verbose: selected parent, mergeset blues and reds, `is_chain_block`), the selected parent's header (timestamp, `accepted_id_merkle_root`), `GetBlock(h, true)` of every mergeset block (blue work; coinbase payload = transaction 0's payload), and `GetSeqCommitLaneProof(hash, COINBASE_LANE_KEY)` (`parent_seq_commit`, `payload_and_ctx_digest`, `inactivity_shortcut`, the SMT proof and the lane entry). Then `lanes_root = OwnedSmtProof::compute_root::<SeqCommitActiveNode>(COINBASE_LANE_KEY, smt_leaf_hash(tip, bs))`, `activity_root = activity_root_hash(inactivity_shortcut, lanes_root)` and `mpr = miner_payload_root(miner_payload_leaf(hash, blue_work BE, payload) per mergeset block)`.
+- Self-checks before anything is built (D103): `H_seq(H_mc(sp.ts ‖ daa ‖ bs) ‖ mpr) == payload_and_ctx_digest`; `parent_seq_commit` = the selected parent's `accepted_id_merkle_root`; the full KIP-21 recomputation (`kaspa_seq_commit`) = the header's `accepted_id_merkle_root`; `lottery::anchor::seq_commit` over the A3 bytes (the drawer's formula) = the same; `pc == x_pc`, dX ≥ D, 0 ≤ dP < D. The local engine then runs the draw against `harness::ChainSim::from_real_chain(P's parent commitment, [P, X])`, so `OpChainblockSeqCommit` returns the real commitments locally too.
+- The probe waits for 50 blue score of confirmations on X, and checks again that X is still a chain block right before submission.
+
+**Mergeset order (open point of the handoff).** For the miner payload root, consensus orders the mergeset as **the selected parent first, then the rest of the mergeset (blues and reds together) ascending by (blue_work, hash)** (`consensus_ordered_mergeset`, rusty-kaspa v2.1.0 `consensus/src/model/stores/ghostdag.rs:116-180`; `consensus/src/pipeline/virtual_processor/utxo_validation.rs:116-125, 465-490`; `consensus/src/processes/ghostdag/ordering.rs:38-42`). The probe tries this order first and three alternatives after it. It matched every time:
+- `cargo run -p tn10 --release -- anchor-check 300` (node `quark-10.kaspa.red`, DAA ≈ 595,634,600; nothing submitted): **97 consecutive chain blocks** rebuilt from RPC, every recomputation = the header, consensus order matched in 97 of 97. Mergesets of 1 (44 blocks), 2 (30), 3 (16), 4 (5) and 5 (2) blues. **No red block occurred**, so the place of reds in the order rests on the source citation above, not on observation.
+- The four probe anchors below (X and P each): consensus order matched in 8 of 8, with mergesets of 1–3 blues.
+
+**KIP-21 activation state.** `OpChainblockSeqCommit` is active on testnet-10 with KIP-21 semantics (accessor condition 4, `refs/kips/kip-0021/seqcommit-accessor.md` "Opcode Mechanics"). Three draws were accepted and mined, and in each the drawer compares the opcode's result with the KIP-21 recomputation of X and of P. Every `accepted_id_merkle_root` read (105 chain blocks) equals the KIP-21 recomputation. rusty-kaspa v2.1.0 has no Toccata activation parameter (`consensus/core/src/config/params.rs:796-798` rejects `toccata_activation` as unknown), which is consistent with that.
+
+### `draw-m7` (genesis → buy → close → `draw()` with the real anchor)
+
+Node `electron-10.kaspa.blue`, DAA ≈ 595,636,803. Covenant ID `2e5562983d2c5d2399404b367b75d2101c531dbecbad6fb4d2507ff66bcf4888`. The buy holds one fixed combination ([1, 2, 3, 4, 5] + 1). The outcome is unknown until X exists, so this is a "jackpot not held" draw (DP4 shape); the three lower-tier pools come from the 1 KAS sale. `close()` was merged at DAA 595,637,459 (the marker's creation DAA, mk_daa), so **D = 595,638,059**.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, real templates, R = 1.69 KAS, seed_offset 600, draw_window 864,000 | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `45efc4ca7af0ce2e1d16556abab341aba768cf6e07ada669c74151a13fcc21bd` |
+| setup: `buy()` of the fixed combination [1, 2, 3, 4, 5] + 1 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `4c8738bfcf80a15e3d30a25bb598ed69e3cbae8579ccb9603dc8268bc69e7c2a` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 293,743 | 864,612 | 426,170 | 432,306 | 19 | 0.4324 | accepted (merged at DAA 595,637,459) | `6d47cafadd5fd7da55e8b5961b408ec65499fe9c58dbf95468036efd7402117e` |
+| **`draw()` with the real anchor, K = 16, a = 0, np = 3, h_J = 0, n2 = 0, fee paid, lock_time = D = 595,638,059** | **139,937** | **444,148** | **126,973** | 222,074 | 5 | 0.2222 | **accepted; visible after 1.7 s** | `52fe7e03ccee64e39d33565a90f9e529d9c375e158fd4f1cf5c73f764baaf63f` |
+
+Anchor:
+- **X `9977b8a0033615ea67e76e0ea93da05271080ff3953c1ffe47b41201ac735551`**: DAA **595,638,059** (= D), blue score 584,060,591, mergeset 1 blue; SeqCommit(X) `10eaced9543aaa300588cf5d5a78f7468f7f623022f0b3fe1ea2e8d996c6076e`.
+- **P `06972b599ac321a4f8fa8c40c43fa2f1d2634a8c7fa5a37fc162532fede7b557`**: DAA 595,638,058, blue score 584,060,590, mergeset 2 blues; SeqCommit(P) `26a529a7fad62fd1534df95c3a35545402752c7a6d1fb4623842c71e8c11a700`.
+- Coinbase lane active in both. X was 339 chain blocks after the pre-close sink.
+
+Round result from the draw bytes (`RoundResult::from_tx`): round 1, not void, X.hash = X above, mk_daa 595,637,459, win [6, 12, 16, 18, 25, 10], D_claim **602,550,059** (= D + 864,000 + 6,048,000), pools (tier, slice, value) [(2, 32000, 173000000), (3, 2666, 172000000), (4, 1000, 172000000)].
+
+### `void-m7` (TEST-ONLY genesis with draw_window = 1,200 → buy → close → void)
+
+Node `vector-10.kaspa.green`, DAA ≈ 595,639,243. Covenant ID `61934f9bc046953b5eb4e29447d1681c7ab4d0dad076b7711098b2bccc012ae4`. Genesis sets the TEST-ONLY `allow_short_void_window` (`GenesisCase::validate` accepts it only because the network is testnet) and draw_window = 1,200. `close()` was merged at DAA 595,639,899, so D = 595,640,499 and the void lock D + 1,200 = 595,641,699 (reached 170 s after the close).
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, R = 1.69 KAS, seed_offset 600, **draw_window 1,200 (TEST-ONLY)** | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `b5ce622ecdc4f6ac5970069d30b409170ce021ac9c8de81d626b8b782e93a04a` |
+| setup: `buy()` of the fixed combination [1, 2, 3, 4, 5] + 1 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `b7a0ba66f8d97a91db2f485b89ac96dfc1fd907e2ff53119e12dab8bc38489e9` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 293,743 | 864,612 | 426,133 | 432,306 | 19 | 0.4324 | accepted (merged at DAA 595,639,899) | `fff997e5e70cb7a870610b26e5ce05d2555ab43bab5def67217b25c204797e48` |
+| **void: `draw()` with an empty anchor, K = 16, a = 0, np = 0, fee paid, lock_time = D + 1,200 = 595,641,699** | **123,120** | **403,720** | **50,204** | 201,860 | 5 | 0.2020 | **accepted; visible after 0.6 s** | `a8ce26db4455343dedc58b59326a938cfbd29deb49ad41e868028913cbafdd6e` |
+
+Round result from the void's bytes: round 1, **void**, X.hash zero, mk_daa 595,639,899, win [0, 0, 0, 0, 0, 0], D_claim 601,689,699 (= D + 1,200 + 6,048,000), no pools. With the TEST-ONLY window the anchor was still inside the opcode window when the void was accepted, so a draw would also have been valid. The A5 argument that a void and a draw cannot both be valid needs draw_window ≥ 2F; it is shown locally (SP9), not here.
+
+### `vault-m5` on the real anchor
+
+Node `vector-10.kaspa.green`, DAA ≈ 595,642,295. Covenant ID `7cffbbd4f9867914af21ef21263b88b455bdc0248636c534b8c7061831035793`. Same values as the M6 RV-1 run (D = 12 KAS, w = wmin = 1,000,000,166 shares, the δ − 1 negative case). The draw uses the real anchor:
+- **X `dcd34e71211ad3ac6401a04561df8b3c3c34b1179b2787d1752d70f212cf2a49`**: DAA 595,645,338 = D, blue score 584,067,870, mergeset 3 blues.
+- **P `d949810036ddd464300f3d86c39b4894a35318ee93511c9a8ccaa0fe9dfb4daf`**: DAA 595,645,335, blue score 584,067,867, mergeset 3 blues.
+
+P and X are 3 DAA apart.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `8802582c745d814e7929bd67c424506b0483bb8e7ef8117aac51cc83601ff23f` |
+| **negative: `request_deposit()` at vault age δ − 1 (lock_time = 595,642,330 + 599)** | 41,495 | 77,580 | 24,199 | 41,495 | 2 | 0.0389 | **REJECTED: "… Unsatisfied lock time: … 595642930 > 595642929"** (check D10, as before) | `b6a2a527831f56a22cf1c086fba4b42ee9b5ee986e16b8de701aeaa2e07d0338` |
+| `request_deposit()`: D = 12.00 KAS | 23,195 | 77,580 | 24,199 | 38,790 | 2 | 0.0389 | accepted | `af25b8b11450f91a97f48b9be26f06f61f3ef393c69c3e00f04a92badc3e9ab9` |
+| `request_withdraw()`: partial, w = 1,000,000,166 = wmin | 25,286 | 82,864 | 47,844 | 47,844 | 3 | 0.0479 | accepted | `c4cca7b16ccf7ef45ee1a7ca2a6867274e58194c122b9dcf0e081afb223bebad` |
+| setup: `buy()` of [1, 2, 3, 4, 5] + 1 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `3be4d95bce11ac685e6d1a706c9f98691484fbf6c4fac2bcbf87c0f89c5d3544` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 293,743 | 864,612 | 426,096 | 432,306 | 19 | 0.4324 | accepted (merged at DAA 595,644,738) | `5458cf19306a12151980320b8192a982302525db51f9294d8a6f41d8cd109c5d` |
+| **`draw()` with the real anchor, np = 3, h_J = 0; conversion D = 12.00 KAS → mint 1,185,380,506 shares, W = wc = 1,000,000,166, out_c = 10.1233 KAS; record at output 6** | **140,498** | **444,512** | 130,332 | 222,256 | 5 | 0.2224 | **accepted** | `e9c097ec2d80632cab791289f5d56c7cb7bb341532e95164ef93c3455f7e0aaa` |
+| `settle()`: deposit-convert → position of 1,185,380,506 shares; record' kept | 22,147 | 73,388 | 27,020 | 36,694 | 3 | 0.0368 | accepted | `2cada5d06e4e0f6633caca41a0c1dc42196f55d7d60eb121c794f01defc7589d` |
+| `settle()`: withdrawal FINAL, payout 11.8133 KAS (pay + R), record drained | 21,857 | 73,108 | 6,729 | 36,554 | 3 | 0.0367 | accepted | `acb18089711fa37cd1aa84d5f4174f244e7e0c3877f75d807331f001e18a0555` |
+
+Round result: round 1, X.hash = X above, win [5, 6, 17, 21, 28, 8], D_claim 602,557,338, the three lower-tier pools, plus the record. Requests, settlements, buy and genesis have the same compute and transient as in the M6 RV-1 run: the vault, request, record and position scripts did not change in M7.
+
+### `claim-m4` on the real anchor (claim not exercised)
+
+Node `quark-10.kaspa.red`, DAA ≈ 595,646,047. Covenant ID `aa61cac2e6cf840dd11275545253ecf7a6d74f9cf09d0601fe1ef6ce0ca1f070`.
+
+**What had to change.** D101 deleted the TEST-ONLY seed, so the winning numbers now come from X, which exists only after `close()`; a winning ticket cannot be prepared in advance. The probe now buys the fixed combination, draws with the real anchor, and claims only if the ticket falls in a tier whose pool exists (≈ 0.3 % at m = 10). Otherwise it records that the claim was not exercised and ends without error. Here the ticket did not win. The M6 RV-1 `claim-m4` run above remains the claim evidence; `ticket.sil` and `pool.sil` changed only in comments in M7.
+
+| case | compute | transient | storage | priority mass | inputs | fee (KAS) | result | tx id |
+|---|---|---|---|---|---|---|---|---|
+| setup: genesis, K = 16, R = 1.69 KAS | 11,223 | 8,372 | 461,180 | 461,180 | 1 | 0.4613 | accepted | `30a8c9b2e427196b99b991aa6b38a0bc39ac890797e19ff6023d481263f916d4` |
+| setup: `buy()` of [1, 2, 3, 4, 5] + 1 on shard 0 | 43,472 | 151,488 | 322,550 | 322,550 | 2 | 0.3226 | accepted | `4d4a6532992f61126e1310e721328562428e23e987f7ec35c69b14d12c6f48a9` |
+| setup: `close()`, K = 16, one sale of 1 KAS | 293,743 | 864,612 | 426,059 | 432,306 | 19 | 0.4324 | accepted (merged at DAA 595,646,693) | `20e16e142f376eff0d7e618cabe9734a22150ab062090597a4f49379ae8cc586` |
+| **`draw()` with the real anchor, np = 3, h_J = 0, n2 = 0, lock_time = D = 595,647,293** | **139,937** | **444,148** | 126,964 | 222,074 | 5 | 0.2222 | **accepted** | `fb96ea4a0037221e1eed908c7f448d32e0315c9607351633c0124acc19fc1d6d` |
+
+Anchor:
+- X `9783a6d8f125f39e18535181f9c4d7a16e68c62767681f9fbff16e2b80203ee9`: DAA 595,647,293 = D, blue score 584,069,825, mergeset 2 blues.
+- P `65d803574bad10aa178485df87b5269de450d38d622f1a161120a98ff28b16ba`: DAA 595,647,291, mergeset 1 blue.
+
+By the time the anchor was looked up, the pre-close sink had left the chain (5 removed chain blocks); `find_anchor` walked from the fork point. Round result: win [1, 3, 8, 11, 18, 8], D_claim 602,559,293. The ticket [1, 2, 3, 4, 5] + 1 matches one number, so it is in no tier.
+
+### Comparison with the local measurements (`docs/costs.md` M7)
+
+- **`draw()`** with the real anchor, typical (m = 10, a = 0, np = 3): 139,937 / 444,148 = **28.0 % / 44.4 %**, the same as the local typical draw of Stages 2–3 (28.0 / 44.4 %). The real anchor costs the same as the fabricated one: the proof is a fixed 304 bytes and the script's work does not depend on the values.
+- **Void**, typical: 123,120 / 403,720 = **24.6 % / 40.4 %**, the same as the local typical void (24.6 / 40.4 %). Storage is 50,204 (10.0 %) here vs 6.7 % locally, because the output values differ.
+- **`close()`** K = 16: 293,743 / 864,612 = 58.7 / **86.5 %**, exactly M7-c. Against M6's 294,619 / 867,716 it is −876 compute and −3,104 transient, because the marker lost `seed_ref`.
+- **Converting draw** (`vault-m5`): 140,498 / 444,512, which is +561 / +364 over the plain draw: the record output and the conversion work.
+
+Locked on testnet (no further entry exercised): for each of the four runs, the round 2 objects, drawer', vault' and the new pools (none in the void); in `vault-m5` also the new position and position'. Payouts, the record's refunded R, refunds and changes are ours. `draw-m7-late` (the 13 h out-of-window rejection) was not run (optional, D103).
