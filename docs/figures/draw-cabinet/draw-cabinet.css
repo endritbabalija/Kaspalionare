@@ -1,0 +1,45 @@
+.dc-stage{position:relative;cursor:pointer;touch-action:pan-y;outline:none}
+.dc-stage:focus-visible{outline:1px solid var(--anatomy-muted);outline-offset:6px}
+.dc-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.iso{--dc-glass:#ffffff;--dc-glass-op:.035;--dc-window:#0c0c0c;--dc-level:#2a2a2a;--dc-level-top:#d4d4d4;--dc-digit:#e6e6e6;--dc-lamp-on:#ffffff}
+.iso[data-theme="light"]{--dc-glass:#5a6a78;--dc-glass-op:.05;--dc-window:#ececea;--dc-level:#d2d2ce;--dc-level-top:#26262a;--dc-digit:#18181a;--dc-lamp-on:#000000}
+.dc-glass{fill:var(--dc-glass);fill-opacity:var(--dc-glass-op);stroke:none}
+.dc-glass-back{fill:var(--dc-glass);fill-opacity:calc(var(--dc-glass-op) * .6);stroke:var(--anatomy-faint);stroke-width:var(--anatomy-weight)}
+.dc-band{fill:none;stroke:var(--anatomy-mid);stroke-width:1.6;stroke-linecap:round}
+.dc-glare{fill:none;stroke:var(--anatomy-hi);stroke-opacity:.35;stroke-width:1.4;stroke-linecap:round}
+.dc-window{fill:var(--dc-window);stroke:none}
+.dc-digits{fill:var(--dc-digit);font-family:var(--anatomy-mono);letter-spacing:.4px}
+.dc-num{fill:var(--anatomy-paper);font-family:var(--anatomy-mono);font-weight:600;dominant-baseline:central}
+.dc-slot{fill:var(--anatomy-halo);stroke:var(--anatomy-lo);stroke-width:var(--anatomy-weight)}
+.dc-level{fill:var(--dc-level)}
+.dc-level-top{fill:none;stroke:var(--dc-level-top);stroke-width:.9}
+.dc-liability{fill:none;stroke:var(--anatomy-red);stroke-width:1.2;stroke-linecap:round}
+.dc-card{fill:var(--anatomy-top);stroke:var(--anatomy-lo);stroke-width:var(--anatomy-weight)}
+.dc-hub{fill:var(--anatomy-hi);stroke:none}
+.dc-vents rect{fill:var(--anatomy-shade-0);stroke:var(--anatomy-lo);stroke-width:var(--anatomy-weight);vector-effect:non-scaling-stroke}
+.dc-lamp .iso-solid{transition:none}
+.dc-lamp[data-on] .iso-top{fill:var(--dc-lamp-on)}
+.dc-lamp[data-on] .iso-edge{stroke:var(--anatomy-lit)}
+.dc-seal[data-on] .iso-edge{stroke:var(--anatomy-lit)}
+.dc-seal[data-on] .iso-top{fill:var(--anatomy-lit-top)}
+[data-part="rail-balls"] .iso-edge,[data-lit-ball] .iso-edge{stroke:var(--anatomy-lit)}
+[data-pin][data-on] .iso-edge{stroke:var(--anatomy-lit)}
+[data-pin][data-on] .iso-top{fill:var(--anatomy-lit-top)}
+@media (max-width:600px){.iso-plate{padding-bottom:84px}.iso-plate-corner[data-corner="readout"]{left:0;white-space:normal;text-align:right;line-height:1.4}.iso-plate-corner[data-corner="hint"]{bottom:36px}}
+/* Kaspa brand: teal #6FC7BA and the white K mark, from the official logo in rusty-kaspa */
+.iso .iso-figure{--kas:#6fc7ba;--kas-0:#3e8077;--kas-1:#4b958b;--kas-2:#58a99e;--kas-3:#63b9ad;--kas-top:#86d4c9;--kas-edge:#a9e3da;--kas-ink:#ffffff;--kas-dark:#1a1a1a;
+  --anatomy-lit:#6fc7ba;--anatomy-lit-top:#1d3532;--anatomy-lit-shade:#182c29;--dc-lamp-on:#6fc7ba;--dc-digit:#6fc7ba;--dc-glass:#6fc7ba;--dc-glass-op:.045}
+.iso[data-theme="light"] .iso-figure{--kas:#6fc7ba;--kas-0:#4fa598;--kas-1:#5cb4a7;--kas-2:#68c0b3;--kas-3:#78cbbf;--kas-top:#a3e0d7;--kas-edge:#2b7c71;--kas-ink:#ffffff;
+  --anatomy-lit:#24857a;--anatomy-lit-top:#e4f6f3;--anatomy-lit-shade:#cfede8;--dc-lamp-on:#6fc7ba;--dc-digit:#1f7469;--dc-glass:#2b7c71;--dc-glass-op:.05}
+.dc-kas .iso-fill{fill:var(--kas)}
+.dc-kas .iso-shade[data-shade="0"]{fill:var(--kas-0);stroke:var(--kas-0)}
+.dc-kas .iso-shade[data-shade="1"]{fill:var(--kas-1);stroke:var(--kas-1)}
+.dc-kas .iso-shade[data-shade="2"]{fill:var(--kas-2);stroke:var(--kas-2)}
+.dc-kas .iso-shade[data-shade="3"]{fill:var(--kas-3);stroke:var(--kas-3)}
+.dc-kas .iso-solid:not([data-seamless]) .iso-shade{stroke:none}
+.dc-kas .iso-top{fill:var(--kas-top);stroke:none}
+.dc-kas .iso-solid[data-seamless] .iso-top{stroke:var(--kas-top)}
+.dc-kas .iso-edge,.dc-kas .iso-line{stroke:var(--kas-edge)}
+.dc-k{fill:var(--kas-ink);stroke:none}
+.dc-numdisc{fill:#ffffff;stroke:none}
+.dc-num{fill:var(--kas-dark)}
