@@ -68,17 +68,7 @@ impl Template {
     /// Redeem script for a state: prefix || encoded state || suffix.
     pub fn redeem(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Vec<u8> {
         let c = self.art.contracts.values().next().unwrap();
-        let state = match encode_runtime_state_script(&self.art, &c.runtime_state, values) {
-            Ok(s) => s,
-            // LEGACY_MARKER_SEED_REF (M7 Stage 1a only; delete in Stage 2 together with the
-            // marker's `seed_ref`): see `LEGACY_SEED_REF`.
-            Err(_) if self.name() == "Marker" && !values.contains_key("seed_ref") => {
-                let mut v = values.clone();
-                v.insert("seed_ref".into(), ArtifactValue::Int(LEGACY_SEED_REF));
-                encode_runtime_state_script(&self.art, &c.runtime_state, &v).expect("encode state")
-            }
-            Err(e) => panic!("encode state: {e}"),
-        };
+        let state = encode_runtime_state_script(&self.art, &c.runtime_state, values).unwrap_or_else(|e| panic!("encode state: {e}"));
         [self.prefix.as_slice(), &state, &self.suffix].concat()
     }
 }
@@ -217,7 +207,7 @@ impl Templates {
         // M6-b K_MAX variants (measurement only, D91): the marker and pool constructor roots
         // follow the controller source's K_MAX (16 for the committed sources).
         let k_max = source_k_max(&src.controller);
-        let marker = Template::from(compile_source(&src.marker, &legacy_marker_ctor(&src.marker, dummy_marker(k_max).ctor(drawer_hash))));
+        let marker = Template::from(compile_source(&src.marker, &dummy_marker(k_max).ctor(drawer_hash)));
         let vault = Template::from(compile_source(&src.vault, &dummy_vault().ctor(drawer_hash)));
         let pool = Template::from(compile_source(&src.pool, &dummy_pool(k_max).ctor(drawer_hash)));
         let record = Template::from(compile_source(&src.record, &dummy_record().ctor()));
@@ -410,26 +400,6 @@ fn dummy_controller() -> ControllerState {
 
 fn dummy_params() -> ParamsState {
     ParamsState { round: 1, admin_hash: [0; 32], nonce: 0, used: 0, next_s_f: 500, next_s_r: 1_000, next_fee_class: 0, next_fee_key: [0; 33] }
-}
-
-/// LEGACY_MARKER_SEED_REF (M7 Stage 1a only; delete in Stage 2). The Rust `MarkerState` has
-/// no `seed_ref` (spec M7 A3, D99), but until Stage 2 the committed `marker.sil` still declares
-/// `int init_seed_ref` / `int seed_ref` between st5 and funder_class. So that the templates
-/// still compile (and every suite that does not close or draw stays testable), a marker
-/// source that still has the field gets this placeholder value in its constructor
-/// (`legacy_marker_ctor`) and in every encoded marker state (`Template::redeem`). `close()`
-/// then fails at the controller's check 24 (its marker output carries own + seed_offset),
-/// which is the expected Stage 1a failure. Grep LEGACY_MARKER_SEED_REF to remove it.
-pub const LEGACY_SEED_REF: i64 = 0;
-
-/// LEGACY_MARKER_SEED_REF: the marker constructor for `src`, with `LEGACY_SEED_REF` inserted
-/// before funder_class (the last two arguments) iff the source still declares `init_seed_ref`.
-pub fn legacy_marker_ctor(src: &str, mut ctor: Vec<ArtifactValue>) -> Vec<ArtifactValue> {
-    if src.contains("int init_seed_ref") {
-        let at = ctor.len() - 2;
-        ctor.insert(at, ArtifactValue::Int(LEGACY_SEED_REF));
-    }
-    ctor
 }
 
 fn dummy_marker(k_max: usize) -> MarkerState {

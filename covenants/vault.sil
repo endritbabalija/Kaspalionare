@@ -11,7 +11,7 @@ pragma silverscript ^0.1.0;
 // (the conversion is M5 Stage 4).
 //
 // Entries:
-//   draw_leg(): delegate of Drawer.draw_test_seed() at input 2;
+//   draw_leg(): delegate of Drawer.draw() at input 2;
 //   request_deposit(): spec M5 A4.1 (leader; anyone pays D, naming any owner, D77);
 //   request_withdraw(): spec M5 A4.2 (leader; the position at input 1 runs
 //     Position.vault_leg(); the owner proves ownership with an input of its script, D67).
@@ -106,7 +106,7 @@ contract Vault(
     byte[32] request_tpl = init_request_tpl;
     byte[32] position_tpl = init_position_tpl;
 
-    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, vault L1-L4).
+    // Delegate leg of Drawer.draw() (spec M3 A4, vault L1-L4).
     entry draw_leg(int drawer_pl, int drawer_sl) {
         // L1: the vault slot of draw()
         require(this.activeInputIndex == 2); // mut:VL1

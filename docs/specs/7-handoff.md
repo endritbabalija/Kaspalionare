@@ -272,3 +272,66 @@ Untagged lines Stage 2 also needs (each exercised by a test): `require(mkDaa >= 
 - After the scripts land and the LEGACY shim is deleted, classes A, B and C should turn green in all four suites. Then run `M5_ATTRIB=1 cargo test -p lottery --release --test m7_attacks -- --nocapture --test-threads=1 | grep -oE "ATTRIB .*"`: the script's first failing check must equal each Atk5 label (needs `// ==== check 7` and `// ==== check 8` markers). If a label differs only because the script orders checks differently from `m5_spec`, reorder the model, not the attack. Also `M5_PREFLIGHT=1` on m7_attacks (0 MISMATCH today).
 - The stack is tight: the committed drawer has exactly 4 free slots at check 24 today (M7-f), and D104 stops below 4. `isVoid` is one new live bool through check 25; avoid other entry-scope locals (D, lpMin, xHash): keep the anchor work in braced blocks, recompute D at check 19, and use the `wt` reassignment for M7V_lp. `m7f_stack_headroom` re-measures by inserting ints before `// ==== check 1:` and using them before `// ==== check 25:` (both markers must exist).
 - `sp12_no_test_only_symbols` greps comments too (list above). SA10 asserts the committed marker template differs from the fixture's. M7-a will show the marker redeem delta against the fixture (2,104 B today: identical, since marker.sil is unchanged).
+
+### Stage 2 — Scripts (done; nothing committed)
+
+**What was done.** `drawer.sil`, `marker.sil`, `controller.sil` implement spec M7 A3/A4 as Stage 1a/1b encode them; the LEGACY shim is deleted; the SP12 comment hits are reworded. `docs/design.md`, `docs/DECISIONS.md` and `tests/fixtures/marker_pre_m7.sil` untouched. No stop rule (D104) fired.
+
+**Script changes, check by check.**
+- `marker.sil`: `init_seed_ref` / `seed_ref` removed; the whole `refresh()` entry removed, with the constants only it used (`F_MAX`, `D_IDLE`, `DAA_MAX`) and its RF* tags; header comment rewritten (D99). Only entry: `draw_leg` (unchanged).
+- `controller.sil`: check 20 keeps `own` for T' and no longer forms `seedRef` (comment cites D93); check 24's marker literal and the `MarkerState` struct lose `seed_ref`; comments say `Drawer.draw()`. `draw_leg` and every other line unchanged (no controller tag touched).
+- `drawer.sil` (entry `draw(byte[] anchor, byte[5] win5, …, byte[] record_suffix, int mk_daa)`, the SIG_DRAW order; the builder's dispatch-tag assertion passes):
+  - new constant `ANCHOR_LEN = 304`; header comment rewritten (no TEST-ONLY text); `MarkerState` copy without `seed_ref`.
+  - check 1: `require(anchor.length == 0 || anchor.length == ANCHOR_LEN); // mut:M7A_len`, then `bool isVoid = anchor.length == 0;` (the only new entry-scope local).
+  - check 4: the two `mk.seed_ref` range lines removed.
+  - check 7 (braced block, locals dropped): `mkDaa = OpTxInputDaaScore(1)`, `mkDaa >= 0`, `mkDaa < DAA_MAX`, `mk_daa == mkDaa` (M7D_mk), `dRef = mkDaa + ctrl.seed_offset < DAA_MAX`; void: `dRef + draw_window < DAA_MAX` (untagged guard), `tx.daa >= dRef + draw_window` (M7V_lock); draw: `tx.daa >= dRef` (M7D_lock). D is formed from the opcode, never from the argument. The M3 `D7` line is gone.
+  - check 8 (inside the checks 8–10 block): void branch `win5 == 0x0000000000` (M7V_win5), `leaves.length == 0`, `siblings.length == 0` (M7V_leaves x2); draw branch: `xHash` slice, then a braced block with `kSeq`/`kMc` (the Stage 0 hex keys), `xPc`, two nested blocks recomputing xc and pc exactly as the Stage 0 probe (ctx -> pcd -> sr -> c), `OpChainblockSeqCommit(xHash) == xc` (M7A_xc), `OpChainblockSeqCommit(pHash) == pc` (M7A_pc, kept per spec; S1b-1 stays PENDING), `pc == xPc` (M7A_pceq), D recomputed, `dX = OpBin2Num(anchor[136..144])`, `dP = OpBin2Num(anchor[288..296])`, `dX >= D` (M7A_dX), `dP < D` (M7A_dP); then the seed `blake2b(0x4b4c4f542f73656564 || cov || round 8 B || xHash)`, rank, bonus, canonical win5 and `winRank == rank` as before (D8_canon, D8_rank unchanged). bonus stays 0 in a void.
+  - checks 9–10: skipped in a void (`orAll` starts as an empty slice; check 9's body is under `if (!isVoid)`, check 10's loop likewise); markers stay at block level. D9_len, D9_root, D10_range, D10_n2 unchanged.
+  - check 12: after `wt`, `if (isVoid) { wt = int[]{TOTAL_MAX + 1, x5}; // mut:M7V_lp }` (every slice 0, so 12, 15, 20, 25 see no lower pool; jp = sp = false follow from h_J = n2 = 0).
+  - check 14: `if (isVoid) { vP = vt.total_assets; // mut:M7V_H }` after `vP = V + H`. The guard `hAmt <= ASSETS_MAX - V` (M5D14_assets) is kept in a void (S2-2).
+  - check 15: after the Q loop, `if (isVoid) { require(hAmt <= TOTAL_MAX - oP); oP = oP + hAmt; // mut:M7V_H }`.
+  - check 19: `int dClaim = OpTxInputDaaScore(1) + ctrl.seed_offset + claim_window;` then `dClaim = dClaim + draw_window; // mut:M7C_claim` then `require(dClaim < DAA_MAX);`. No input loop; D19_own and D19_max are gone.
+  - checks 2, 3, 5, 6, 11, 13, 16–18, C1–C3, 20–26 unchanged. Every `// ==== check N` marker kept (the check 7 and 8 markers carry the M7 text; their labels parse as 7 and 8).
+- Retired tags: D7, D19_own, D19_max (drawer), RF1…RF6 (marker). `every_m3_tag_is_tested` (85), `every_m4_tag_is_tested` ((119, 172)) and `every_m7_tag_is_tested` (14 tags on 16 lines) pass.
+- Comments only: `pool.sil` (2 lines) and `vault.sil` (2 lines) `Drawer.draw_test_seed()` -> `Drawer.draw()`. `grep -rn "draw_test_seed\|test_only_seed" covenants crates/lottery/src`: 0 hits.
+- Rust: `crates/lottery/src/buy.rs`: the LEGACY_MARKER_SEED_REF shim removed (`LEGACY_SEED_REF`, `legacy_marker_ctor`, the `Template::redeem` fallback arm and its call in `compile_sources`); `Template::redeem` now panics on any encode error. `marker_pre_m7.sil` is used only by SA10 and the M7-a delta row (they insert `seed_ref` themselves).
+- Test fixes (the test was wrong, not the script): `m7_seed.rs` SP10 and `m7_attacks.rs` `sa8_marker_refresh_fails_at_dispatch` set the marker input's entry to `"refresh"`, which the ABI encoder cannot encode once the entry no longer exists (panic "unknown entry `Marker::refresh`" in `entry_sigscript`). Changed to the full signature `"refresh()"`, which `entry_sigscript` encodes by hand (`planned_sig_script`); both tests assert the script's dispatch failure (EarlyReturn) as intended. No attack weakened (S2-1).
+
+**Redeem sizes (B; before = M6-a in `docs/costs.md`, after = M7-a).**
+
+| object | before | after | delta |
+|---|---|---|---|
+| drawer | 65,234 (`draw_test_seed`) | 64,643 (`draw`, anchor + void) | −591 (the unrolled 19-input loop of check 19 is gone; the anchor code is smaller than it) |
+| marker | 2,104 (draw_leg, refresh, seed_ref) | 1,389 (draw_leg only) | −715 (state −9, code −706) |
+| controller | 27,694 | 27,624 | −70 |
+
+**Commands and results** (from `crates/`, release, `-j 2`).
+- `cargo test --release -j 2 --no-fail-fast` (workspace): **1,030 passed, 0 failed, 1 ignored** (the pre-existing m4_mutants ignore). Per suite: harness lib 8, covenant_smoke 3, m0_limits 3, m0_mass 5, m0_merkle 2, m0_shapes 6, m7_chain 8; lottery lib 41, m1_attacks 25, m1_buy 14, m1_measure 4, m1_mutants 11, m2_attacks 39, m2_close 8, m2_game 2, m2_measure 5, m2_mutants 25, m2_params 17, m3_attacks 19, m3_draw 21, m3_game 13, m3_measure 7, m3_mutants 91, m4_attacks 21, m4_claim 23, m4_game 4, m4_measure 8, m4_mutants 193 (+1 ignored), m5_attacks 21, m5_game 10, m5_measure 5, m5_mutants 261, m5_vault 15, m6_attacks 8, m6_conflict 3, m6_limits 8, m6_measure 10, m6_mutants 9, m7_attacks 16, m7_measure 7, m7_mutants 17, m7_seed 14; doctests 0. Stage 1a/1b classes A, B and C are all green.
+- `M5_ATTRIB=1 cargo test -p lottery --release --test m5_attacks --test m6_attacks --test m7_attacks -- --nocapture --test-threads=1`: **402 ATTRIB lines, 402 OK, 0 not OK** (63 SA lines: drawer:1 x2, 3 x2, 5 x2, 7 x6, 8 x28, 9, 13 x5, 20 x3, 22, 24, 25 x4). Every Atk5 label matched the script's first failing check, so no model or label was reordered. Suites 21 / 8 / 16 passed.
+- `M5_PREFLIGHT=1 cargo test -p lottery --release --test m5_attacks --test m6_attacks --test m5_vault --test m7_attacks -- --nocapture --test-threads=1`: **371 OK, 0 MISMATCH, 0 MODEL DISAGREES**, plus 3 SA3 information lines (direct strikes: model drawer:8; script `InvalidOpcode(0xd4)` x2 and `BlockIsTooDeep`). Suites 21 / 15 / 8 / 16 passed.
+- `M3_ATTRIB=1 cargo test -p lottery --release --test m3_attacks -- --nocapture --test-threads=1`: 250 ATTRIB lines, 19 passed. Baseline: the same command at 0f61b1d (pre-M7, `--features test-seed`, a temporary detached worktree with its own `CARGO_TARGET_DIR`, removed afterwards): 262 lines, 22 passed. `diff` of the sorted lines: **the 250 remaining lines are identical**; the 12 missing lines are exactly the strikes Stage 1a removed (`da12_seed` x8 at 7, 8 x6, 25; `da13_new_pool_state` x1 at 25, the `deadline_without_draw_window` strike; `da17_own_argument` x3 at 19).
+- `cargo check -p lottery --no-default-features --features mainnet`: builds. `--features mainnet,test-seed`: `error: the package 'lottery' does not contain this feature: test-seed` (exit 101).
+- `cargo test -p lottery --release --test m7_measure -- --nocapture --test-threads=1`: 7 passed; numbers below.
+
+**Stop-rule numbers (D104; none fired).**
+- M7-f stack headroom: **4 free slots** at check 24 (4 extra live ints compile; the 5th reaches 245 > 244), as for the M6 drawer: `isVoid` costs one slot, and removing `seed_ref` from the marker struct and the `own` loop freed one. At the floor, not below. No mitigation needed (the anchor work already sits in nested braces).
+- `draw()` worst (K = 16, m = 50, a = 7, np = 7, 8 funding, cap binding, record, anchor): compute 206,569 (41.3 %), transient 527,196 (52.7 %), storage 71,009 (14.2 %); input 0: 1,809,407 units, sigscript 78,733 B; typical 28.0 / 44.4 / 18.6 %. Priority fee at 100 sompi/gram 0.2636 KAS (worst), covered by C_draw from S = 52.72 KAS.
+- void worst (a = 7, record, fee paid): 37.0 / 48.0 / 14.2 %; typical 24.6 / 40.4 / 6.7 %.
+- `close()` K = 16 (M2-a shape): compute 58.7 %, transient **86.5 %**, storage 80.5 % (M6: 58.9 / 86.8 %). K frontier: largest K within 90 % = 16 (K = 17: 91.6 % transient). B_MAX frontier: 4 (B_MAX = 5: 99.0 % transient).
+- M7-e R re-check at R = 1.69 KAS: close storage worst 449,692 (**89.9 %**, unchanged from M6); draw/void with the record: supremum 65.5 % (f_min 1 KAS) and 83.5 % (f_min 0.1 KAS); R(16) = 1.69 KAS.
+- M7-d: every drawer variant within 90 % (K_MAX 17 variant 41.8 / 53.2 %). M7-f byte budget to 90 %: transient binding, 93,050 B of drawer headroom.
+
+**Deviations and findings (draft DECISIONS rows, PENDING).**
+- PENDING S2-1 (mechanical, test fix): SP10 and SA8 call the removed entry by its full signature `refresh()` (hand-encoded dispatch) instead of the name `refresh` (ABI-encoded, impossible once the entry is gone). Same assertion (EarlyReturn at dispatch).
+- PENDING S2-2 (stricter than the model, no effect): check 14 keeps `hAmt <= ASSETS_MAX - V` (M5D14_assets) in a void, where V' = V; the model checks V + 0. The difference is unreachable (V + H is below the total KAS supply, far below ASSETS_MAX).
+- PENDING S2-3 (no `dP >= 0`): the optional hardening was not added. `pc == x_pc` pins P's preimage, including its DAA bytes, to the genuine selected parent of an opcode-authenticated X, so a negative dP cannot occur; the check would add bytes and a model change for no security effect.
+- PENDING S2-4 (mechanical): D is not a live local; checks 7, 8 and 19 each recompute `OpTxInputDaaScore(1) + ctrl.seed_offset` (handoff plan; keeps the 4-slot headroom).
+- S1b-1 (drop the P opcode call) stays PENDING for the owner; the spec form (two calls) is implemented.
+- FINDING S2-5 (for the orchestrator, not implemented): genesis (`genesis.rs` `validate_with`, range [0, DAA_MAX − 1]) and close() check 1 (`seed_offset >= 0`) allow **seed_offset = 0**. Then D = daa(C) for the chain block C that accepted `close()`, so X can be C itself, whose miner chose to include the close. D97 says "any value ≥ 1 is in the future". Proposal: genesis refuses seed_offset < 1 (or < SEED_OFFSET); the scripts need no change (the controller copies the genesis value). Not a stop condition; the fixture uses 600.
+
+**What Stage 3 must know.**
+- The tables above are the full `m7_measure` output for this tree (reproduce with the command above); Stage 3 writes them into `docs/costs.md` M7. Drawer 64,643 B, marker 1,389 B, controller 27,624 B; M7-a prints the marker delta row.
+- The tightest margins are unchanged in kind: close() K = 16 transient 86.5 % and the close storage worst case 89.9 % (R re-check). Draw and void are far from every limit.
+- The stack headroom is exactly 4: any further drawer local live across check 24 triggers D104.
+- The `tn10` draw probes (`draw-m3`, `claim-m4`, `vault-m5`) still build a fabricated anchor (Stage 1a note): the new drawer will reject them on testnet-10 at check 8 until Stage 4's `anchor_from_rpc`.
+- Baseline trick: `git worktree add --detach <scratch>/base <rev>` with `CARGO_TARGET_DIR=<scratch>/base-target` (never the shared `crates/target`, CLAUDE.md gotcha); about 10 minutes to build.

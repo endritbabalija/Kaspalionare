@@ -9,7 +9,7 @@ pragma silverscript ^0.1.0;
 // lower slots (slice = slice_t). win = n1..n5 || bonus; roots as the marker.
 //
 // Entries:
-//   absorb_leg(): delegate of Drawer.draw_test_seed() at input >= 4, after the deadline;
+//   absorb_leg(): delegate of Drawer.draw() at input >= 4, after the deadline;
 //   ticket_leg(): delegate of Ticket.claim() / return_deposit_with_pool() at input 1 (M4).
 //   refresh(): byte-identical successor after D_IDLE idle (M4 A6, D59).
 contract Pool(
@@ -76,7 +76,7 @@ contract Pool(
     byte funder_class = init_funder_class;
     byte[33] funder_key = init_funder_key;
 
-    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, pool L1-L5).
+    // Delegate leg of Drawer.draw() (spec M3 A4, pool L1-L5).
     entry absorb_leg(int drawer_pl, int drawer_sl) {
         // L1: an absorbed-pool slot of draw() (inputs 4..3+a; the drawer fixes a)
         require(this.activeInputIndex >= 4); // mut:PL1

@@ -135,7 +135,9 @@ fn sa8_marker_refresh_fails_at_dispatch() {
     let mut bad = good.clone();
     match &mut bad.inputs[MK].kind {
         InKind::Entry { entry, args, .. } => {
-            *entry = "refresh".into();
+            // The full signature: refresh() is no longer in the ABI, so it is encoded by hand
+            // (`planned_sig_script`) as the pre-M7 dispatch would have read it.
+            *entry = "refresh()".into();
             args.clear();
         }
         _ => unreachable!(),

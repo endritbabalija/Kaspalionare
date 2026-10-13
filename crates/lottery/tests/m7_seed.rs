@@ -557,7 +557,9 @@ fn sp10_marker_draw_leg_only() {
     let mut bad: Built = good.clone();
     match &mut bad.inputs[1].kind {
         InKind::Entry { entry, args, .. } => {
-            *entry = "refresh".into();
+            // The full signature: refresh() is no longer in the ABI, so it is encoded by hand
+            // (`planned_sig_script`) as the pre-M7 dispatch would have read it.
+            *entry = "refresh()".into();
             args.clear();
         }
         _ => unreachable!(),

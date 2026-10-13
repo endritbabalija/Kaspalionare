@@ -1,7 +1,7 @@
 pragma silverscript ^0.1.0;
 
 // Round controller (role 0x01), spec M2 A3.1 and A4. Leader of close(); delegate of
-// Drawer.draw_test_seed() at input 3 (draw_leg, spec M3 A3.5 and A4).
+// Drawer.draw() at input 3 (draw_leg, spec M3 A3.5 and A4).
 //
 // Value: O + A + R (O = boost pot, A = fee accumulator, R = reserve).
 // State field order = byte order (spec A3.1); int = 8-byte payload.
@@ -157,7 +157,6 @@ contract Controller(
         int st3;
         int st4;
         int st5;
-        int seed_ref;
         byte funder_class;
         byte[33] funder_key;
     }
@@ -463,7 +462,9 @@ contract Controller(
         }
         require(m_next == mChosen); // mut:C19
 
-        // check 20: own = max input creation DAA score; T' and seed_ref
+        // check 20: own = max input creation DAA score; T'. Spec M7 A4 (D93): no seed
+        // reference is formed; the drawer derives the anchor from the marker's creation DAA
+        // score plus seed_offset.
         int own = 0;
         for(di, 0, nIn, K_MAX + 2 + F_MAX) {
             int dd = OpTxInputDaaScore(di);
@@ -477,7 +478,6 @@ contract Controller(
             tNext = own + d_min;
         }
         require(tNext < DAA_MAX);
-        int seedRef = own + seed_offset;
 
         // check 21: controller r+1
         validateOutputState(0, State {
@@ -583,13 +583,12 @@ contract Controller(
             st3: st3,
             st4: st4,
             st5: st5,
-            seed_ref: seedRef,
             funder_class: funder_class,
             funder_key: funder_key
         }, marker_prefix, marker_suffix, marker_tpl);
     }
 
-    // Delegate leg of Drawer.draw_test_seed() (spec M3 A4, controller L1-L5). This is the
+    // Delegate leg of Drawer.draw() (spec M3 A4, controller L1-L5). This is the
     // round r+1 controller; the genuine marker of round r at input 1 authenticates the
     // drawer through its own leg (D38).
     entry draw_leg(int marker_pl, int marker_sl) {

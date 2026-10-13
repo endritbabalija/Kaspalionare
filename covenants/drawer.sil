@@ -1,11 +1,14 @@
 pragma silverscript ^0.1.0;
 
-// Drawer singleton (role 0x0A), spec M3 A3.1 and A4 (D37, D38, D42, D43, D49). Leader of
+// Drawer singleton (role 0x0A), spec M3 A3.1 and A4 (D37, D38, D42, D49). Leader of
 // draw(). Value: R, posted at genesis and never refunded (as D30).
 //
-// TEST-ONLY: the entry takes an explicit test seed (D42). This source is compiled only by
-// `lottery::draw`, which exists only with the `test-seed` feature (D43); a mainnet build has
-// no drawer.
+// Spec M7 (D93-D105): the seed is the hash of the anchor block X, the first selected-chain
+// block with DAA score >= D = (the marker's creation DAA score) + seed_offset, proven in
+// script with OpChainblockSeqCommit on X and on its selected parent P and the KIP-21
+// preimages of both commitments (check 8). An empty anchor is a void (D96): no winners,
+// valid from D + draw_window. The drawer is deployed on testnet or devnet only until the
+// release gate (D100: the anchor miner's withholding bias is OPEN).
 //
 // Route of trust (D38): CONTROLLER_TPL is a constructor constant; pool_tpl and vault_tpl
 // are state (instance constants set at genesis, copied unchanged); the marker template
@@ -13,12 +16,13 @@ pragma silverscript ^0.1.0;
 // instance constant copied unchanged; draw() writes it into every new pool, which cannot
 // hold the ticket hash as a constructor constant (the ticket commits to POOL_TPL).
 //
-// draw_test_seed() implements spec M3 A4 checks 1-25 and the A5 witness checks, in spec
+// draw() implements spec M3 A4 checks 1-25 and the A5 witness checks, in spec
 // order, with the spec M5 A5 changes: the extended vault ranges (check 5), V' <= ASSETS_MAX
 // (check 14, user decision U-2), the aggregate conversion of the vault's pending totals at
 // the post-settlement price (blocks C1-C3 after check 17, D65, D69, D70), the settlement
 // record at output 3 + np iff anything was pending (checks 13, 20, 26) and vault' and
-// controller' after the conversions (checks 23, 24, D71). Each check starts at a
+// controller' after the conversions (checks 23, 24, D71), and the spec M7 A4 changes
+// (checks 1, 4, 7, 8, 9-10, 12, 14, 15, 19). Each check starts at a
 // "// ==== check N" line, in order (the attribution
 // instrument in tests/common/m2.rs truncates the entry at these lines and closes the open
 // braces, so a marker must not sit inside an if/for body). `// mut:<ID>` tags mark the
@@ -75,6 +79,9 @@ contract Drawer(
     int constant MIN_DEPOSIT = 1000000000;
     int constant SHARES_MAX = 4611686018427386904;
     int constant ASSETS_MAX = 4611686018427387903;
+    // Spec M7 A2/A3: the anchor proof, 152 bytes for X then 152 for P (hash, parent_commit,
+    // activity_root, miner_payload_root, sp_timestamp, daa_score, blue_score).
+    int constant ANCHOR_LEN = 304;
 
     byte role = 0x0a;
     int round = init_round;
@@ -128,7 +135,7 @@ contract Drawer(
         int seed_offset;
     }
 
-    // Marker state layout (spec M2 A3.3, unchanged in M3).
+    // Marker state layout (spec M2 A3.3; spec M7 A3 removes seed_ref, D99).
     struct MarkerState {
         byte role;
         int round;
@@ -149,7 +156,6 @@ contract Drawer(
         int st3;
         int st4;
         int st5;
-        int seed_ref;
         byte funder_class;
         byte[33] funder_key;
     }
@@ -275,9 +281,11 @@ contract Drawer(
     // iff pend_dep > 0 or pend_wsh > 0 (spec M5 A5), fee (if paid), marker refund, pool
     // refunds, caller output (last, zero ID). Spec M5 arguments: wc (the C2 witness),
     // record_prefix and record_suffix (the record template bytes, check 26; ignored when no
-    // record is written).
-    entry draw_test_seed(
-        byte[32] test_only_seed,
+    // record is written). Spec M7 arguments: anchor (ANCHOR_LEN bytes, or empty for a void,
+    // D95, D96) and mk_daa (the marker's creation DAA score, checked by equality in check 7
+    // so the round result stays derivable from the transaction bytes, D98).
+    entry draw(
+        byte[] anchor,
         byte[5] win5,
         byte[] leaves,
         byte[] siblings,
@@ -299,8 +307,7 @@ contract Drawer(
         int wc,
         byte[] record_prefix,
         byte[] record_suffix,
-        // The maximum creation DAA score over all inputs (check 19).
-        int own_daa
+        int mk_daa
     ) {
         // ==== check 1: leader at input 0; own state ranges (A3.1); argument ranges
         require(this.activeInputIndex == 0);
@@ -330,6 +337,9 @@ contract Drawer(
         require(pool_pl <= SCRIPT_MAX);
         require(pool_sl >= 0);
         require(pool_sl <= SCRIPT_MAX);
+        // Spec M7 A4 check 1: the anchor is empty (void, D96) or ANCHOR_LEN bytes (D95).
+        require(anchor.length == 0 || anchor.length == ANCHOR_LEN); // mut:M7A_len
+        bool isVoid = anchor.length == 0;
 
         // ==== check 2: 4 + a covenant inputs (0 <= a <= A_MAX) at 0..3+a; then
         // 1..F_MAX funding inputs with the zero ID
@@ -427,8 +437,6 @@ contract Drawer(
         require(mk.jackpot <= TOTAL_MAX);
         require(mk.g2 >= 0);
         require(mk.g2 <= TOTAL_MAX);
-        require(mk.seed_ref >= 0);
-        require(mk.seed_ref < DAA_MAX);
         // Braced blocks drop their locals (silverscript-lang compile/statement.rs:742-757),
         // including the parameters of inlined functions: the drawer stays under the 244 live
         // stack bindings the compiler enforces (the consensus stack limit).
@@ -464,8 +472,28 @@ contract Drawer(
         int pot = tx.inputs[3].value - ctrl.acc - ctrl.reserve;
         require(pot >= 0); // mut:D6_pot
 
-        // ==== check 7: lower-bound lock at the seed reference (D51, R3)
-        require(tx.daa >= mk.seed_ref); // mut:D7
+        // ==== check 7: anchor reference and lock (spec M7 A4, D93; lower bounds only, R3).
+        // mkDaa = the marker input's creation DAA score: OpTxInputDaaScore pushes the UTXO's
+        // block_daa_score as i64 (rusty-kaspa v2.1.0 crypto/txscript/src/opcodes/mod.rs:
+        // 1124-1130); an unaccepted marker has UNACCEPTED_DAA_SCORE = u64::MAX
+        // (consensus/core/src/constants.rs:51), pushed as -1. D = mkDaa + seed_offset is formed
+        // from the opcode, never from the argument; seed_offset is in [0, DAA_MAX) (close()
+        // check 1), so no sum below overflows. D is recomputed in checks 8 and 19 rather than
+        // kept live (stack headroom at check 24, M7-f).
+        {
+            int mkDaa = OpTxInputDaaScore(1);
+            require(mkDaa >= 0);
+            require(mkDaa < DAA_MAX);
+            require(mk_daa == mkDaa); // mut:M7D_mk
+            int dRef = mkDaa + ctrl.seed_offset;
+            require(dRef < DAA_MAX);
+            if (isVoid) {
+                require(dRef + draw_window < DAA_MAX);
+                require(tx.daa >= dRef + draw_window); // mut:M7V_lock
+            } else {
+                require(tx.daa >= dRef); // mut:M7D_lock
+            }
+        }
 
         int bonus = 0;
         int hJ = 0;
@@ -473,43 +501,87 @@ contract Drawer(
         // Checks 8-10 share one block (rank and the OR of the count strings are dropped at
         // its end); the attribution tool closes open blocks when it truncates.
         {
-        // ==== check 8: TEST-ONLY seed (D42): h, rank, bonus; win5 canonical with that rank
+        // ==== check 8: anchor and seed (spec M7 A4, D93-D95). Draw: X and P are chain blocks
+        // inside the opcode's window whose KIP-21 preimages (consensus/seq-commit/src/
+        // hashing.rs:80-84, 152-173) recompute their commitments; P is X's selected parent
+        // (SeqCommit(X) commits to SeqCommit(sp(X)), KIP-21 6.7); dX >= D > dP, so X is the
+        // first chain block with DAA score >= D. h = blake2b("KLOT/seed" || cov || round
+        // (8 B LE) || X.hash); rank = u56(h[0..7]) mod N; bonus = u56(h[7..14]) mod m + 1
+        // (game::seed_numbers); win5 canonical with that rank. Void (D96): win5 = 0, no
+        // leaves, no siblings, bonus = 0; checks 9-10 are skipped (h_J = n2 = 0).
         int rank = 0;
-        {
-        // h = blake2b("KLOT/test-seed" || cov || round (8 B LE) || test_only_seed);
-        // rank = u56(h[0..7]) mod N; bonus = u56(h[7..14]) mod m + 1 (game::seed_numbers).
-        byte[32] h = blake2b(byte[](0x4b4c4f542f746573742d73656564) + cov + (round as byte[8]) + test_only_seed);
-        rank = OpBin2Num(h.slice(0, 7) + byte[](0x00)) % N;
-        bonus = OpBin2Num(h.slice(7, 14) + byte[](0x00)) % mk.m + 1;
-        int n1 = OpBin2Num(win5.slice(0, 1) + byte[](0x00));
-        int n2v = OpBin2Num(win5.slice(1, 2) + byte[](0x00));
-        int n3 = OpBin2Num(win5.slice(2, 3) + byte[](0x00));
-        int n4 = OpBin2Num(win5.slice(3, 4) + byte[](0x00));
-        int n5 = OpBin2Num(win5.slice(4, 5) + byte[](0x00));
-        require(n1 >= 1); // mut:D8_canon
-        require(n1 < n2v); // mut:D8_canon
-        require(n2v < n3); // mut:D8_canon
-        require(n3 < n4); // mut:D8_canon
-        require(n4 < n5); // mut:D8_canon
-        require(n5 <= 30); // mut:D8_canon
-        int y2 = n2v - 1;
-        int y3 = n3 - 1;
-        int y4 = n4 - 1;
-        int y5 = n5 - 1;
-        int winRank = (n1 - 1) + y2 * (y2 - 1) / 2 + y3 * (y3 - 1) * (y3 - 2) / 6
-            + y4 * (y4 - 1) * (y4 - 2) * (y4 - 3) / 24
-            + y5 * (y5 - 1) * (y5 - 2) * (y5 - 3) * (y5 - 4) / 120;
-        require(winRank == rank); // mut:D8_rank
+        if (isVoid) {
+            require(win5 == byte[5](0x0000000000)); // mut:M7V_win5
+            require(leaves.length == 0); // mut:M7V_leaves
+            require(siblings.length == 0); // mut:M7V_leaves
+        } else {
+            byte[32] xHash = byte[32](anchor.slice(0, 32));
+            {
+                // K_SEQ = "SeqCommitmentMerkleBranchHash" || 0x000000 and K_MC =
+                // "SeqCommitMergesetContext" || 0x00 x 8 (rusty-kaspa v2.1.0
+                // crypto/hashes/src/hashers.rs:40, 47, 120-138: the tag zero-padded to a
+                // 32-byte BLAKE3 key).
+                byte[32] kSeq = byte[32](0x536571436f6d6d69746d656e744d65726b6c654272616e636848617368000000);
+                byte[32] kMc = byte[32](0x536571436f6d6d69744d65726765736574436f6e746578740000000000000000);
+                byte[32] xPc = byte[32](anchor.slice(32, 64));
+                {
+                    byte[32] ctx = blake3WithKey(anchor.slice(128, 152), kMc);
+                    byte[32] pcd = blake3WithKey(byte[](ctx) + anchor.slice(96, 128), kSeq);
+                    byte[32] sr = blake3WithKey(anchor.slice(64, 96) + byte[](pcd), kSeq);
+                    byte[32] xc = blake3WithKey(byte[](xPc) + byte[](sr), kSeq);
+                    require(OpChainblockSeqCommit(xHash) == xc); // mut:M7A_xc
+                }
+                {
+                    byte[32] pHash = byte[32](anchor.slice(152, 184));
+                    byte[32] ctx = blake3WithKey(anchor.slice(280, 304), kMc);
+                    byte[32] pcd = blake3WithKey(byte[](ctx) + anchor.slice(248, 280), kSeq);
+                    byte[32] sr = blake3WithKey(anchor.slice(216, 248) + byte[](pcd), kSeq);
+                    byte[32] pc = blake3WithKey(anchor.slice(184, 216) + byte[](sr), kSeq);
+                    require(OpChainblockSeqCommit(pHash) == pc); // mut:M7A_pc
+                    require(pc == xPc); // mut:M7A_pceq
+                }
+                // The DAA scores as committed (8 bytes LE); a value >= 2^63 reads as negative
+                // and fails dX >= D; P's is pinned by pc == x_pc.
+                int dRef = OpTxInputDaaScore(1) + ctrl.seed_offset;
+                int dX = OpBin2Num(anchor.slice(136, 144));
+                int dP = OpBin2Num(anchor.slice(288, 296));
+                require(dX >= dRef); // mut:M7A_dX
+                require(dP < dRef); // mut:M7A_dP
+            }
+            byte[32] h = blake2b(byte[](0x4b4c4f542f73656564) + cov + (round as byte[8]) + xHash);
+            rank = OpBin2Num(h.slice(0, 7) + byte[](0x00)) % N;
+            bonus = OpBin2Num(h.slice(7, 14) + byte[](0x00)) % mk.m + 1;
+            int n1 = OpBin2Num(win5.slice(0, 1) + byte[](0x00));
+            int n2v = OpBin2Num(win5.slice(1, 2) + byte[](0x00));
+            int n3 = OpBin2Num(win5.slice(2, 3) + byte[](0x00));
+            int n4 = OpBin2Num(win5.slice(3, 4) + byte[](0x00));
+            int n5 = OpBin2Num(win5.slice(4, 5) + byte[](0x00));
+            require(n1 >= 1); // mut:D8_canon
+            require(n1 < n2v); // mut:D8_canon
+            require(n2v < n3); // mut:D8_canon
+            require(n3 < n4); // mut:D8_canon
+            require(n4 < n5); // mut:D8_canon
+            require(n5 <= 30); // mut:D8_canon
+            int y2 = n2v - 1;
+            int y3 = n3 - 1;
+            int y4 = n4 - 1;
+            int y5 = n5 - 1;
+            int winRank = (n1 - 1) + y2 * (y2 - 1) / 2 + y3 * (y3 - 1) * (y3 - 2) / 6
+                + y4 * (y4 - 1) * (y4 - 2) * (y4 - 3) / 24
+                + y5 * (y5 - 1) * (y5 - 2) * (y5 - 3) * (y5 - 4) / 120;
+            require(winRank == rank); // mut:D8_rank
         }
 
         // ==== check 9: K count leaves at the winning rank, each proven against its root
-        require(leaves.length == 2 * mk.m * ctrl.k); // mut:D9_len
-        require(siblings.length == PATH * ctrl.k); // mut:D9_len
+        // (draw mode only; a void has no leaves, check 8)
         // Check 10 accumulators: the bitwise OR of the K count strings (each count's sign
         // bit and nonzero-ness per bonus value) and the exact jackpot count sum h_J. The
         // OR starts at shard 0's string (k >= 1; OR is idempotent).
-        byte[] orAll = leaves.slice(0, 2 * mk.m);
-        {
+        byte[] orAll = leaves.slice(0, 0);
+        if (!isVoid) {
+        require(leaves.length == 2 * mk.m * ctrl.k); // mut:D9_len
+        require(siblings.length == PATH * ctrl.k); // mut:D9_len
+        orAll = leaves.slice(0, 2 * mk.m);
         int lw = 2 * mk.m;
         byte[32] z0 = blake2b(byte[](0x02));
         // 128 zero bytes (OpNum2Bin is limited to 8 bytes): covers 2 x M_DRAW.
@@ -546,15 +618,18 @@ contract Drawer(
         }
         }
 
-        // ==== check 10: counts in [0, 32,767]; h_J (summed above, exact); n2
+        // ==== check 10: counts in [0, 32,767]; h_J (summed above, exact); n2 (draw mode
+        // only: in a void orAll is empty and h_J = n2 = 0)
         // A count is above 32,767 (read unsigned) iff its sign bit is set, iff the OR has
         // that bit set at its slot; the OR slot is nonzero iff some shard's count is >= 1.
-        for(b, 0, mk.m, M_DRAW) {
-            int v = OpBin2Num(orAll.slice(2 * b, 2 * b + 2) + byte[](0x00));
-            require(v <= COUNT_MAX); // mut:D10_range
-            if (b + 1 != bonus) {
-                if (v > 0) {
-                    n2 = n2 + 1; // mut:D10_n2
+        if (!isVoid) {
+            for(b, 0, mk.m, M_DRAW) {
+                int v = OpBin2Num(orAll.slice(2 * b, 2 * b + 2) + byte[](0x00));
+                require(v <= COUNT_MAX); // mut:D10_range
+                if (b + 1 != bonus) {
+                    if (v > 0) {
+                        n2 = n2 + 1; // mut:D10_n2
+                    }
                 }
             }
         }
@@ -584,6 +659,11 @@ contract Drawer(
         // W_t (D46, design 4.1) at the marker's m: <= 3,000 x 49 (A6). slice_t = B_t / W_t,
         // lp_t = [slice_t >= 1].
         int[] wt = int[]{125, 125 * (mk.m - 1), 3000, 3000 * (mk.m - 1), 23000};
+        // Spec M7 A4 check 12 (D96): a void creates no pool. W_t > TOTAL_MAX >= B_t makes
+        // every slice B_t / W_t = 0, so checks 12, 15, 20 and 25 see lp_t = 0 (no new local).
+        if (isVoid) {
+            wt = int[]{TOTAL_MAX + 1, TOTAL_MAX + 1, TOTAL_MAX + 1, TOTAL_MAX + 1, TOTAL_MAX + 1}; // mut:M7V_lp
+        }
         // nCov = 3 + np, np = jp + sp + sum lp_t.
         int nCov = 3 + (jp as int) + (sp as int);
         for(t, 0, 5, 5) {
@@ -604,9 +684,14 @@ contract Drawer(
         require(OpCovOutputCount(cov) == nCov); // mut:D13
 
         // ==== check 14: vault settlement (design 5.4): V' = V + H - J_house [jp] - n2 G2 [sp];
-        // V + H <= ASSETS_MAX, so V' <= ASSETS_MAX (spec M5 A5 ranges, user decision U-2)
+        // V + H <= ASSETS_MAX, so V' <= ASSETS_MAX (spec M5 A5 ranges, user decision U-2).
+        // Spec M7 A4 (D96): a void pays H to the boost pot (check 15), V' = V. The guard
+        // V + H <= ASSETS_MAX is kept in a void (stricter; V + H is below the KAS supply).
         require(hAmt <= ASSETS_MAX - vt.total_assets); // mut:M5D14_assets
         int vP = vt.total_assets + hAmt;
+        if (isVoid) {
+            vP = vt.total_assets; // mut:M7V_H
+        }
         if (jp) {
             // J_house = J - J_boost >= 0 (check 4).
             vP = vP - (mk.jackpot - mk.j_boost); // mut:D14_jp
@@ -637,6 +722,11 @@ contract Drawer(
             require(q >= 0);
             require(q <= TOTAL_MAX - oP);
             oP = oP + q; // mut:D15_q
+        }
+        // Spec M7 A4 check 15 (D96): a void adds the house share H to O'.
+        if (isVoid) {
+            require(hAmt <= TOTAL_MAX - oP);
+            oP = oP + hAmt; // mut:M7V_H
         }
 
         // ==== check 16: fee (D41): T_F = A + F; paid iff T_F >= f_min; A' = paid ? 0 : T_F
@@ -782,30 +872,12 @@ contract Drawer(
             refundHashes = refundHashes + blake2b(payoutSpk(pc, pl.funder_key));
         }
 
-        // ==== check 19: claim deadline (D39): max(own, seed_ref + draw_window) + claim_window
-        // own is the argument own_daa, which must equal the maximum creation DAA score over
-        // all inputs (user decision 2026-10-10, spec correction of A4 check 19 and A9: the
-        // round result is then derivable from the transaction bytes alone).
-        int dClaim = 0;
-        {
-            int own = 0;
-            for(di, 0, tx.inputs.length, 4 + A_MAX + F_MAX) {
-                int dd = OpTxInputDaaScore(di);
-                if (dd > own) {
-                    own = dd;
-                }
-            }
-            require(own < DAA_MAX);
-            require(own_daa == own); // mut:D19_own
-            int base = own_daa;
-            int sw = mk.seed_ref + draw_window;
-            require(sw < DAA_MAX);
-            if (sw > base) {
-                base = sw; // mut:D19_max
-            }
-            dClaim = base + claim_window;
-            require(dClaim < DAA_MAX);
-        }
+        // ==== check 19: claim deadline (spec M7 A4, D98): D + draw_window + claim_window, a
+        // constant of the round (D recomputed from the marker input as in check 7; each term
+        // is below DAA_MAX, so the sum cannot overflow).
+        int dClaim = OpTxInputDaaScore(1) + ctrl.seed_offset + claim_window;
+        dClaim = dClaim + draw_window; // mut:M7C_claim
+        require(dClaim < DAA_MAX);
 
         // Checks 20-21 share one block (the output layout indices are dropped at its end).
         {
