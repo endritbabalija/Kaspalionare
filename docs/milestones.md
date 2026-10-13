@@ -158,15 +158,20 @@ Done when:
   - drawer stack headroom: 4 free slots at check 24 (M5 S4-1); any drawer change that keeps a value live across check 24 must re-measure it;
   - cleanup: the dead M4 draw branch in `crates/lottery/src/draw.rs` (`SIG_DRAW_M4`, `args_m4`, the 22-push path of `RoundResult::from_tx`; M5 S4-9).
 
-**Proposal (your decision): done criterion for the next milestone (real seed), from M6 (D83, spec 6 A5a).** No entry for that milestone exists yet; when it is written, it should include: K, R and m_max count as final only after these M6 measurements are re-run with that milestone's final `draw()` (and `close()`, if it changes) and stay within 90 %:
-- the M6-a `draw()` rows (worst and typical) and the dependent M6-h fee rows;
-- the M6-a `close()` rows, M6-b (K frontier) and M6-c (B_MAX frontier), if `close()` changes (for example the R1 fix);
-- the M6-b `draw()` estimates at the K_MAX variants;
-- the M6-d `draw()` rows with the M_DRAW variants (they set m_max);
-- M6-g: the `close()` storage worst case if `close()` gains or loses an output, and the `draw()` storage supremum if `draw()` gains an output (for example a seed-proof object);
-- M6-j: the drawer sensitivity and byte budget (about 91,950 B before the worst `draw()` reaches 90 % of transient), and the drawer's stack headroom (4 free slots at check 24) whenever a value stays live across check 24.
+## M7 — Real seed
+Status: todo (ordered before testnet end to end by the owner, 2026-10-13; the entry is completed in its own session, which also lifts "randomness is parked" in `CLAUDE.md` and above)
 
-## M7 — Testnet-10 end to end
+Replaces the TEST-ONLY seed of `draw()` with a real seed source, following the direction in `docs/research/randomness-sources-on-kaspa.md` and its three open items, and fixes review R1 (the `close()` caller must no longer choose seed_ref). Done when (the scope is set by its spec):
+- the release-gate items it owns are closed: R1 (seed_ref choice), and the missed-draw fallback if the spec takes it;
+- K, R and m_max are re-confirmed (D83, spec 6 A5a; approved 2026-10-13): they count as final only after these M6 measurements are re-run with this milestone's final `draw()` (and `close()`, if it changes) and stay within 90 %:
+  - the M6-a `draw()` rows (worst and typical) and the dependent M6-h fee rows;
+  - the M6-a `close()` rows, M6-b (K frontier) and M6-c (B_MAX frontier), if `close()` changes (for example the R1 fix);
+  - the M6-b `draw()` estimates at the K_MAX variants;
+  - the M6-d `draw()` rows with the M_DRAW variants (they set m_max);
+  - M6-g: the `close()` storage worst case if `close()` gains or loses an output, and the `draw()` storage supremum if `draw()` gains an output (for example a seed-proof object);
+  - M6-j: the drawer sensitivity and byte budget (about 91,950 B before the worst `draw()` reaches 90 % of transient), and the drawer's stack headroom (4 free slots at check 24) whenever a value stays live across check 24.
+
+## M8 — Testnet-10 end to end
 Status: todo
 
 Done when several consecutive rounds run on testnet-10, including:

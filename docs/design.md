@@ -75,10 +75,10 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 | Counter leaf per 5-number key with per-bonus counts (8.2) | Proposed | M1 (buy), M3 (draw) |
 | Prize formula and solvency | Proposed; argued in 4.4 | Negative tests in prototype |
 | Game-size rule, jackpot fixing, boost hold-back | Decided; details proposed (4.6) | M2, M3 specs |
-| House vault settlement at draw, backer shares | Built and tested (M3 settlement, M5 shares; testnet-10 accepted) | Request batching and tuning in M6 |
+| House vault settlement at draw, backer shares | Built and tested (M3 settlement, M5 shares, M6 request minimums; testnet-10 accepted) | Request griefing residual and the q = 0 small-vault case on the release gate (M6, D87); batching out of scope |
 | Claim window of at least 7 days | Decided | — |
-| Reserve R, ticket deposit, largest K for `close()` | Measured lower bounds (feasibility Q4–Q5); M0 shapes accepted on testnet-10 up to K = 62 (Q7) | Final values in M6 |
-| Largest bundle per `buy()` (b_max) and m_max | **Open** | M1, M3, M6 measurements |
+| Reserve R, ticket deposit, largest K for `close()` | Measured with the real scripts in M6: d = 0.13 KAS final (D80); K = 16 and R = 1.69 KAS provisional (D83) | Re-confirmed at the end of the real-seed milestone (M6 A5a re-run rows) |
+| Largest bundle per `buy()` (b_max) and m_max | Measured in M6: B_MAX = 4 final; m_max = 50 provisional (D83) | m_max re-confirmed at the end of the real-seed milestone |
 | Which per-transaction mass limit the network relays | Resolved: the block limits, per transaction (feasibility Q7) | Re-run the testnet-10 probes on each rusty-kaspa bump |
 | Covenant family structure and shape policy | **Open** | M1 spec (section 6) |
 | Native randomness | **Parked** | Section 11 |
@@ -360,9 +360,10 @@ This settlement is exact, so backers' results are final at every draw. No vault 
   - Each request is later settled against that draw's record by `settle()`, by anyone (D77): a share position for a deposit, a payout for a withdrawal. Each settlement takes its pro-rata part of the record's *remaining* totals, rounded down, and the last settler of each side takes exactly what is left, so nothing is left as dust (D72). Amounts are fixed at the draw, so the owner's timing gives no option. A drained record is consumed and its R refunded to its funder.
   - There is no cancellation. A refund exists only if the target draw never happens (parked missed-draw item).
   - Because the price is set after the round's own settlement, knowing that round's seed early gives no advantage. The research doc's "lock before the seed" requirement (E4) is therefore not needed. *Flag: deviation from the research doc.*
-  - Requests serialize on the vault UTXO and must wait until the vault is VAULT_REQ_DELAY = 600 DAA old, so after every vault spend `draw()` has a window in which no request can race it. This allows at most one request per 600 DAA (about 1,440 a day), won by the highest fee; batching and request griefing are open for M6 (DECISIONS 2026-10-12, U-4, U-6).
+  - Requests serialize on the vault UTXO and must wait until the vault is VAULT_REQ_DELAY = 600 DAA old, so after every vault spend `draw()` has a window in which no request can race it. This allows at most one request per 600 DAA (about 1,440 a day), won by whoever is mined first. A deposit request needs D ≥ MIN_DEPOSIT = 10 KAS (D85). A withdrawal request takes the whole position, or w ≥ wmin shares and leaves a remainder ≥ wmin, where wmin = (S + VS) / q with q = (A + VA) / W_MIN_VALUE, W_MIN_VALUE = 10 KAS (wmin = 1 if q = 0): at the request-time price, every partial withdrawal and every remainder is worth about 10 KAS or more (vault check W4b; D86, O-M6-2). Request griefing is mitigated by cost only, each slot locking about 10 KAS plus R until the next settlement; the fee auction does not help at 10 BPS, because the first request is mined within about 0.5 s (testnet-10, D87, O-M6-1). The residual, and vaults holding less than 10 KAS (q = 0), are on the release gate; batching is out of scope.
 - **Rounding.** Shares round down on deposit and assets round down on withdrawal. A zero-share mint is impossible: `draw()` converts the deposits only if the aggregate mint gives every request at least one share; otherwise the record is in refund mode and each deposit settlement repays its deposit (D70). A withdrawal payout below P_MIN accrues in the request and is paid with its final settlement. Products of shares and prices use `mulfrac` (floor(a × r / c) without a 64-bit overflow, D73) and are range-checked (R8).
-- **Share-price attacks.** A virtual offset defends against share-price manipulation: the price is (A + VA) / (S + VS) with VS = 1,000 virtual shares and VA = 1 sompi, so no division by zero is possible. Genesis mints S₀ = floor(V₀ / SHARE_UNIT) shares (SHARE_UNIT = 1,000 sompi) into a share position owned by the deployer (D66). A floor on S₀ relative to VS is open for M6 (U-5).
+- **Share-price attacks.** A virtual offset defends against share-price manipulation: the price is (A + VA) / (S + VS) with VS = 1,000 virtual shares and VA = 1 sompi, so no division by zero is possible. Genesis mints S₀ = V₀ shares (SHARE_UNIT = 1 sompi) into a share position owned by the deployer (D66, D84). Genesis refuses V₀ < V0_MIN = 1 KAS and S₀ > SHARES_MAX, so the virtual shares own less than 0.001 % of the vault (U-5 closed). The residual deposit lock-out, at about 10⁹ × the genesis price, is on the release gate (D84).
+- **Genesis limits.** Genesis also refuses a ticket deposit d < D_FLOOR = 0.13 KAS (D81). It is exempt from the 90 % mass margin of every other transition and is refused above 100 % of any mass limit (U-M6-1): its storage depends only on deployer-chosen output values, and a failed genesis locks no funds.
 - **Inflows.** Inflows that raise the share price without minting shares, such as the house share, enter only at `draw()`.
 
 ## 5.5 Conservation
@@ -547,7 +548,7 @@ Anyone may submit a claim, because the payout script is fixed in the ticket; the
 |:----------------|:------------------------------------------------|
 | `return_deposit()` | Anyone. The ticket cannot read the claim deadline, because `draw()` sets it after the ticket exists. *Proposal (confirm in the M4 spec):* valid either (a) when co-spending any prize pool of the same round whose claim deadline has passed (lower-bound locktime; the pool is recreated unchanged), or (b) from T + D_ret. T is the round deadline stored in the ticket. D_ret is a committed delay of at least the allowed draw delay plus 7 days, which covers rounds whose pools were all absorbed. Consumes the ticket and pays d × b to its payout script. Unclaimed winning indices are forfeited, as they would be at absorption. If `draw()` is later than T + D_ret − 7 days, path (b) shortens the window; this belongs to the parked missed-draw item |
 | `set_params()` | Admin key only, once per round, caps checked in script. Writes the pending slot of the open round's controller (5.6) |
-| `request_deposit()` / `request_withdraw()` | Backer requests: spend the vault (once it is 600 DAA old), add to its pending totals and create a vault request. A deposit names any owner; a withdrawal needs the position owner's input and may be partial (5.4) |
+| `request_deposit()` / `request_withdraw()` | Backer requests: spend the vault (once it is 600 DAA old), add to its pending totals and create a vault request. A deposit names any owner and needs D ≥ 10 KAS; a withdrawal needs the position owner's input and takes the whole position, or w ≥ wmin with a remainder ≥ wmin (W4b, 5.4) |
 | `settle()` | Anyone. Settles one request against its draw's settlement record: a share position for a deposit (or the deposit back in refund mode), a payout for a withdrawal, with the request's R returned to its owner (5.4) |
 | `refresh()` | Any idle long-lived object may be re-spent into an identical successor after an idle delay, republishing its state (R3 keeps all times fixed). This covers the marker, pools, tickets, share positions, vault requests and settlement records; the vault needs none, because every `draw()` re-spends it |
 
@@ -574,7 +575,9 @@ For each round, the number of holdings of each exact combination. It is one of M
 
 ## 8.3 Why sharding
 
-Every purchase must spend one shard. With one global counter, all buyers would conflict. With K shards and free choice of shard, buyers spread out and proceed in parallel. K is limited by how many shards `close()` can consume in one transaction: 23–62 depending on shard script size, bound by transient mass (feasibility Q5). Larger K makes the `draw()` and `claim()` proofs larger.
+Every purchase must spend one shard. With one global counter, all buyers would conflict. With K shards and free choice of shard, buyers spread out and proceed in parallel. K is limited by how many shards `close()` can consume in one transaction, bound by transient mass (feasibility Q5; the M0 probes gave 23–62 depending on shard script size). With the real scripts, `close()` uses 86.8 / 91.9 / 97.1 / 102.2 % of transient at K = 16 / 17 / 18 / 19, so the largest K is 16 within 90 % and 18 within 100 % (M6, D83; provisional until the real-seed milestone). Larger K makes the `draw()` and `claim()` proofs larger.
+
+Purchases conflict when two buyers pick the same shard while its successor is not yet usable. A fresh buy finds its shard busy with probability a = λτ/K (shard utilisation; M6, D88). On testnet-10 a buy chained on an unaccepted successor was accepted after τ_chain = 0.919 s (median), and the successor was merged after τ_merge = 1.655 s. At K = 16 and λ = 1 buy/s that gives a first-attempt conflict rate of about 0.056 to 0.104.
 
 ## 8.4 Proofs after the close
 
@@ -668,16 +671,16 @@ M0 measured the building blocks with probe scripts (`docs/feasibility.md`, `docs
 
   > R = max(4C(K + 2) / L, 4C(K + 1) / (L − 10,101)), with C = 10¹² and L = 500,000
 
-  That is 1.44 KAS at K = 16, 2.72 KAS at K = 32 and 5.31 KAS at K = 64 (Q4). The first term is K + 2 fresh R-outputs with no input relief. The second is a controller that keeps a large boost pot while the caller's output is about 1 KAS; it binds from about 3.96 KAS (K ≥ 48). `draw()` has its own condition, which also counts its pools, its settlement record and its reserve refunds (Q4), and R must satisfy the tighter of the two;
-- the minimum ticket value at p = 1 KAS is 0.0828 KAS without a referral output, and 0.1045 KAS with the 0.1 KAS referral output (Q4);
+  That is 1.44 KAS at K = 16, 2.72 KAS at K = 32 and 5.31 KAS at K = 64 (Q4). The first term is K + 2 fresh R-outputs with no input relief. The second is a controller that keeps a large boost pot while the caller's output is about 1 KAS; it binds from about 3.96 KAS (K ≥ 48). `draw()` has its own condition, which also counts its pools, its settlement record and its reserve refunds (Q4), and R must satisfy the tighter of the two. With the real scripts (M6, D83) `close()` binds: its storage worst case has K + 3 fresh R-outputs, so R = 4C(K + 3) / (0.9 L) = 1.69 KAS at K = 16 (89.9 % measured); `draw()` alone needs 1.529 KAS. Genesis has K + 4 outputs at R but is exempt from the 90 % margin (U-M6-1). R = 1.69 KAS is provisional until the real-seed milestone;
+- the minimum ticket value at p = 1 KAS is 0.0828 KAS without a referral output, and 0.1045 KAS with the 0.1 KAS referral output (Q4). With the real scripts the ticket deposit is d = 0.13 KAS, final (D80): the b = 1 `buy()` with a 0.1 KAS referral then uses 84.5 % of storage (the 90 % floor is 0.1193 KAS, M6-e);
 - `close()` is bound by transient mass, not compute (Q5);
 - storage mass makes small standalone outputs invalid or throughput-limiting, which sets M_ref and the fee payout minimum.
 
 | Transition | Main cost driver | Still to measure |
 |:----------------|:----------------------------------|:-------------------------------------|
 | `buy()` | b Merkle paths of depth 18, each used twice, leaf bytes per combination; ticket and referral outputs | Shard script size per bundle slot and b_max (M1); M_ref (M1) |
-| `close()` | K shard inputs carrying the shard script, K + 2 fresh R-outputs | Largest K with the real shard script (M6) |
-| `draw()` | K paths and leaves, K × m_max count sums, pool outputs with fresh R | Script size, m_max (M3, M6); R for the pool count (feasibility Q4) |
+| `close()` | K shard inputs carrying the shard script, K + 2 fresh R-outputs | Measured in M6: largest K = 16 within 90 % (provisional, D83) |
+| `draw()` | K paths and leaves, K × m_max count sums, pool outputs with fresh R | Measured in M6: m_max = 50 within 90 % (provisional, D83); re-run with the real-seed drawer |
 | `claim()` | K paths and leaves, bundle index | Script and proof size (M4) |
 
 Platform limits: Appendix A.
@@ -690,7 +693,7 @@ Platform limits: Appendix A.
 - M0's `buy()`, claim and `close()` shapes, up to K = 62, were accepted and mined.
 
 Three consequences remain:
-- **Fees under load.** The mempool ranks transactions by fee per gram of the normalized maximum of compute, transient and storage mass (`mining/src/mempool/model/frontier/feerate_key.rs:86-98`). A shape near the storage limit therefore needs about 0.5 KAS to rank at the minimum feerate, while its relay floor is about 0.008 KAS for `buy()` and 0.13 KAS for `close()`. Caller rewards and wallet fee estimates must account for this (M2 spec).
+- **Fees under load.** The mempool ranks transactions by fee per gram of the normalized maximum of compute, transient and storage mass (`mining/src/mempool/model/frontier/feerate_key.rs:86-98`). A shape near the storage limit therefore needs about 0.5 KAS to rank at the minimum feerate. The relay floor ignores storage; measured with the real scripts it is 0.076–0.079 KAS for `buy()` and 0.434 KAS for `close()` (M6-h). A PAY claim at P_MIN costs about 7.55 × P_MIN at the priority floor (D82). Caller rewards and wallet fee estimates must account for this (M2 spec).
 - **The wallet SDK cap.** The official wallet SDK's transaction generator caps max(compute, storage) at 100,000 (`wallet/core/src/tx/mass.rs:25`). Our builder constructs protocol transactions itself.
 - **Re-checks.** The check is repeated with the real `buy()` and `close()` scripts in M1 and M2, and with `draw()` in M3 and M6. It is also re-run on each rusty-kaspa bump (`cargo run -p tn10 -- probe all`).
 
@@ -698,8 +701,9 @@ Three consequences remain:
 
 1. **One round, small K** (M1–M4). `buy()` with bundles, the counter leaf, the split and the referral output. `close()` with the game-size rule and admin parameters. `draw()` with a test-only seed, with the jackpot and second prize won and not won. `claim()` with K-leaf proofs and `return_deposit()`. Tests cover duplicates, an unheld winning combination, double claims and forged or under-reported counts.
 2. **House vault shares** (M5). Deposits and withdrawals across draws and the liability lock.
-3. **K shards and limits** (M6). Largest K, b_max and m_max with real scripts; purchase conflict rate.
-4. **Testnet-10** (M7). Several rounds including an m change, a referral, an admin change and the retention cases of section 9.
+3. **K shards and limits** (M6, done). Largest K, b_max and m_max with real scripts; purchase conflict rate.
+4. **Real seed** (M7). Replaces the test-only seed (section 11) and fixes the seed_ref choice at `close()`; re-confirms K, R and m_max.
+5. **Testnet-10** (M8). Several rounds including an m change, a referral, an admin change and the retention cases of section 9.
 
 No real-value launch while randomness is parked.
 
@@ -732,9 +736,9 @@ No real-value launch while randomness is parked.
 -   Shape policy and who pays fees (R2 options, M1 spec); late-buy bound (7.1).
 -   Refund paths for a round that cannot close or draw, and vault-request timeouts.
 -   Lower-tier money of other players in the whale check (4.6).
--   Vault request batching, request griefing and the S₀ floor (M6; the request and conversion transactions were built in M5).
+-   Request griefing residual (mitigated by cost only, D87) and partial withdrawals while the vault holds less than 10 KAS (O-M6-3): release gate. The S₀ floor is closed (D84); batching is out of scope (M6).
 -   Round length, given the roughly 30-hour data window (section 9).
--   Ticket deposit d and final R and K (M6).
+-   Final R, K and m_max: measured in M6 (R = 1.69 KAS, K = 16, m_max = 50), provisional until re-confirmed at the end of the real-seed milestone (D83). The ticket deposit d = 0.13 KAS is final (D80).
 -   Ticket transfer.
 -   Admin key rotation.
 -   Missed-draw fallback, and what happens to locked funds if `draw()` never succeeds (with randomness).
