@@ -1,11 +1,14 @@
 //! M7 Stage 4 (spec D103, A9): the anchor proof of a real testnet-10 block, rebuilt from RPC.
 //!
-//! `draw()` takes X (the first selected-chain block with DAA score >= D) and its selected
-//! parent P as 152 bytes each (spec A3): hash, parent_commit, activity_root,
-//! miner_payload_root, sp_timestamp, daa_score, blue_score. The drawer recomputes
+//! `draw()` takes X (the first selected-chain block with DAA score >= D) as 152 bytes (spec
+//! A3: hash, parent_commit, activity_root, miner_payload_root, sp_timestamp, daa_score,
+//! blue_score) and its selected parent P as the same fields without the hash (120 bytes; M7
+//! Stage 5 fix B), 272 in all. The drawer recomputes
 //! `SeqCommit = H_seq(parent_commit ‖ H_seq(activity_root ‖ H_seq(H_mc(ts ‖ daa ‖ bs) ‖ mpr)))`
-//! and compares it with `OpChainblockSeqCommit(hash)`. This module reads every field from
-//! the node and checks the recomputation against the header before anything is built.
+//! for both, compares X's with `OpChainblockSeqCommit(X.hash)` and P's with X's
+//! parent_commit. This module reads every field from the node (P's hash too, for the report
+//! and the local replay) and checks the recomputation against the header before anything is
+//! built.
 //!
 //! Sources (rusty-kaspa v2.1.0, `refs/rusty-kaspa-v2.1.0`):
 //! - `get_block(hash, include_transactions)` (`rpc/core/src/api/rpc.rs:230`): the header
@@ -270,7 +273,7 @@ pub async fn rpc_anchor(ctx: &Ctx, start: Hash, d: u64) -> Result<RpcAnchor, Str
     if x.selected_parent != ph {
         return Err(format!("X {xh}: selected parent {} != P {ph}", x.selected_parent));
     }
-    let proof = AnchorProof { x: x.fields, p: p.fields };
+    let proof = AnchorProof { x: x.fields, p: p.fields.preimage() };
     if !proof.consistent_with(d as i64) {
         return Err(format!("anchor X {xh} / P {ph} is not consistent with D = {d} (pc == x_pc, dX >= D, 0 <= dP < D)"));
     }

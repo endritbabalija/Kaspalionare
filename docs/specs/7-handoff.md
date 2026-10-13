@@ -445,3 +445,99 @@ The setup txids (genesis, buy, close, requests, settlements, the D10 negative ca
 - `cargo run -p tn10 --release -- anchor-check 300`: OK; 97 blocks, order [0] 97/97.
 - `cargo run -p tn10 --release -- probe draw-m7`, `probe void-m7`, `probe vault-m5`, `probe claim-m4`: all exit 0, all on the first attempt (no resolver timeouts).
 - `cargo build --workspace --tests -j 2`: finished; only the pre-existing `m0_mass` unused-variable warnings. `cargo test -p harness --lib -j 2`: 8 passed.
+
+### Stage 5 fix — on-chain void floor (A) and the 272-byte anchor without P.hash (B) (done; nothing committed)
+
+**What was done.** The two owner decisions after the covenant review: (A) review should-fix 1, the void floor `draw_window >= VOID_MIN` enforced by the drawer itself; (B) S1b-1, the second `OpChainblockSeqCommit` call (on P.hash) dropped and P.hash removed from the anchor proof, so no byte of the argument is unconstrained. Tests first (SA12, the SA2/SA4/SP2 rewrites, the mutant pin), then the script. `docs/design.md`, `docs/DECISIONS.md`, `docs/specs/7.md` untouched. No D104 stop rule fired.
+
+**Script changes (`covenants/drawer.sil`).**
+- New constant `int constant VOID_MIN = 864000;` (2F; comment cites `params.rs:424-426`, `bps.rs:92-93`, `constants.rs:70`). Check 1: `require(draw_window >= 0);` replaced by `require(draw_window >= VOID_MIN); // mut:M7V_floor` (check 1 runs on every spend, so a draw of a short-window instance fails too). No new local; nothing live across check 24.
+- `ANCHOR_LEN = 304` → **272**. Check 8: the P block no longer slices `pHash` and no longer calls `OpChainblockSeqCommit(pHash)` (tag M7A_pc retired); P's commitment is recomputed from offsets 152..272 and compared with `xPc` (M7A_pceq); `dP` reads `anchor[256..264]`. Header and check 8 comments updated.
+
+**New anchor layout (spec A3 as implemented; the spec text still says 304, see PENDING S5-2).**
+
+| bytes | field | block |
+|---|---|---|
+| 0..32 | hash (the seed source) | X |
+| 32..64 | parent_commit = SeqCommit(P) | X |
+| 64..96 | activity_root | X |
+| 96..128 | miner_payload_root | X |
+| 128..136 | sp_timestamp (8 LE) | X |
+| 136..144 | daa_score (8 LE) | X |
+| 144..152 | blue_score (8 LE) | X |
+| 152..184 | parent_commit = SeqCommit(sp(P)) | P |
+| 184..216 | activity_root | P |
+| 216..248 | miner_payload_root | P |
+| 248..256 | sp_timestamp (8 LE) | P |
+| 256..264 | daa_score (8 LE) | P |
+| 264..272 | blue_score (8 LE) | P |
+
+Check 8: `OpChainblockSeqCommit(X.hash) == H(X fields)` (M7A_xc), `H(P fields) == X.parent_commit` (M7A_pceq), `dX >= D` (M7A_dX), `dP < D` (M7A_dP). Every byte is constrained: X.hash by the opcode, X's preimage by the commitment equality, P's preimage by `pc == x_pc`.
+
+**Rust changes.**
+- `harness::chain`: `PREIMAGE_LEN = 120`, `ANCHOR_LEN = BLOCK_PROOF_LEN + PREIMAGE_LEN = 272` (re-exported); `proof_bytes(x, p)` = X's 152 bytes ‖ P's bytes from 32 on.
+- `lottery::anchor`: new `PreimageFields` (P's part: `LEN = 120`, `to_bytes`, `from_bytes`, `with_hash`, `seq_commit`); `BlockFields::preimage()`; `AnchorProof { x: BlockFields, p: PreimageFields }`; `from_bytes` parses 272 B. Module doc carries the layout and the reason.
+- `lottery::buy` (fix A, TEST-ONLY variant): `void_min_line()` (= `format!("int constant VOID_MIN = {};", game::VOID_MIN)`), `SHORT_VOID_LINE` (`int constant VOID_MIN = 0; // TEST-ONLY short void window (probe void-m7, D103): never deploy`), `short_void_drawer_source(src)` (asserts the line occurs exactly once, as a whole line, then `replacen`), `Sources::test_only_short_void(b_max)`, `Templates::test_only_short_void(b_max)` (cached separately), and `Templates.short_void_window: bool` (true iff the drawer source contains `SHORT_VOID_LINE`).
+- `lottery::genesis`: `templates()` = `Templates::get` unless `allow_short_void_window`, then the variant (the only route to it); `validate()` and `build()` use it; `validate_with(t)` refuses the variant without the flag and the flag without the variant (the production drawer would reject every draw and void of such an instance); new TEST-ONLY `set_test_only_short_void_window(draw_window)` (sets the flag and the window and re-points drawer pool/vault/ticket_tpl and vault record/request/position_tpl at the variant set: all of them commit to the drawer hash directly or not).
+- `tn10/src/cases.rs`: `void-m7` builds everything from `Templates::test_only_short_void` and calls `set_test_only_short_void_window(1_200)`, then checks that `g.templates()` is that set before `validate_with`; `draw-m7`, `vault-m5`, `claim-m4` keep the production set. `tn10/src/anchor.rs`: `AnchorProof { x, p: p.fields.preimage() }` (P's hash is still read from RPC for the report and the local replay); doc updated.
+- `lottery/src/draw.rs`: doc comments only (272 B).
+
+**Tests added / removed / changed.**
+- Added: `m7_attacks::sa12_void_floor_modelled` (Atk5 `sa12()` in `common::m7`: "SA12 void of an instance with draw_window = VOID_MIN - 1 at D + draw_window (M7V_floor)" on `void_base`, and "SA12 draw of an instance with draw_window = VOID_MIN - 1 (check 1 runs on every spend) (M7V_floor)" on `sa_base`, both `drawer:1`; in `all_atks7`, so ATTRIB/PREFLIGHT cover them); `m7_attacks::sa12_void_floor_on_chain` (the builder refuses the instance; `Chain::genesis_with(.., false)` deploys it; the void at D + VOID_MIN − 1 and a draw are rejected at input 0; positive control: `Chain::genesis` voids at D + VOID_MIN; negative control in memory: `Chain::genesis_with_templates(4, mutant5(["drawer:M7V_floor"]), .., false)` accepts the early void at every input); `m7_mutants::m7v_floor`, `m7v_floor_draw`, `m7a_pceq_p_field` ("SA4 P.daa_score altered by one bit (M7A_pceq)"); `genesis::tests::m7_void_floor_in_production_drawer_and_variant_only_via_flag` (drawer.sil has `int constant VOID_MIN = 864000;` exactly once and `require(draw_window >= VOID_MIN);`, not `SHORT_VOID_LINE`; the variant differs in exactly that line; `templates()` is `Templates::get` without the flag and the variant with it; `validate_with(variant)` without the flag is refused and `build_with` panics; mainnet/simnet refused with the flag; the deployed drawer output is the variant's spk); `common::m2::Chain::genesis_with_templates`; `common::m7::{P_AT, with_draw_window, sa12}`.
+- Removed: SA2 "an unknown P.hash with P's genuine preimage: BlockAlreadyPruned (M7A_pc)" (comment in `sa2()` says why) and `m7_mutants::m7a_pc`.
+- Changed: SA4 P-field strikes now flip P's fields at `152 + o − 32` and are labelled M7A_pceq (X's stay M7A_xc); SA4 swap re-expressed as "X and P swapped (P with its hash first, X's preimage as P): pc != x_pc (M7A_pceq)" = `block_bytes(P) ‖ block_bytes(X)[32..]`; SA4 lengths 303/305 → **271/273**; `m7a_len` uses 273; SP2's last window edge: pov = X.bs + F − 1 accepted (lock D and D + draw_window; it is past P's own window edge P.bs + F), pov = X.bs + F rejected with `BlockIsTooDeep` (was: P.bs + F − 1 accepted, X.bs + F − 1 rejected on P); SP1/SP11/SP13 text and an SP11 assertion that `preimage().seq_commit()` equals the block's; `every_m7_tag_is_tested`: spec list M7A_pc → M7V_floor, asserts M7A_pc is gone, pin stays **(14 tags, 16 lines)**; `m5_spec` (PREFLIGHT model): check 1 adds `draw_window >= VOID_MIN` from the drawer's own input state, check 8 drops the opcode on P.hash; `harness` `proof_bytes_layout` (272 B, P.hash absent, P's daa/bs at 256/264) and `anchored_has_x_and_p` (P's parent commitment at 152); `lottery::anchor` unit tests (272 / 271 / 273, `PreimageFields` round trip and commitment); `genesis::tests::m7_void_window_floor_and_test_only_flag` (the flag alone with the committed templates is refused; `set_test_only_short_void_window` accepted on testnet/devnet).
+- Not weakened: every former SA2/SA4 strike still exists except the P.hash one, whose target (the opcode call) no longer exists; the P preimage is still struck field by field.
+
+**Negative control (fix A, on disk).** `drawer.sil` backed up, the line `require(draw_window >= VOID_MIN); // mut:M7V_floor` deleted, `cargo test -p lottery --release --test m7_attacks -- sa12`: **0 passed, 2 failed**: `sa12_void_floor_on_chain` "ATTACK ACCEPTED by input 0", `sa12_void_floor_modelled` "ATTACK ACCEPTED (SA12 void of an instance with draw_window = VOID_MIN - 1 at D + draw_window (M7V_floor)) by input 0". Restored from the backup (`cmp` identical); both pass again. The in-memory control (`mutant5`) and the `m7v_floor`/`m7v_floor_draw` kills repeat this on every run.
+
+**Commands and results** (from `crates/`, release, `-j 2`).
+- `cargo build --workspace --tests --release -j 2`: clean (only the pre-existing `m0_mass` warnings).
+- `cargo test --release -j 2 --no-fail-fast` (workspace): **1,036 passed, 0 failed, 1 ignored** (the pre-existing m4_mutants ignore). Per suite: harness lib 8, covenant_smoke 3, m0_limits 3, m0_mass 5, m0_merkle 2, m0_shapes 6, m7_chain 8; lottery lib **42** (+1), m1_attacks 25, m1_buy 14, m1_measure 4, m1_mutants 11, m2_attacks 39, m2_close 8, m2_game 2, m2_measure 5, m2_mutants 25, m2_params 17, m3_attacks 19, m3_draw 21, m3_game 13, m3_measure 7, m3_mutants 91, m4_attacks 21, m4_claim 23, m4_game 4, m4_measure 8, m4_mutants 193 (+1 ignored), m5_attacks 21, m5_game 10, m5_measure 5, m5_mutants 261, m5_vault 15, m6_attacks 8, m6_conflict 3, m6_limits 8, m6_measure 10, m6_mutants 9, m7_attacks **19** (+2 SA12; SA11 from 4590e73 included), m7_measure 7, m7_mutants **19** (+3 −1), m7_seed 14; doctests 0.
+- `M5_ATTRIB=1 cargo test -p lottery --release --test m5_attacks --test m6_attacks --test m7_attacks -- --nocapture --test-threads=1`: **403 ATTRIB lines, 403 OK, 0 not OK** (402 − 1 SA2 P.hash + 2 SA12); suites 21 / 8 / 19 passed.
+- `M5_PREFLIGHT=1 cargo test -p lottery --release --test m5_attacks --test m6_attacks --test m5_vault --test m7_attacks -- --nocapture --test-threads=1`: **403 OK, 0 MISMATCH, 0 MODEL DISAGREES**, plus 4 SA3 information lines (2 bases × {BlockIsTooDeep, InvalidOpcode}); suites 21 / 15 / 8 / 19 passed. (Count with `grep -oE "PREFLIGHT .*"`: a `^PREFLIGHT` grep misses the first line of each test, which shares its line with the test name; Stage 2's "371 OK" was counted that way.)
+- `cargo test -p lottery --release --test m7_measure -- --nocapture --test-threads=1`: 7 passed.
+
+**Measurements (Stage 5 fix → Stage 3/previous M7 value).** `docs/costs.md` M7 section updated in place, with a "Stage 5 fix" paragraph listing the deltas.
+
+| row | Stage 5 fix | previous M7 |
+|---|---|---|
+| drawer redeem | **64,629 B** (code 64,492) | 64,643 (64,506) |
+| marker / controller redeem | 1,389 / 27,624 | same |
+| `draw()` worst: input 0 units / sigscript | 1,808,410 / 78,687 B | 1,809,407 / 78,733 |
+| `draw()` worst c / t / s | 206,523 / 527,012 / 71,009 = **41.3 / 52.7 / 14.2 %** | 206,569 / 527,196 / 71,009 (same %) |
+| `draw()` typical | 139,891 / 443,964 / 93,028 = 28.0 / 44.4 / 18.6 % | 139,937 / 444,148 |
+| void worst | 185,130 / 480,200 / 71,005 = 37.0 / 48.0 / 14.2 % | 185,144 / 480,256 |
+| void typical | 123,106 / 403,664 / 33,685 = 24.6 / 40.4 / 6.7 % | 123,120 / 403,720 |
+| vault leg units | 459,698 | 459,796 |
+| S covering the fee: draw worst / typical / void worst / typical | 52.70 / 44.40 / 48.02 / 40.37 KAS | 52.72 / 44.41 / 48.03 / 40.37 |
+| M6-b `draw()` estimates K_MAX 17 / 18 / 19 | 541,044 / 555,048 / 569,052 (54.1 / 55.5 / 56.9 %) | 541,228 / 555,232 / 569,236 (same %) |
+| M6-d drawer variants (m = 10 / 25 / 50; M_DRAW 25 at 10 / 25; K_MAX 17) | 204,843 / 205,423 / 206,523; 201,768 / 202,448; 208,760 compute (transient −184 each) | 204,889 / 205,469 / 206,569; 201,914 / 202,494; 208,806 |
+| drawer code at M_DRAW 25 / 50 / K_MAX 17 | 62,517 / 64,492 / 65,727 | 62,531 / 64,506 / 65,741 |
+| sensitivity slopes | 1.506 / 4.000 and 1.811 / 4.006 | same |
+| byte budget to 90 % (transient binding) | **93,096 B** (compute 134,418) | 93,050 (134,393) |
+| stack headroom at check 24 | **4** (5th → 245 > 244) | 4 |
+| `close()` K = 16, frontiers, M7-e (R) | 58.7 / 86.5 / 80.5 %; K 16; B_MAX 4; close storage 89.9 %; R 1.69 KAS | unchanged |
+
+D104: every final shape ≤ 90 %, `close()` K = 16 ≤ 90 %, stack headroom 4 = floor: **no stop**. K = 16, m_max = 50, B_MAX = 4, R = 1.69 KAS stay final.
+
+**Testnet-10** (balance 6,914.69 → **6,709.55** KAS; both probes exit 0 on the first attempt; `docs/tn10-mass-check.md` M7 has a new "Stage 5 fix re-run" subsection, the Stage 4 runs kept below it as history).
+
+| probe | key tx | txid | compute / transient / storage | fee |
+|---|---|---|---|---|
+| `draw-m7` (272-byte real anchor, D = 595,682,723; X `88fab88b…dd80` DAA = D, P `de5041b4…0730` DAA D − 2) | `draw()` | `9de5af6e4c2422988fa7b7a66913f9aa1d8bbda477ec920f4b04e7ab18840553` | 139,891 / 443,964 / 126,964 | 0.2221 KAS |
+| `void-m7` (TEST-ONLY flag + short-void drawer variant, draw_window 1,200, lock 595,685,909) | void | `736d5a15172fc56208ce9ec92974af3186010b4e42b7d671a0681b6cfe0ec9ce` | 123,103 / 403,652 / 50,204 | 0.2019 KAS |
+
+Setup txids: draw-m7 genesis `8b7c7aad…6df4`, buy `70fa1c9d…f82a`, close `e5d8914e…b6e6`; void-m7 genesis `835004fd…46c2`, buy `1fe01250…7c23`, close `17c49523…cfc9` (full ids in `docs/tn10-mass-check.md`). The typical draw equals the local row exactly; the void is 3 / 12 grams below the local production void because the variant's `VOID_MIN = 0` push is 3 B shorter.
+
+**Draft DECISIONS rows (PENDING; the orchestrator records them).**
+- PENDING S5-1 (review should-fix 1, owner decision; script): | 2026-10-13 | **The drawer enforces the void floor** (`drawer.sil` check 1: `require(draw_window >= VOID_MIN)`, `VOID_MIN = 864,000 = 2F`, tag M7V_floor; replaces `draw_window >= 0`). Before, the floor lived only in `GenesisCase::validate`, so an instance deployed with draw_window < 2F could void at D + draw_window while X was still drawable from some point of view (spec A5), letting a backer void a jackpot-hit round. Check 1 runs on every spend, so such an instance can neither void nor draw. Tests: SA12 (void and draw of a VOID_MIN − 1 instance rejected at drawer:1; chain test through the unchecked genesis with positive and negative controls), mutants `m7v_floor`, `m7v_floor_draw`. Stack headroom unchanged (4). | Implemented | M7 A4 check 1, D97 |
+- PENDING S5-2 (S1b-1 resolved, owner decision; script and format; **spec 7 D95/A3/A8 and design text say 304 B and list M7A_pc: propose an edit**): | 2026-10-13 | **The anchor proof is 272 B and the drawer calls `OpChainblockSeqCommit` once (on X.hash).** P is given as its preimage fields without P.hash (120 B after X's 152 B) and authenticated only by `H(P fields) == X.parent_commit` (KIP-21 §6.7), which already pinned P's whole preimage; P.hash was used for nothing else, and an unconstrained argument byte would let any relayer change the txid without changing the outcome. Tag M7A_pc retired (the M7 pin stays 14 tags / 16 lines with M7V_floor). The last admissible point of view becomes X.bs + F − 1 (as spec SP2 first said; S1b-2's P.bs + F − 1 is obsolete). Measured: drawer redeem −14 B, worst `draw()` −46 compute / −184 transient grams, percentages unchanged. | Implemented | M7 A3, A4 check 8, D95 |
+- PENDING S5-3 (TEST-ONLY tooling): | 2026-10-13 | **`void-m7` runs under a TEST-ONLY short-void drawer variant** compiled from `drawer.sil` with the one line `int constant VOID_MIN = 864000;` replaced by `= 0` (`buy::short_void_drawer_source`, asserted to match exactly once as a whole line; `Templates::test_only_short_void`, `Templates.short_void_window`). Only `GenesisCase::templates()` with `allow_short_void_window` selects it; `validate_with` refuses the variant without the flag and the flag without the variant, and the flag stays refused off testnet/devnet; `set_test_only_short_void_window` re-points the instance's template constants. Every production path and the default template set keep the 864,000 floor (`m7_void_floor_in_production_drawer_and_variant_only_via_flag`). | Implemented | D103 |
+- PENDING S5-4 (tests, mechanical): SA2's "unknown P.hash" strike and `m7a_pc` removed (their target no longer exists); SA4's P-field strikes re-labelled M7A_pceq and moved to the 272-byte offsets; SA4 swap re-expressed (P with its hash first, X's preimage second); lengths 271/273; SP2's edge = X.bs + F − 1 accepted, X.bs + F refused; `m5_spec` updated (check 1 floor, check 8 without the P opcode); new `m7a_pceq_p_field`; `Chain::genesis_with_templates`.
+- PENDING S5-5 (measured row, amends S3-1): the S3-1 numbers change only in the drawer rows: redeem 64,643 → 64,629 B; worst `draw()` 206,569 / 527,196 → 206,523 / 527,012 (41.3 / 52.7 / 14.2 %, unchanged); typical 139,891 / 443,964; void worst 185,130 / 480,200, typical 123,106 / 403,664; S covering the draw fee 52.70 / 44.40, void 48.02 / 40.37 KAS; drawer byte budget 93,096 B; stack headroom 4. Testnet-10 re-run: `draw-m7` `9de5af6e…0553` (139,891 / 443,964), `void-m7` `736d5a15…c9ce` (123,103 / 403,652, variant drawer).
+- Note for the orchestrator: PREFLIGHT counts were under-reported before (371 vs 403 now) because `^PREFLIGHT` misses the first line of each test; no verdict changed.
+
+**What the next stage must know.**
+- `docs/specs/7.md` (D95 "exactly 304 bytes", A2 ANCHOR_LEN 304, A3 anchor layout, A8 tag M7A_pc and SA2/SA4 wording, SP2 edge) and CLAUDE.md are not edited (rule); S5-2 proposes the spec edit.
+- The stack is still exactly at the D104 floor (4 slots).
+- The Stage 4 `vault-m5` and `claim-m4` testnet runs used the 304-byte proof; they were not re-run (not requested). Their code paths use the production template set and the new 272-byte proof (they share `round1_drawn_with` with `draw-m7`, which passed).

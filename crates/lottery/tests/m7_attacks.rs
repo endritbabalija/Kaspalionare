@@ -78,6 +78,11 @@ fn sa9_shape_modelled() {
     run5(sa9());
 }
 
+#[test]
+fn sa12_void_floor_modelled() {
+    run5(sa12());
+}
+
 // ---------------------------------------------------------------- SA3
 
 /// The finished `good` transaction run against another chain (`sim`; `None`: no accessor):
@@ -343,6 +348,63 @@ fn sa11_seed_offset_zero_never_closes() {
     let mut ok = Chain::genesis_with(4, |g| g.controller.seed_offset = 1, true);
     let (c, ops) = ok.close_case(900_000);
     ok.close(&c, ops, lottery::close::TEST_DEADLINE as u64 + 10);
+}
+
+// ---------------------------------------------------------------- SA12 (void floor, chain)
+
+/// A round of a chain closed (K = 4, nothing bought), ready to draw or void.
+fn closed(mut ch: Chain) -> Chain {
+    let t = ch.controller.1.deadline as u64;
+    let (mut cc, ops) = ch.close_case(t - 500);
+    cc.lock_time = t;
+    ch.close(&cc, ops, t + 10);
+    ch
+}
+
+/// SA12 (drawer check 1, M7 Stage 5 fix A; review should-fix 1): an instance deployed with
+/// draw_window = VOID_MIN - 1 = 2F - 1 through the TEST-ONLY unchecked genesis (`validate()`
+/// refuses it). Its void at lock_time = D + draw_window would be valid while X can still be
+/// drawable (spec A5: only from D + 2F is the anchor outside the opcode window from every
+/// point of view), so a backer could void a jackpot-hit round. The drawer rejects that void,
+/// and a draw of the same instance (check 1 runs on every spend), at input 0. Positive
+/// control: a VOID_MIN instance voids at D + VOID_MIN. Negative control: the same chain under
+/// the drawer with the floor deleted (`mutant5(["drawer:M7V_floor"])`, in memory) accepts the
+/// early void.
+#[test]
+fn sa12_void_floor_on_chain() {
+    use lottery::game::VOID_MIN;
+    let short = |g: &mut lottery::genesis::GenesisCase| g.drawer.draw_window = VOID_MIN - 1;
+    // The builder refuses the instance.
+    let mut ch = Chain::genesis(4);
+    let mut g = lottery::genesis::GenesisCase::new_with(4, vec![], &ch.t);
+    short(&mut g);
+    assert!(g.validate().unwrap_err().contains("VOID_MIN"));
+    // Deployed anyway (unchecked): the void at D + draw_window and a draw are rejected by the
+    // drawer at input 0.
+    let mut bad = closed(Chain::genesis_with(4, short, false));
+    assert_eq!(bad.drawer.1.draw_window, VOID_MIN - 1);
+    let d = bad.anchor_d();
+    let (v, ops) = bad.void_case(&[], (d + VOID_MIN + 1_000) as u64);
+    assert_eq!(v.lock_time as i64, d + VOID_MIN - 1, "the void lock D + draw_window, one DAA before D + 2F");
+    let vb = bad.draw_built(&v, ops);
+    let e = reject_at(&vb, DRW);
+    println!("SA12 void at D + 2F - 1 rejected at input 0: {e:?}");
+    let (c, ops) = bad.draw_case(lottery::draw::TEST_X_HASH, &[], (d + VOID_MIN + 1_000) as u64);
+    let db = bad.draw_built(&c, ops);
+    let e = reject_at(&db, DRW);
+    println!("SA12 draw of the same instance rejected at input 0: {e:?}");
+    // Positive control: the VOID_MIN instance voids at D + VOID_MIN.
+    ch = closed(ch);
+    assert_eq!(ch.drawer.1.draw_window, VOID_MIN);
+    let f = ch.void();
+    assert_eq!(f.tx.lock_time as i64, ch.drawer.1.draw_window + d, "void at D + VOID_MIN (same D: same close DAA)");
+    // Negative control: the floor deleted, the early void is accepted by every input.
+    let t = common::mutants::mutant5(&["drawer:M7V_floor"]);
+    let mut m = closed(Chain::genesis_with_templates(4, t, short, false));
+    let d = m.anchor_d();
+    let (v, ops) = m.void_case(&[], (d + VOID_MIN + 1_000) as u64);
+    m.draw(&v, ops, v.lock_time + 10);
+    println!("SA12 negative control: without `require(draw_window >= VOID_MIN)` the void at D + 2F - 1 is accepted");
 }
 
 // ---------------------------------------------------------------- structure (no scripts)

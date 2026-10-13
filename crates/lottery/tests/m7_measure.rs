@@ -124,7 +124,7 @@ fn close_k_with(k: usize, t: &Templates) -> CloseCase {
 }
 
 /// The worst draw (DP21 at K, m, a = A_MAX, np = 7, F_MAX funding inputs, cap binding with
-/// the record) against templates `t`, with the 304-byte anchor (spec M7 A3).
+/// the record) against templates `t`, with the 272-byte anchor (spec M7 A3, Stage 5 fix B).
 fn worst_draw_with(t: &Templates, k: usize, m: i64) -> DrawCase {
     let c = with_pending(dp21_with(t, k, m, A_MAX, F_MAX, 7), Pending::Cap);
     assert_eq!(c.anchor_bytes().len(), harness::ANCHOR_LEN);
@@ -201,7 +201,7 @@ fn m7a_sizes_draw_masses_and_fees() {
 
     let mut rows = vec![];
     let (f, _) = run_draw(&worst_draw_with(&t, K_FINAL, M_DRAW), t.clone());
-    rows.push(Row::new(format!("draw worst (DP21 K = {K_FINAL}, m = {M_DRAW}, a = {A_MAX}, np = 7, {F_MAX} funding inputs, cap binding, record, anchor 304 B)"), &f, Some(2)));
+    rows.push(Row::new(format!("draw worst (DP21 K = {K_FINAL}, m = {M_DRAW}, a = {A_MAX}, np = 7, {F_MAX} funding inputs, cap binding, record, anchor 272 B)"), &f, Some(2)));
     let (f, _) = run_draw(&typical_draw(), t.clone());
     rows.push(Row::new(format!("draw typical (K = {K_FINAL}, m = 10, a = 0, np = 3, no record)"), &f, Some(2)));
     println!("\nM7-a: draw() with the anchor proof (fees at 100 sompi per gram)\n{TABLE_HEAD}");

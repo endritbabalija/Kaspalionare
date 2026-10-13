@@ -434,7 +434,12 @@ impl Chain {
     /// builder's `validate()` is bypassed (TEST-ONLY `build_unchecked_for_tests`), so an
     /// attack can deploy an instance the builder refuses.
     pub fn genesis_with(k: usize, edit: impl FnOnce(&mut GenesisCase), checked: bool) -> Self {
-        let t = tpl();
+        Self::genesis_with_templates(k, tpl(), edit, checked)
+    }
+
+    /// `genesis_with` under the templates `t` (a mutant set for a negative control, or the
+    /// TEST-ONLY short-void variant); every later step of the chain uses `t`.
+    pub fn genesis_with_templates(k: usize, t: Arc<Templates>, edit: impl FnOnce(&mut GenesisCase), checked: bool) -> Self {
         let mut ledger = Ledger::new();
         let op = ledger.fund(lottery::genesis::GENESIS_FUNDING, funding_spk(), 100);
         let entry = ledger.get(&op).unwrap().clone();

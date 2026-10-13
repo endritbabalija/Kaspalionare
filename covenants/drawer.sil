@@ -5,10 +5,11 @@ pragma silverscript ^0.1.0;
 //
 // Spec M7 (D93-D105): the seed is the hash of the anchor block X, the first selected-chain
 // block with DAA score >= D = (the marker's creation DAA score) + seed_offset, proven in
-// script with OpChainblockSeqCommit on X and on its selected parent P and the KIP-21
-// preimages of both commitments (check 8). An empty anchor is a void (D96): no winners,
-// valid from D + draw_window. The drawer is deployed on testnet or devnet only until the
-// release gate (D100: the anchor miner's withholding bias is OPEN).
+// script with OpChainblockSeqCommit on X, the KIP-21 preimage of X's commitment, and the
+// preimage of its selected parent P's commitment, which X's preimage commits to (check 8).
+// An empty anchor is a void (D96): no winners, valid from D + draw_window, and
+// draw_window >= VOID_MIN = 2F (check 1, D97). The drawer is deployed on testnet or devnet
+// only until the release gate (D100: the anchor miner's withholding bias is OPEN).
 //
 // Route of trust (D38): CONTROLLER_TPL is a constructor constant; pool_tpl and vault_tpl
 // are state (instance constants set at genesis, copied unchanged); the marker template
@@ -79,9 +80,17 @@ contract Drawer(
     int constant MIN_DEPOSIT = 1000000000;
     int constant SHARES_MAX = 4611686018427386904;
     int constant ASSETS_MAX = 4611686018427387903;
-    // Spec M7 A2/A3: the anchor proof, 152 bytes for X then 152 for P (hash, parent_commit,
-    // activity_root, miner_payload_root, sp_timestamp, daa_score, blue_score).
-    int constant ANCHOR_LEN = 304;
+    // Spec M7 A2/A3: the anchor proof, 152 bytes for X (hash, parent_commit, activity_root,
+    // miner_payload_root, sp_timestamp, daa_score, blue_score) then 120 for P (the same
+    // fields without P.hash: P is authenticated only by SeqCommit(P) == X.parent_commit, so
+    // no byte of the argument is unconstrained; M7 Stage 5 fix B).
+    int constant ANCHOR_LEN = 272;
+    // Spec M7 D97: the void delay and claim-deadline offset is at least 2F (F = 432,000, the
+    // mainnet finality depth, rusty-kaspa v2.1.0 consensus/core/src/config/params.rs:424-426,
+    // bps.rs:92-93, constants.rs:70), so at tx.daa >= D + draw_window the anchor is outside
+    // the opcode window from every point of view (spec A5) and a void never overlaps a valid
+    // draw. game::VOID_MIN. (M7 Stage 5 fix A: enforced here, not only by the builder.)
+    int constant VOID_MIN = 864000;
 
     byte role = 0x0a;
     int round = init_round;
@@ -319,7 +328,7 @@ contract Drawer(
         require(f_min <= F_MIN_MAX);
         require(claim_window >= 0);
         require(claim_window < DAA_MAX);
-        require(draw_window >= 0);
+        require(draw_window >= VOID_MIN); // mut:M7V_floor
         require(draw_window < DAA_MAX);
         require(ctrl_pl >= 0);
         require(ctrl_pl <= SCRIPT_MAX);
@@ -501,10 +510,11 @@ contract Drawer(
         // Checks 8-10 share one block (rank and the OR of the count strings are dropped at
         // its end); the attribution tool closes open blocks when it truncates.
         {
-        // ==== check 8: anchor and seed (spec M7 A4, D93-D95). Draw: X and P are chain blocks
-        // inside the opcode's window whose KIP-21 preimages (consensus/seq-commit/src/
-        // hashing.rs:80-84, 152-173) recompute their commitments; P is X's selected parent
-        // (SeqCommit(X) commits to SeqCommit(sp(X)), KIP-21 6.7); dX >= D > dP, so X is the
+        // ==== check 8: anchor and seed (spec M7 A4, D93-D95). Draw: X is a chain block inside
+        // the opcode's window whose KIP-21 preimage (consensus/seq-commit/src/hashing.rs:80-84,
+        // 152-173) recomputes its commitment; P's preimage recomputes the parent commitment X
+        // commits to, so P is X's selected parent (SeqCommit(X) commits to SeqCommit(sp(X)),
+        // KIP-21 6.7; P's hash is not needed, M7 Stage 5 fix B); dX >= D > dP, so X is the
         // first chain block with DAA score >= D. h = blake2b("KLOT/seed" || cov || round
         // (8 B LE) || X.hash); rank = u56(h[0..7]) mod N; bonus = u56(h[7..14]) mod m + 1
         // (game::seed_numbers); win5 canonical with that rank. Void (D96): win5 = 0, no
@@ -532,19 +542,19 @@ contract Drawer(
                     require(OpChainblockSeqCommit(xHash) == xc); // mut:M7A_xc
                 }
                 {
-                    byte[32] pHash = byte[32](anchor.slice(152, 184));
-                    byte[32] ctx = blake3WithKey(anchor.slice(280, 304), kMc);
-                    byte[32] pcd = blake3WithKey(byte[](ctx) + anchor.slice(248, 280), kSeq);
-                    byte[32] sr = blake3WithKey(anchor.slice(216, 248) + byte[](pcd), kSeq);
-                    byte[32] pc = blake3WithKey(anchor.slice(184, 216) + byte[](sr), kSeq);
-                    require(OpChainblockSeqCommit(pHash) == pc); // mut:M7A_pc
+                    // P without its hash: parent_commit 152, activity_root 184,
+                    // miner_payload_root 216, sp_timestamp 248, daa_score 256, blue_score 264.
+                    byte[32] ctx = blake3WithKey(anchor.slice(248, 272), kMc);
+                    byte[32] pcd = blake3WithKey(byte[](ctx) + anchor.slice(216, 248), kSeq);
+                    byte[32] sr = blake3WithKey(anchor.slice(184, 216) + byte[](pcd), kSeq);
+                    byte[32] pc = blake3WithKey(anchor.slice(152, 184) + byte[](sr), kSeq);
                     require(pc == xPc); // mut:M7A_pceq
                 }
                 // The DAA scores as committed (8 bytes LE); a value >= 2^63 reads as negative
                 // and fails dX >= D; P's is pinned by pc == x_pc.
                 int dRef = OpTxInputDaaScore(1) + ctrl.seed_offset;
                 int dX = OpBin2Num(anchor.slice(136, 144));
-                int dP = OpBin2Num(anchor.slice(288, 296));
+                int dP = OpBin2Num(anchor.slice(256, 264));
                 require(dX >= dRef); // mut:M7A_dX
                 require(dP < dRef); // mut:M7A_dP
             }

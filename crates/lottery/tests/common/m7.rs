@@ -167,9 +167,13 @@ fn proof(c: &DrawCase, x: &SimBlock, p: &SimBlock) -> Vec<u8> {
     c.chain().proof_bytes(x, p)
 }
 
-/// Field offsets inside one 152-byte block of the anchor (spec M7 A3).
+/// Field offsets inside X's 152 bytes of the anchor (spec M7 A3). P's fields follow at 152
+/// without P.hash (M7 Stage 5 fix B), so P's field at X-offset `o` is at 152 + o - 32.
 pub const FIELDS: [(&str, usize); 6] =
     [("parent_commit", 32), ("activity_root", 64), ("miner_payload_root", 96), ("sp_timestamp", 128), ("daa_score", 136), ("blue_score", 144)];
+
+/// Offset of P's preimage fields in the anchor (after X's 152 bytes; P.hash is not in it).
+pub const P_AT: usize = harness::BLOCK_PROOF_LEN;
 
 // ---------------------------------------------------------------- SA1
 
@@ -196,6 +200,11 @@ pub fn sa1() -> Vec<Atk5> {
 // ---------------------------------------------------------------- SA2
 
 /// SA2 (check 8: the opcode, pc == x_pc): a block that is not the selected chain's anchor.
+///
+/// M7 Stage 5 fix B removed the strike "an unknown P.hash with P's genuine preimage:
+/// BlockAlreadyPruned (M7A_pc)": the anchor no longer carries P.hash and the drawer makes no
+/// opcode call on it (P is authenticated by `pc == x_pc` alone; a wrong P preimage is SA4,
+/// a P that is not X's selected parent is the M7A_pceq strike below).
 pub fn sa2() -> Vec<Atk5> {
     vec![
         Atk5::new("SA2 a known side block N at DAA D whose selected parent is P: BlockNotSelected (M7A_xc)", DRW, "drawer:8", sa_base()).dr(|c| {
@@ -213,21 +222,23 @@ pub fn sa2() -> Vec<Atk5> {
             a[..32].copy_from_slice(&[0xee; 32]);
             c.lie.anchor = Some(a);
         }),
-        Atk5::new("SA2 an unknown P.hash with P's genuine preimage: BlockAlreadyPruned (M7A_pc)", DRW, "drawer:8", sa_base()).built(|b, _| anchor_arg(b)[152..184].copy_from_slice(&[0xee; 32])),
     ]
 }
 
 // ---------------------------------------------------------------- SA4
 
-/// SA4 (checks 1 and 8: xc, pc, dX, dP): a wrong preimage: each field of X and of P altered by
-/// one bit, X's DAA forged to D for the block whose real DAA is D - 1, X and P swapped, the
-/// anchor 303 and 305 bytes long.
+/// SA4 (checks 1 and 8: xc, pceq, dX, dP): a wrong preimage: each field of X and of P altered
+/// by one bit (X: the opcode's commitment differs, M7A_xc; P: its recomputed commitment differs
+/// from X's parent_commit, M7A_pceq; since M7 Stage 5 fix B there is no opcode call on P), X's
+/// DAA forged to D for the block whose real DAA is D - 1, X and P swapped, the anchor 271 and
+/// 273 bytes long (ANCHOR_LEN = 272).
 pub fn sa4() -> Vec<Atk5> {
     let mut v = vec![];
-    for (blk, base, tag) in [("X", 0usize, "M7A_xc"), ("P", 152, "M7A_pc")] {
-        for (name, off) in FIELDS {
-            v.push(Atk5::new(format!("SA4 {blk}.{name} altered by one bit ({tag})"), DRW, "drawer:8", sa_base()).built(flip(base + off)));
-        }
+    for (name, off) in FIELDS {
+        v.push(Atk5::new(format!("SA4 X.{name} altered by one bit (M7A_xc)"), DRW, "drawer:8", sa_base()).built(flip(off)));
+    }
+    for (name, off) in FIELDS {
+        v.push(Atk5::new(format!("SA4 P.{name} altered by one bit (M7A_pceq)"), DRW, "drawer:8", sa_base()).built(flip(P_AT + off - 32)));
     }
     v.push(Atk5::new("SA4 P (real DAA D - 1) as X with its DAA field forged to D, its parent as P (M7A_xc)", DRW, "drawer:8", sa_base()).dr(|c| {
         let s = c.chain();
@@ -236,16 +247,20 @@ pub fn sa4() -> Vec<Atk5> {
         a[136..144].copy_from_slice(&(c.d() as u64).to_le_bytes());
         c.lie.anchor = Some(a);
     }));
-    v.push(Atk5::new("SA4 the fields of X and P swapped (P first): pc != x_pc (M7A_pceq)", DRW, "drawer:8", sa_base()).dr(|c| {
-        let a = c.anchor_bytes();
-        c.lie.anchor = Some([&a[152..304], &a[..152]].concat());
+    // In the 272-byte layout the swap puts P (with its hash, as the claimed anchor) first and
+    // X's preimage (without X.hash) in P's place: the opcode accepts P's own commitment, the
+    // recomputed "parent" commitment is X's, not P's parent's, and the seed follows P.hash.
+    v.push(Atk5::new("SA4 X and P swapped (P with its hash first, X's preimage as P): pc != x_pc (M7A_pceq)", DRW, "drawer:8", sa_base()).dr(|c| {
+        let s = c.chain();
+        let (x, p) = s.anchor_for(c.d() as u64);
+        c.lie.anchor = Some([&s.block_bytes(&p)[..], &s.block_bytes(&x)[32..]].concat());
     }));
-    v.push(Atk5::new("SA4 anchor length 303 (the last byte dropped) (M7A_len)", DRW, "drawer:1", sa_base()).dr(|c| {
+    v.push(Atk5::new("SA4 anchor length 271 (the last byte dropped) (M7A_len)", DRW, "drawer:1", sa_base()).dr(|c| {
         let mut a = c.anchor_bytes();
         a.pop();
         c.lie.anchor = Some(a);
     }));
-    v.push(Atk5::new("SA4 anchor length 305 (a zero byte appended) (M7A_len)", DRW, "drawer:1", sa_base()).dr(|c| {
+    v.push(Atk5::new("SA4 anchor length 273 (a zero byte appended) (M7A_len)", DRW, "drawer:1", sa_base()).dr(|c| {
         let mut a = c.anchor_bytes();
         a.push(0);
         c.lie.anchor = Some(a);
@@ -346,7 +361,7 @@ pub fn sa6() -> Vec<Atk5> {
 
 // ---------------------------------------------------------------- SA7
 
-/// SA7 (checks 7, 8, 12, 14, 15, 20, 23): void misuse. (A 304-byte anchor with lock_time >= D +
+/// SA7 (checks 7, 8, 12, 14, 15, 20, 23): void misuse. (A 272-byte anchor with lock_time >= D +
 /// 2F is a draw, not a void: SP2's last point and SA3.)
 pub fn sa7() -> Vec<Atk5> {
     vec![
@@ -444,10 +459,40 @@ pub fn sa9() -> Vec<Atk5> {
     ]
 }
 
+// ---------------------------------------------------------------- SA12 (void floor)
+
+/// `c` as the round of an instance whose drawer has draw_window = `dw` (a drawer UTXO the
+/// builder's `validate()` would refuse; the drawer' output keeps it), lock re-fixed.
+pub fn with_draw_window(mut c: DrawCase, dw: i64) -> DrawCase {
+    c.drawer.draw_window = dw;
+    c.fix_lock_time();
+    c
+}
+
+/// SA12 (check 1; M7 Stage 5 fix A, review should-fix 1): the void floor on chain. An instance
+/// with draw_window = VOID_MIN - 1 (= 2F - 1) could void at D + draw_window while X is still
+/// drawable from some point of view (spec A5), so a backer could void a jackpot-hit round.
+/// The drawer's check 1 requires draw_window >= VOID_MIN on every spend: the void at D +
+/// draw_window and a draw of that instance are both rejected there. (The good bases are the
+/// VOID_MIN instances of `void_base` / `sa_base`; the chain-level test with the unchecked
+/// genesis and the negative control are `sa12_*` in `m7_attacks.rs`.)
+pub fn sa12() -> Vec<Atk5> {
+    let short = lottery::game::VOID_MIN - 1;
+    vec![
+        Atk5::new("SA12 void of an instance with draw_window = VOID_MIN - 1 at D + draw_window (M7V_floor)", DRW, "drawer:1", void_base()).dr(move |c| {
+            *c = with_draw_window(c.clone(), short);
+            assert_eq!(c.lock_time, c.d() as u64 + short as u64);
+        }),
+        Atk5::new("SA12 draw of an instance with draw_window = VOID_MIN - 1 (check 1 runs on every spend) (M7V_floor)", DRW, "drawer:1", sa_base()).dr(move |c| {
+            *c = with_draw_window(c.clone(), short);
+        }),
+    ]
+}
+
 // ---------------------------------------------------------------- registry
 
 pub fn all_atks7() -> Vec<Atk5> {
-    [sa1(), sa2(), sa4(), sa5(), sa6(), sa7(), sa8(), sa9()].into_iter().flatten().collect()
+    [sa1(), sa2(), sa4(), sa5(), sa6(), sa7(), sa8(), sa9(), sa12()].into_iter().flatten().collect()
 }
 
 pub fn atk7(id: &str) -> Atk5 {

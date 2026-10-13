@@ -1,15 +1,24 @@
 //! The anchor proof of `draw()` (spec M7 D95, A3, A9): the KIP-21 preimage fields of the
-//! anchor block X (the first selected-chain block with DAA score >= D) and of its selected
-//! parent P, 152 bytes each, 304 in all. The drawer recomputes both commitments with
-//! `blake3WithKey` and compares them with `OpChainblockSeqCommit` (check 8); this module
-//! builds and parses the bytes and computes the same commitment off-chain.
+//! anchor block X (the first selected-chain block with DAA score >= D), with X.hash, and the
+//! preimage fields of its selected parent P, without P.hash: 152 + 120 = 272 bytes. The
+//! drawer recomputes both commitments with `blake3WithKey`, compares X's with
+//! `OpChainblockSeqCommit(X.hash)` and P's with X's committed parent commitment (check 8);
+//! this module builds and parses the bytes and computes the same commitments off-chain.
 //!
-//! Shared by the tests (from `harness::ChainSim`) and `tn10` (from RPC, Stage 4).
+//! M7 Stage 5 fix B (was 304 bytes, with P.hash and a second opcode call on it): `pc == x_pc`
+//! alone pins P's whole preimage (X's commitment is opcode-authenticated and commits to
+//! SeqCommit(P), KIP-21 §6.7), and P.hash was used for nothing else. Dropping it leaves no
+//! unconstrained byte in the argument: an unchecked byte would let any relayer change the
+//! txid without changing the outcome.
 //!
-//! Layout per block (A3; field order = byte order):
-//!   0 hash (32) | 32 parent_commit = SeqCommit(selected parent) (32) | 64 activity_root (32) |
-//!   96 miner_payload_root (32) | 128 sp_timestamp (8 LE) | 136 daa_score (8 LE) |
-//!   144 blue_score (8 LE)
+//! Shared by the tests (from `harness::ChainSim`) and `tn10` (from RPC).
+//!
+//! Layout (A3; field order = byte order):
+//!   X:   0 hash (32) | 32 parent_commit = SeqCommit(P) (32) | 64 activity_root (32) |
+//!        96 miner_payload_root (32) | 128 sp_timestamp (8 LE) | 136 daa_score (8 LE) |
+//!        144 blue_score (8 LE)
+//!   P: 152 parent_commit (32) | 184 activity_root (32) | 216 miner_payload_root (32) |
+//!      248 sp_timestamp (8 LE) | 256 daa_score (8 LE) | 264 blue_score (8 LE)   (272 total)
 //!
 //! Commitment (KIP-21 §6.5.1, §6.6, §6.7; rusty-kaspa v2.1.0
 //! `consensus/seq-commit/src/hashing.rs:80-84, 153-173`):
@@ -19,7 +28,7 @@
 //! `kaspa_hashes` hashers in `harness`, SP11). The function here is a separate implementation
 //! over raw bytes; a unit test pins it equal to `harness::chain::seq_commit_with_parent`.
 
-use harness::chain::{ANCHOR_LEN, BLOCK_PROOF_LEN, K_MC, K_SEQ};
+use harness::chain::{ANCHOR_LEN, BLOCK_PROOF_LEN, K_MC, K_SEQ, PREIMAGE_LEN};
 use harness::{ChainSim, SimBlock};
 
 /// One block's proof fields (spec A3).
@@ -80,6 +89,69 @@ impl BlockFields {
     pub fn seq_commit(&self) -> [u8; 32] {
         seq_commit(self)
     }
+
+    /// The commitment preimage fields (everything but the hash): P's part of the proof.
+    pub fn preimage(&self) -> PreimageFields {
+        PreimageFields {
+            parent_commit: self.parent_commit,
+            activity_root: self.activity_root,
+            miner_payload_root: self.miner_payload_root,
+            sp_timestamp: self.sp_timestamp,
+            daa_score: self.daa_score,
+            blue_score: self.blue_score,
+        }
+    }
+}
+
+/// A block's commitment preimage fields without its hash (P's part of the anchor proof, M7
+/// Stage 5 fix B): 120 bytes, the A3 block layout from offset 32 on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreimageFields {
+    pub parent_commit: [u8; 32],
+    pub activity_root: [u8; 32],
+    pub miner_payload_root: [u8; 32],
+    pub sp_timestamp: u64,
+    pub daa_score: u64,
+    pub blue_score: u64,
+}
+
+impl PreimageFields {
+    pub const LEN: usize = PREIMAGE_LEN;
+
+    /// The 120 bytes: parent_commit, activity_root, miner_payload_root, sp_timestamp,
+    /// daa_score, blue_score.
+    pub fn to_bytes(&self) -> [u8; PREIMAGE_LEN] {
+        let mut out = [0u8; PREIMAGE_LEN];
+        out.copy_from_slice(&self.with_hash([0; 32]).to_bytes()[32..]);
+        out
+    }
+
+    /// Parse exactly 120 bytes.
+    pub fn from_bytes(b: &[u8]) -> Result<Self, String> {
+        if b.len() != PREIMAGE_LEN {
+            return Err(format!("preimage fields: {} bytes, expected {PREIMAGE_LEN}", b.len()));
+        }
+        Ok(BlockFields::from_bytes(&[&[0u8; 32][..], b].concat())?.preimage())
+    }
+
+    /// The block fields with `hash`.
+    pub fn with_hash(&self, hash: [u8; 32]) -> BlockFields {
+        BlockFields {
+            hash,
+            parent_commit: self.parent_commit,
+            activity_root: self.activity_root,
+            miner_payload_root: self.miner_payload_root,
+            sp_timestamp: self.sp_timestamp,
+            daa_score: self.daa_score,
+            blue_score: self.blue_score,
+        }
+    }
+
+    /// The KIP-21 commitment recomputed from these fields (check 8 compares P's with
+    /// X.parent_commit; the hash is not part of the preimage).
+    pub fn seq_commit(&self) -> [u8; 32] {
+        seq_commit(&self.with_hash([0; 32]))
+    }
 }
 
 /// `H_seq(a ‖ b)`.
@@ -103,12 +175,12 @@ pub fn seq_commit(f: &BlockFields) -> [u8; 32] {
     h_seq(&f.parent_commit, &sr)
 }
 
-/// The anchor proof: X (the first chain block with DAA score >= D) and P (its selected
-/// parent), spec D95.
+/// The anchor proof: X (the first chain block with DAA score >= D) and the preimage fields of
+/// P (its selected parent, without P.hash), spec D95 and M7 Stage 5 fix B.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnchorProof {
     pub x: BlockFields,
-    pub p: BlockFields,
+    pub p: PreimageFields,
 }
 
 impl AnchorProof {
@@ -117,10 +189,10 @@ impl AnchorProof {
     /// The proof of the anchor for reference `d` on `sim` (panics if the sim has none).
     pub fn from_sim(sim: &ChainSim, d: u64) -> Self {
         let (x, p) = sim.anchor_for(d);
-        Self { x: BlockFields::from_sim(sim, &x), p: BlockFields::from_sim(sim, &p) }
+        Self { x: BlockFields::from_sim(sim, &x), p: BlockFields::from_sim(sim, &p).preimage() }
     }
 
-    /// The 304-byte `anchor` argument: X fields ‖ P fields.
+    /// The 272-byte `anchor` argument: X fields ‖ P's preimage fields.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(ANCHOR_LEN);
         v.extend_from_slice(&self.x.to_bytes());
@@ -128,12 +200,12 @@ impl AnchorProof {
         v
     }
 
-    /// Parse exactly 304 bytes.
+    /// Parse exactly 272 bytes.
     pub fn from_bytes(b: &[u8]) -> Result<Self, String> {
         if b.len() != ANCHOR_LEN {
             return Err(format!("anchor: {} bytes, expected {ANCHOR_LEN}", b.len()));
         }
-        Ok(Self { x: BlockFields::from_bytes(&b[..BLOCK_PROOF_LEN])?, p: BlockFields::from_bytes(&b[BLOCK_PROOF_LEN..])? })
+        Ok(Self { x: BlockFields::from_bytes(&b[..BLOCK_PROOF_LEN])?, p: PreimageFields::from_bytes(&b[BLOCK_PROOF_LEN..])? })
     }
 
     /// The seed source X.hash (D94).
@@ -141,7 +213,7 @@ impl AnchorProof {
         self.x.hash
     }
 
-    /// The off-chain part of check 8 (everything except the two opcode calls): P is X's
+    /// The off-chain part of check 8 (everything except the opcode call on X): P is X's
     /// selected parent by commitment (pc == x_pc), dX >= D and dP < D, with the daa fields
     /// read as the script reads them (8-byte LE; values >= 2^63 are negative and fail).
     pub fn consistent_with(&self, d: i64) -> bool {
@@ -184,6 +256,11 @@ mod tests {
                 let f = BlockFields::from_bytes(&bytes).unwrap();
                 assert_eq!(f.to_bytes(), bytes);
                 assert_eq!(f.seq_commit(), seq_commit_with_parent(&pc, b).as_bytes());
+                // P's part: the same commitment without the hash, the same bytes from 32 on.
+                let pf = f.preimage();
+                assert_eq!(pf.to_bytes()[..], bytes[32..]);
+                assert_eq!(PreimageFields::from_bytes(&pf.to_bytes()).unwrap(), pf);
+                assert_eq!(pf.seq_commit(), f.seq_commit());
             }
         }
     }
@@ -206,6 +283,12 @@ mod tests {
         assert!(a.consistent_with(d as i64));
         assert!(!a.consistent_with(d as i64 + 1));
         assert!(!a.consistent_with(d as i64 - 1));
-        assert!(AnchorProof::from_bytes(&a.to_bytes()[..303]).is_err());
+        assert_eq!(a.to_bytes().len(), 272);
+        assert_eq!(a.p, BlockFields::from_sim(&sim, &pb).preimage());
+        assert_eq!(a.to_bytes()[152..], sim.block_bytes(&pb)[32..], "P without its hash");
+        assert!(AnchorProof::from_bytes(&a.to_bytes()[..271]).is_err());
+        let mut long = a.to_bytes();
+        long.push(0);
+        assert!(AnchorProof::from_bytes(&long).is_err());
     }
 }

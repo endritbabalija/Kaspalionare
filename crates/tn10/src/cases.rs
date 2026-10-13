@@ -523,7 +523,10 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
 
     const K: usize = 16;
     let daa = ctx.client.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
-    let t = Templates::get(b_max());
+    // M7 Stage 5 fix A: the production drawer requires draw_window >= VOID_MIN = 2F (check 1);
+    // the void probe runs under the TEST-ONLY short-void drawer variant, which only the
+    // genesis flag `allow_short_void_window` selects (`GenesisCase::templates()`, D103).
+    let t = if void { Templates::test_only_short_void(b_max()) } else { Templates::get(b_max()) };
     let me = Payout::Schnorr(secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &ctx.sk).unwrap().x_only_public_key().0.serialize());
     // vault-m5 waits VAULT_REQ_DELAY before each of its two requests (U-4), so T is set that
     // much later; draw-m3 and claim-m4 are unchanged.
@@ -543,8 +546,10 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     if void {
         // TEST-ONLY (spec M7 D103): a void after 2 minutes instead of 24 h. validate() refuses
         // the flag unless the network is testnet or devnet (GenesisCase.network = Testnet).
-        g.allow_short_void_window = true;
-        g.drawer.draw_window = VOID_M7_DRAW_WINDOW;
+        g.set_test_only_short_void_window(VOID_M7_DRAW_WINDOW);
+        if !std::sync::Arc::ptr_eq(&g.templates(), &t) {
+            return Err(format!("{tag}: the TEST-ONLY flag did not select the short-void templates"));
+        }
         g.validate_with(&t).map_err(|e| format!("{tag}: genesis refused: {e}"))?;
     }
     let mut gf = g.build_with(t.clone()).finish();
@@ -561,7 +566,7 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
                 g.reserve() as f64 / KAS as f64,
                 g.controller.seed_offset,
                 g.drawer.draw_window,
-                if void { " (TEST-ONLY allow_short_void_window)" } else { "" }
+                if void { " (TEST-ONLY allow_short_void_window, short-void drawer variant)" } else { "" }
             ),
             &gs,
             true,

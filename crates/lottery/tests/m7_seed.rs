@@ -157,7 +157,7 @@ fn sp1_full_round_on_a_chain_sim() {
     assert_eq!(x.seed, seed_numbers(&cov, 1, &xh, c.marker.m), "the seed is X.hash's");
     assert_eq!((x.rank, x.bonus, x.win5), (w.rank, w.bonus, w.main));
     assert_eq!((x.h_j, x.n2), (1, 1));
-    assert_eq!(x.anchor, AnchorProof::from_sim(&c.chain(), d).to_bytes(), "the 304-byte proof of (X, P)");
+    assert_eq!(x.anchor, AnchorProof::from_sim(&c.chain(), d).to_bytes(), "the 272-byte proof of (X, P without its hash)");
     for p in &x.new_pools {
         assert_eq!(p.win, [w.main[0], w.main[1], w.main[2], w.main[3], w.main[4], w.bonus]);
         assert_eq!(p.deadline, d as i64 + DRAW_WINDOW + CLAIM_WINDOW);
@@ -172,7 +172,7 @@ fn sp1_full_round_on_a_chain_sim() {
 /// SP2: anchor boundaries. X at DAA D with P at D - 1; X at D + 247 with P at D - 1 (the
 /// largest DAA jump, MERGESET_MAX = 248); P whose DAA equals its own selected parent's
 /// (equal-DAA chain blocks); the point of view at X.bs + F - 1 (the last admissible one), with
-/// lock_time = D and with lock_time = D + draw_window (a 304-byte anchor is a draw whatever the
+/// lock_time = D and with lock_time = D + draw_window (a 272-byte anchor is a draw whatever the
 /// lock; the mode follows the anchor, spec M7 SA7 note).
 #[test]
 fn sp2_anchor_boundaries() {
@@ -196,24 +196,26 @@ fn sp2_anchor_boundaries() {
     let pp = c.chain().block(p.parent).copied().unwrap();
     assert_eq!((x.daa_score, p.daa_score, pp.daa_score), (d, d - 1, d - 1));
     run(&c);
-    // The last admissible point of view: X.bs + F - 1 (P is one blue score older, so the
-    // opcode on P admits it only if P.bs + F > pov: with blue +1 per block P is at X.bs - 1
-    // and pov = X.bs + F - 1 = P.bs + F: P is refused. The last point of view at which both
-    // are admitted is P.bs + F - 1 = X.bs + F - 2.) Both are measured: X.bs + F - 2 accepted;
-    // X.bs + F - 1 is the last for X alone (rejected by the opcode on P).
+    // The last admissible point of view: X.bs + F - 1 (the opcode admits X iff X.bs + F >
+    // pov). Since M7 Stage 5 fix B the only opcode call is on X.hash: P (one blue score older)
+    // is authenticated by X's committed parent commitment, so its depth no longer narrows the
+    // window (before, the last point of view was P.bs + F - 1 = X.bs + F - 2). Accepted at
+    // P.bs + F (= X.bs + F - 1 here, P's own window edge passed) with lock_time = D and with
+    // lock_time = D + draw_window; rejected at X.bs + F (BlockIsTooDeep on X, as SA3).
     let (s, _) = line_sim(d);
     let (x, p) = s.anchor_for(d);
     let f = s.finality_depth();
     assert_eq!(p.blue_score + 1, x.blue_score);
-    let c = held_on(s.clone().with_pov(p.blue_score + f - 1));
+    assert_eq!(p.blue_score + f, x.blue_score + f - 1, "the edge is past P's own window");
+    let c = held_on(s.clone().with_pov(x.blue_score + f - 1));
     run(&c);
     let mut late = c.clone();
     late.lock_time = d + DRAW_WINDOW as u64;
     run(&late);
-    // X.bs + F - 1: X admitted, P too deep (BlockIsTooDeep on P).
-    let c = held_on(s.with_pov(x.blue_score + f - 1));
+    // X.bs + F: X too deep (BlockIsTooDeep on X).
+    let c = held_on(s.with_pov(x.blue_score + f));
     let b = c.build();
-    let e = b.finish().run_input(0).expect_err("pov = X.bs + F - 1 = P.bs + F: the opcode refuses P");
+    let e = b.finish().run_input(0).expect_err("pov = X.bs + F: the opcode refuses X");
     assert!(matches!(e, TxScriptError::BlockIsTooDeep(_)), "{e:?}");
 }
 
@@ -593,6 +595,7 @@ fn sp11_seq_commit_pins() {
         let f = BlockFields::from_sim(&s, &b);
         assert_eq!(f.seq_commit(), s.commit_of(b.hash).unwrap().as_bytes(), "block at DAA {}", b.daa_score);
         assert_eq!(BlockFields::from_bytes(&f.to_bytes()).unwrap().seq_commit(), f.seq_commit());
+        assert_eq!(f.preimage().seq_commit(), f.seq_commit(), "P's part (no hash) recomputes the same commitment");
     }
     let d = 1_006;
     let a = AnchorProof::from_sim(&s, d);
@@ -659,7 +662,7 @@ fn sp12_no_test_only_symbols() {
 /// SP13 (M7-a worst case): K = 16, m = M_DRAW, A_MAX absorbed pools, every lower tier funded
 /// (np = 7, the M3 S4-1 worst; and np = 5 as the spec states it), F_MAX funding inputs,
 /// worst-case proofs (every leaf at the winning rank non-empty), the record (cap binding), with
-/// the 304-byte anchor: within 90 % of compute, transient and storage.
+/// the 272-byte anchor: within 90 % of compute, transient and storage.
 #[test]
 fn sp13_worst_draw_within_90() {
     for np in [7, 5] {

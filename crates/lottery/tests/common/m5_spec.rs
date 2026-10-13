@@ -23,8 +23,9 @@
 //!   Stage 1b, SA6), 13, 14, 17, C1, C2, 20, 21, 22, 23, 24,
 //!   25, 26 in that order (C3 computes and has no require; the unchanged M3 checks are
 //!   assumed to pass, which holds for M5 attacks: they change only the vault, the record and
-//!   the conversion). Check 8's two `OpChainblockSeqCommit` calls are modelled on the
-//!   `ChainSim` the transaction runs against (`Final::sim`).
+//!   the conversion). Check 8's `OpChainblockSeqCommit` call on X.hash is modelled on the
+//!   `ChainSim` the transaction runs against (`Final::sim`); check 1 includes the void floor
+//!   draw_window >= VOID_MIN (M7 Stage 5 fix A).
 //!
 //! Interpretations the model makes (handoff S2-*, O-S2-*): the request, position and
 //! settle entries take the template bytes of their foreign outputs as arguments (S2-1); the
@@ -572,7 +573,10 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     if i != 0 {
         return Err(l("1"));
     }
-    // Spec M7 check 1: the anchor is empty (void) or ANCHOR_LEN bytes.
+    // Spec M7 check 1: draw_window >= VOID_MIN = 2F (the drawer's own state; M7 Stage 5 fix
+    // A, D97); the anchor is empty (void) or ANCHOR_LEN bytes.
+    let dw = need(tx.own_state(0).as_ref().and_then(|s| int(s, "draw_window")), &l("1"))?;
+    check(dw >= lottery::game::VOID_MIN, &l("1"))?;
     let anchor = need(tx.arg_bytes(0, ARG_ANCHOR), &l("1"))?;
     check(anchor.is_empty() || anchor.len() == ANCHOR_LEN, &l("1"))?;
     let is_void = anchor.is_empty();
@@ -602,8 +606,9 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     } else {
         check(tx.tx_daa() >= d, &l("7"))?;
     }
-    // Spec M7 check 8: draw: both preimages recomputed and equal to the opcode's commitment,
-    // P is X's selected parent (pc == x_pc), dX >= D, dP < D, win5 = the seed's main numbers
+    // Spec M7 check 8: draw: X's preimage recomputed and equal to the opcode's commitment of
+    // X.hash, P's recomputed commitment equal to X's parent_commit (pc == x_pc; no opcode call
+    // on P and no P.hash since M7 Stage 5 fix B), dX >= D, dP < D, win5 = the seed's main numbers
     // from X.hash (the rank and bonus are not separately modelled: the M3 checks 9-10 follow);
     // void: win5 = 0, no leaves and no siblings.
     let win5 = need(tx.arg_bytes(0, ARG_WIN5), &l("8"))?;
@@ -613,7 +618,6 @@ fn drawer(tx: &Tx, i: usize, case: &DrawCase) -> Verdict {
     } else {
         let a = need(AnchorProof::from_bytes(&anchor).ok(), &l("8"))?;
         check(chainblock_seq_commit(tx, a.x.hash) == Some(a.x.seq_commit()), &l("8"))?;
-        check(chainblock_seq_commit(tx, a.p.hash) == Some(a.p.seq_commit()), &l("8"))?;
         check(a.p.seq_commit() == a.x.parent_commit, &l("8"))?;
         let (dx, dp) = (a.x.daa_score as i64, a.p.daa_score as i64);
         check(dx >= d && dp < d, &l("8"))?;

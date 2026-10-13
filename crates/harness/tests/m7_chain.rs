@@ -115,7 +115,8 @@ fn proof_bytes_layout() {
     let sim = ChainSim::line(10, 20, 4);
     let (x, p) = sim.anchor_for(12);
     let proof = sim.proof_bytes(&x, &p);
-    assert_eq!(proof.len(), 304);
+    // M7 Stage 5 fix B: X (152) then P's preimage fields without P.hash (120) = 272 bytes.
+    assert_eq!(proof.len(), 272);
     assert_eq!(&proof[..152], &block_fields_bytes(&x, &sim.commit_of(p.hash).unwrap())[..]);
     assert_eq!(&proof[0..32], &x.hash.as_bytes());
     assert_eq!(&proof[32..64], &sim.commit_of(p.hash).unwrap().as_bytes());
@@ -124,8 +125,11 @@ fn proof_bytes_layout() {
     assert_eq!(&proof[128..136], &x.sp_timestamp.to_le_bytes());
     assert_eq!(&proof[136..144], &12u64.to_le_bytes());
     assert_eq!(&proof[144..152], &22u64.to_le_bytes());
-    assert_eq!(&proof[152..184], &p.hash.as_bytes());
-    assert_eq!(&proof[288..296], &11u64.to_le_bytes());
+    assert_eq!(&proof[152..], &block_fields_bytes(&p, &sim.commit_of(p.parent).unwrap())[32..], "P's fields without its hash");
+    assert!(!proof.windows(32).any(|w| w == p.hash.as_bytes()), "P.hash is not in the proof");
+    assert_eq!(&proof[152..184], &sim.commit_of(p.parent).unwrap().as_bytes());
+    assert_eq!(&proof[256..264], &11u64.to_le_bytes());
+    assert_eq!(&proof[264..272], &21u64.to_le_bytes());
 }
 
 // ---------------------------------------------------------------------------------------------

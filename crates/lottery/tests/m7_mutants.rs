@@ -16,7 +16,8 @@
 //!
 //! `every_m7_tag_is_tested` pins the M7 tag set: 14 tags on 16 lines of drawer.sil (M7V_leaves
 //! and M7V_H tag two lines each), every one named here as "drawer:TAG". The M3 tags D7, D19_own
-//! and D19_max are retired (m3_mutants.rs pin 85).
+//! and D19_max are retired (m3_mutants.rs pin 85). M7 Stage 5: M7A_pc retired with the opcode
+//! call on P.hash (fix B); M7V_floor added for the void floor in check 1 (fix A).
 
 mod common;
 
@@ -59,7 +60,11 @@ fn killed_assign_atk(tags: &[&str], a: &Atk5) {
 
 // ================================================================ check 1
 
-killed7!(m7a_len, ["drawer:M7A_len"], "SA4 anchor length 305 (a zero byte appended) (M7A_len)");
+killed7!(m7a_len, ["drawer:M7A_len"], "SA4 anchor length 273 (a zero byte appended) (M7A_len)");
+// M7 Stage 5 fix A: without the floor an instance with draw_window = 2F - 1 voids at
+// D + draw_window, while X can still be drawable (spec A5).
+killed7!(m7v_floor, ["drawer:M7V_floor"], "SA12 void of an instance with draw_window = VOID_MIN - 1 at D + draw_window (M7V_floor)");
+killed7!(m7v_floor_draw, ["drawer:M7V_floor"], "SA12 draw of an instance with draw_window = VOID_MIN - 1 (check 1 runs on every spend) (M7V_floor)");
 
 // ================================================================ check 7
 
@@ -74,7 +79,9 @@ killed7!(m7v_lock, ["drawer:M7V_lock"], "SA7 void at lock_time = D + draw_window
 
 killed7!(m7a_xc, ["drawer:M7A_xc"], "SA2 an unknown X.hash with X's genuine preimage: BlockAlreadyPruned; the seed follows the claimed hash (M7A_xc)");
 killed7!(m7a_xc_side_block, ["drawer:M7A_xc"], "SA2 a known side block N at DAA D whose selected parent is P: BlockNotSelected (M7A_xc)");
-killed7!(m7a_pc, ["drawer:M7A_pc"], "SA2 an unknown P.hash with P's genuine preimage: BlockAlreadyPruned (M7A_pc)");
+// M7A_pc (the opcode call on P.hash) was removed with P.hash in M7 Stage 5 fix B; P's
+// preimage is pinned by M7A_pceq (SA4 P fields, SA2 X+ with P as its parent).
+killed7!(m7a_pceq_p_field, ["drawer:M7A_pceq"], "SA4 P.daa_score altered by one bit (M7A_pceq)");
 killed7!(m7a_pceq, ["drawer:M7A_pceq"], "SA2 X+ with P as its claimed parent (P is on the chain, not X+'s selected parent): pc != x_pc (M7A_pceq)");
 killed7!(m7a_dx, ["drawer:M7A_dX"], "SA1 P as the anchor with its parent: dX = D - 1 < D (M7A_dX)");
 killed7!(m7a_dp, ["drawer:M7A_dP"], "SA1 X+ (X's chain child) with X as P: dP = daa(X) = D (M7A_dP)");
@@ -116,10 +123,11 @@ fn every_m7_tag_is_tested() {
     }
     println!("M7 tags: {tags:?}, tagged lines: {lines}");
     let spec = [
-        "M7A_len", "M7D_mk", "M7D_lock", "M7V_lock", "M7A_xc", "M7A_pc", "M7A_pceq", "M7A_dX", "M7A_dP", "M7V_win5", "M7V_leaves", "M7V_lp", "M7V_H", "M7C_claim",
+        "M7A_len", "M7V_floor", "M7D_mk", "M7D_lock", "M7V_lock", "M7A_xc", "M7A_pceq", "M7A_dX", "M7A_dP", "M7V_win5", "M7V_leaves", "M7V_lp", "M7V_H", "M7C_claim",
     ];
     for t in spec {
         assert!(tags.contains(&format!("drawer:{t}")), "spec M7 A8 tag {t} is not in drawer.sil");
     }
+    assert!(!tags.contains("drawer:M7A_pc"), "M7A_pc was retired with P.hash (Stage 5 fix B)");
     assert_eq!((tags.len(), lines), (14, 16), "M7 tag count changed: update this test and the handoff");
 }

@@ -1,5 +1,5 @@
 //! `draw()` (spec M3 A4, M5 A5, M7 A4): the seed is the anchor block's hash X.hash, proven
-//! by the 304-byte anchor argument (spec M7 D93-D95, `crate::anchor`); an empty anchor is a
+//! by the 272-byte anchor argument (spec M7 D93-D95, `crate::anchor`); an empty anchor is a
 //! void (D96: no winners, everything but the fee and C_draw to the boost pot). This is the
 //! only place `covenants/drawer.sil` is compiled.
 //!
@@ -68,7 +68,8 @@ pub const TEST_X_HASH: [u8; 32] = [0x58; 32];
 pub const TEST_VAULT: i64 = 10_000_000 * KAS as i64;
 
 // Argument positions of `draw` (spec M7 A4 "Arguments", drawer.sil order).
-/// `byte[] anchor`: 304 bytes (X fields, P fields; spec M7 A3) or empty (void).
+/// `byte[] anchor`: 272 bytes (X fields, then P's preimage fields without P.hash; spec M7 A3,
+/// Stage 5 fix B) or empty (void).
 pub const ARG_ANCHOR: usize = 0;
 pub const ARG_WIN5: usize = 1;
 pub const ARG_LEAVES: usize = 2;

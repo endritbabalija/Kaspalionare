@@ -32,8 +32,14 @@ use kaspa_hashes::{Hash, HasherBase, SeqCommitMergesetContext, SeqCommitMerkleBr
 
 /// Bytes of one block's fields in the anchor proof (spec A3).
 pub const BLOCK_PROOF_LEN: usize = 152;
-/// Anchor proof length: X then P (spec A3, D95).
-pub const ANCHOR_LEN: usize = 2 * BLOCK_PROOF_LEN;
+/// Bytes of a block's commitment preimage fields (the proof fields without the hash):
+/// parent_commit, activity_root, miner_payload_root, sp_timestamp, daa_score, blue_score.
+pub const PREIMAGE_LEN: usize = BLOCK_PROOF_LEN - 32;
+/// Anchor proof length: X's fields (152) then P's preimage fields without P.hash (120), 272 B
+/// (spec A3, D95; M7 Stage 5 fix B: the drawer authenticates P only through
+/// `SeqCommit(P) == X.parent_commit`, so P.hash is not part of the proof and no byte of the
+/// argument is unconstrained).
+pub const ANCHOR_LEN: usize = BLOCK_PROOF_LEN + PREIMAGE_LEN;
 
 /// 32-byte BLAKE3 key of `H_seq`: "SeqCommitmentMerkleBranchHash" zero-padded (spec A2 K_SEQ;
 /// `crypto/hashes/src/hashers.rs:40, 120-138`).
@@ -383,11 +389,12 @@ impl ChainSim {
         block_fields_bytes(b, &self.parent_commit(b))
     }
 
-    /// The 304-byte anchor proof `X fields ‖ P fields` (spec A3, D95).
+    /// The 272-byte anchor proof `X fields ‖ P fields without P.hash` (spec A3, D95; M7
+    /// Stage 5 fix B).
     pub fn proof_bytes(&self, x: &SimBlock, p: &SimBlock) -> Vec<u8> {
         let mut v = Vec::with_capacity(ANCHOR_LEN);
         v.extend_from_slice(&self.block_bytes(x));
-        v.extend_from_slice(&self.block_bytes(p));
+        v.extend_from_slice(&self.block_bytes(p)[32..]);
         v
     }
 
@@ -461,7 +468,7 @@ mod tests {
         assert_eq!(proof.len(), ANCHOR_LEN);
         assert_eq!(&proof[0..32], &x_hash.as_bytes());
         assert_eq!(&proof[32..64], &sim.commit_of(p.hash).unwrap().as_bytes());
-        assert_eq!(&proof[184..216], &ZERO_HASH.as_bytes(), "P is a root: its parent commitment is ZERO_HASH");
+        assert_eq!(&proof[152..184], &ZERO_HASH.as_bytes(), "P is a root: its parent commitment is ZERO_HASH");
     }
 
     #[test]

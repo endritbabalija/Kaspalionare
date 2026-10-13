@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 pub mod chain;
-pub use chain::{ANCHOR_LEN, BLOCK_PROOF_LEN, ChainSim, K_MC, K_SEQ, SimBlock};
+pub use chain::{ANCHOR_LEN, BLOCK_PROOF_LEN, ChainSim, K_MC, K_SEQ, PREIMAGE_LEN, SimBlock};
 
 pub use kaspa_consensus_core::{
     Hash,
