@@ -3059,11 +3059,21 @@ dependencies = [
 name = "lottery"
 version = "0.1.0"
 dependencies = [
+ "ark-bn254 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-groth16 0.6.0",
+ "ark-relations 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-snark 0.6.0",
+ "ark-std 0.6.0",
  "blake2b_simd",
  "blake3",
+ "borsh",
  "harness",
  "kaspa-consensus-core 2.1.0",
  "kaspa-txscript 2.1.0",
+ "kaspa-txscript-zk-sdk",
+ "risc0-zkvm",
  "secp256k1",
  "silverscript-abi",
 ]

@@ -184,7 +184,7 @@ Done when (the spec sets the details):
   - M6-j: the drawer sensitivity and byte budget (about 91,950 B before the worst `draw()` reaches 90 % of transient), and the drawer's stack headroom (4 free slots at check 24) whenever a value stays live across check 24.
 
 ## Spike — VDF+ZK seed feasibility (before M8)
-Status: todo (user decision 2026-10-13, DECISIONS row "VDF+ZK feasibility spike")
+Status: done (2026-10-13, spec `docs/specs/spike-vdf.md`; D106: Groth16 fits inside the worst `draw()` as is, V1 plain Groth16 72.1 % and V2 RISC Zero-over-Groth16 72.7 % compute, stack headroom 4 kept; RISC Zero succinct cannot be encoded (signature script over the 250,000-byte consensus limit) and does not fit alone either; D107: binding of V2 not exercised, no production setup, VDF not chosen or sized, proving fits the opcode window only for delays of minutes and the proving key grows 608 B per iteration, the draw fee and proving share C_draw, and a sole prover could choose between the result and a void (new release-gate item); covenant-reviewer: no must-fix, eight should-fix applied; margin floor handed to the owner with the ε table; `docs/costs.md` "Spike VDF+ZK")
 
 Local only, no testnet. Answers whether the candidate fix for the anchor miner's withholding bias (D100, amended) fits in `draw()`: seed = H(VDF(X.hash)) with the VDF evaluation proven by `OpZkPrecompile`. Starts with a short spec approved by the owner.
 

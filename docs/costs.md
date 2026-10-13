@@ -854,6 +854,73 @@ Worst `draw()` at the committed drawer (64,629 B): compute 206,523 (41.3 %), tra
 
 **D83 re-confirmation (milestone M7 criterion; spec 7 A10 item 8).** Every row of the milestone list is re-run with the final M7 `draw()` and `close()` and stays within 90 %: **K = 16, m_max = M_DRAW = M_CLAIM = 50, B_MAX = 4 and R = 1.69 KAS are final.** Tightest: `close()` storage worst case 89.9 % (sets R), `close()` K = 16 transient 86.5 % (sets K), the drawer stack at its 4-slot floor (sets how much more can go into `draw()`).
 
+## Spike VDF+ZK: the seed proof inside `draw()` (local engine; spec `docs/specs/spike-vdf.md`)
+
+Measured 2026-10-13 by `cargo test -p lottery --release --test spike_vdf -- --nocapture --test-threads=1`. Test-only drawer variants, compiled in memory from a patch of the committed `drawer.sil` (unchanged). The VDF output and proof follow the 272-byte anchor inside the `anchor` argument, so the variants add no entry parameter. V1 = plain Groth16 (`g16.verify`, 4 public inputs: the X.hash halves and the MinRoot output (x_T, y_T); real proof from a local `ark-groth16` 0.6 setup, T = 64). V2 = RISC Zero receipt wrapped in Groth16 (`r0.g16.verify`, SilverScript's fixture receipt; the journal binding sha256(X.hash || y) is computed but the fixture's journal is verified). V3 = RISC Zero succinct (rusty-kaspa's fixture receipt, seal 222,668 B).
+
+**Masses** (limits 500,000 / 1,000,000 / 500,000; D104 90 %):
+
+| shape | compute | transient | storage | % c / t / s | ≤ 90 % |
+|---|---|---|---|---|---|
+| M7 worst draw (baseline) | 206,523 | 527,012 | 71,009 | 41.3 / 52.7 / 14.2 | yes |
+| M7 typical draw (baseline) | 139,891 | 443,964 | 93,028 | 28.0 / 44.4 / 18.6 | yes |
+| M7 worst void (baseline) | 185,130 | 480,200 | 71,005 | 37.0 / 48.0 / 14.2 | yes |
+| V1 worst draw (sigscript 79,378 B) | 360,614 | 529,776 | 71,009 | **72.1** / 53.0 / 14.2 | yes |
+| V1 typical draw | 293,282 | 446,728 | 93,028 | 58.7 / 44.7 / 18.6 | yes |
+| V1 worst void | 186,429 | 482,196 | 71,005 | 37.3 / 48.2 / 14.2 | yes |
+| V2 worst draw (sigscript 79,766 B) | 363,602 | 531,328 | 71,009 | **72.7** / 53.1 / 14.2 | yes |
+| V2 typical draw | 296,270 | 448,280 | 93,028 | 59.3 / 44.8 / 18.6 | yes |
+| V2 worst void | 187,049 | 483,876 | 71,005 | 37.4 / 48.4 / 14.2 | yes |
+| V3 worst / typical draw | not encodable: signature script 301,908 / 300,621 B > `MAX_SIGNATURE_SCRIPT_LEN` = 250,000 (rusty-kaspa v2.1.0 `consensus/core/src/config/params.rs:25`, every network) | | | | no |
+| V3 worst void | 185,457 | 481,108 | 71,005 | 37.1 / 48.1 / 14.2 | yes |
+
+Delta of the worst draw over M7: V1 +154,091 compute / +2,764 transient (the opcode is 140,000 + 5 × 2,500 = 152,500 grams, `zk_precompiles/tags.rs:29-32`, `groth16/mod.rs:18, 46-49`; glue about 1,600); V2 +157,079 / +4,316 (155,000 for 5 public inputs plus two SHA-256). Storage unchanged (no new output). Drawer redeem: M7 64,629 B; V1 65,128 B (+499, the 392-byte VK constant); V2 65,546 B; V3 64,856 B.
+
+**Verifier alone** (one input, one output; a floor for step 1 of a split `draw()`):
+
+| variant | sigscript B | script units | compute | transient | % c / t | ≤ 90 % |
+|---|---|---|---|---|---|---|
+| V1 | 733 | 15,252,582 | 153,804 | 3,736 | 30.8 / 0.4 | yes |
+| V2 | 1,121 | 15,503,630 | 156,692 | 5,288 | 31.3 / 0.5 | yes |
+| V3 | 223,260 | 25,446,723 | **478,231** | **893,844** | **95.6 / 89.4** | **no** |
+
+**Stack** (extra live int locals that still compile; D104 needs ≥ 4 at check 24; the instrument asserts the first failure is the stack limit): at check 24, M7 4 and V1 / V2 / V3 4 each; at the verify call (ints declared inside the verify block, so they die with it) V1 125, V2 122, V3 121. The proof bytes are slices of `anchor`, not new parameters, so check 24 stays the binding point and the verify is not.
+
+**Prover (V1, MinRoot over BN254 Fr, `ark-groth16` 0.6, this machine, 20 threads; median of 5 runs per T, [min, max]; the test binary run alone):**
+
+| T | constraints | eval (s) | setup (s) | prove (s) | proving key (MB) | prove / eval |
+|---|---|---|---|---|---|---|
+| 2^10 | 3,074 | 0.006 [0.006, 0.006] | 0.02 | 0.04 [0.04, 0.04] | 0.6 | 7.1 |
+| 2^12 | 12,290 | 0.023 [0.023, 0.023] | 0.07 | 0.11 [0.11, 0.11] | 2.5 | 4.7 |
+| 2^14 | 49,154 | 0.091 [0.090, 0.091] | 0.23 | 0.35 [0.34, 0.38] | 10.0 | 3.9 |
+| 2^16 | 196,610 | 0.364 [0.363, 0.374] | 0.86 | 1.29 [1.27, 1.29] | 39.8 | 3.5 |
+
+Slopes (2^14 → 2^16, medians): evaluation 5.56 µs per iteration (sequential), proving 18.94 µs per iteration (parallel; ratio 3.4; 3.5 with the fastest evaluation and slowest proof), proving key 608 B per iteration. **The timing depends on load:** the reviewer's run, made while the full `lottery` suite was running on the same machine, measured 7.61 / 53.31 µs per iteration (ratio 7.0). Both are recorded; plan with the higher ratio.
+
+The draw's own fee and the proving cost come out of the **same** reward C_draw = floor(S × s_D / 10⁴) (s_D = 50 bp, `game::round_amounts`), so the break-even round sales are S = (fee + prove hours × price) × 10⁴ / s_D. The V1 worst draw's priority fee is 0.36061 KAS (72.1 % compute), which C_draw covers from S = 72.12 KAS on its own. **Linear extrapolation far outside the measured range** (×10³ to ×10⁴; FFT cost is n log n and a single monolithic circuit this large needs the proving key in memory, so these are optimistic):
+
+| honest evaluation delay on this machine | T | prove (h) at ratio 3.4 | prove (h) at ratio 7.0 | evaluation + proof (h) at ratio 7.0 | proving key (GB) | break-even S at 1 KAS per machine-hour (KAS), ratio 3.4 / 7.0 |
+|---|---|---|---|---|---|---|
+| 10 s | 1.8 × 10⁶ | 0.01 | 0.02 | 0.02 | 1.1 | 74 / 76 |
+| 1 min | 1.1 × 10⁷ | 0.06 | 0.12 | 0.13 | 6.6 | 83 / 96 |
+| 10 min | 1.1 × 10⁸ | 0.57 | 1.17 | 1.33 | 66 | 186 / 305 |
+| 1 h | 6.5 × 10⁸ | 3.41 | 7.0 | 8.0 | 394 | 754 / 1,473 |
+
+The proving part of S scales with the machine price in KAS per hour (not stated here: no price from memory); the fee part (72.12 KAS) does not. Against the opcode window (about 12 h, during which X must stay within F of the point of view, after which the round voids), a 1-hour delay at ratio 7.0 already uses 8 h of evaluation plus proving: **time is comfortable only for delays of minutes, and the proving key (6.6 GB per minute of delay) limits a monolithic circuit first.**
+
+**Margin floor** (S3; minimum ε where the whale check binds, q = p w / margin, fixture shares, the player's own lower-tier share counted as returned; reproduces D100 amended at 1.17 and 1.00):
+
+| margin | q / p | ε ordinary | ε self-referring | ε self-referring + both caller rewards |
+|---|---|---|---|---|
+| 1.00 | 0.7900 | 0.1100 | 0.0100 | 0.0000 |
+| 1.05 | 0.7524 | 0.1476 | 0.0476 | 0.0376 |
+| 1.10 | 0.7182 | 0.1818 | 0.0818 | 0.0718 |
+| 1.17 | 0.6752 | 0.2248 | 0.1248 | 0.1148 |
+| 1.25 | 0.6320 | 0.2680 | 0.1680 | 0.1580 |
+| 1.30 | 0.6077 | 0.2923 | 0.1923 | 0.1823 |
+
+Margin at which ε reaches the edge-rule ordinary value 0.271: ordinary 1.256, self-referring 1.493, self-referring with both caller rewards 1.522. Method: the closed form of D100 amended (a), ε = 1 − w / margin − (s_t [+ s_R [+ s_C + s_D]]) / 10⁴ with `game::whale_allowance`; it assumes `fix_jackpot` reaches EV = q at every margin, which D100 amended showed at 1.17 only (the table reproduces its 1.17 and 1.00 values).
+
 ## Scripts (M0 probes)
 
 | Script | Redeem B | Sigscript B | Script units | Compute budget | Source test |

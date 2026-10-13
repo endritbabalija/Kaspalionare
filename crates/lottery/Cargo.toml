@@ -25,3 +25,17 @@ blake3.workspace = true
 secp256k1.workspace = true
 
 [dev-dependencies]
+# Spike VDF+ZK (docs/specs/spike-vdf.md): a local Groth16 prover over BN254 at the arkworks
+# versions rusty-kaspa v2.1.0 links (workspace Cargo.toml, ark-* = "=0.6.0"), and the
+# RISC Zero Groth16 receipt decoding SilverScript's own tests use (zk-sdk at SilverScript's
+# rusty-kaspa rev a41a333). Test-only; nothing here reaches the library.
+ark-bn254 = "=0.6.0"
+ark-ff = "=0.6.0"
+ark-groth16 = "=0.6.0"
+ark-relations = "=0.6.0"
+ark-serialize = "=0.6.0"
+ark-snark = "=0.6.0"
+ark-std = "=0.6.0"
+kaspa-txscript-zk-sdk = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+risc0-zkvm = { version = "=3.0.4", default-features = false }
+borsh = "1.7.0"
