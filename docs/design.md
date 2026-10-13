@@ -19,7 +19,7 @@
 - the pinned releases;
 - covenant hygiene rules R5–R8 and the open checks from `docs/research/kaspa-best-practices.md`.
 
-Randomness remains parked (section 11).
+The seed is the hash of the anchor block (section 11, M7); the miner-withholding bias is open on the release gate (D100).
 
 # 1. Goal and scope
 
@@ -51,7 +51,7 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
     - claims;
     - data retention;
     - the safety review and the prototype plan.
--   **Parked:** how the seed is obtained. The design defines where the seed enters (`draw()`), not how it is made unbiased. No real-value launch until it is solved.
+-   **Seed (M7):** the hash of the anchor block, fixed by consensus from the marker's creation DAA score (section 11). The anchor miner's withholding bias is open on the release gate (D100); no real-value launch until it is resolved.
 
 ## 1.4 Non-negotiable properties
 
@@ -59,7 +59,7 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 2. Every winning claim is checked on L1 against the winning numbers and the frozen counters.
 3. No operator, sequencer, result oracle or keeper is required to run the lottery. The admin key (5.6) is never needed for any lottery function.
 4. Every protocol function except `set_params()` is permissionless.
-5. Ticket counts are frozen before the seed can be known (this relies on the parked seed design, section 11).
+5. Ticket counts are frozen before the seed can be known: `close()` consumes every shard, and the anchor block lies strictly after the chain block that accepted it (section 11, D93).
 6. The admin key can change only s_F (at most 10%), s_R (at most 15%) and the fee address. A change applies only to rounds opened after it. No one can change the rules of a live round, move prize or vault money, or substitute a draw. Any other rule change requires a new instance.
 7. Correctness survives the disappearance of any project-operated service.
 
@@ -77,11 +77,11 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 | Game-size rule, jackpot fixing, boost hold-back | Decided; details proposed (4.6) | M2, M3 specs |
 | House vault settlement at draw, backer shares | Built and tested (M3 settlement, M5 shares, M6 request minimums; testnet-10 accepted) | Request griefing residual and the q = 0 small-vault case on the release gate (M6, D87); batching out of scope |
 | Claim window of at least 7 days | Decided | — |
-| Reserve R, ticket deposit, largest K for `close()` | Measured with the real scripts in M6: d = 0.13 KAS final (D80); K = 16 and R = 1.69 KAS provisional (D83) | Re-confirmed at the end of the real-seed milestone (M6 A5a re-run rows) |
-| Largest bundle per `buy()` (b_max) and m_max | Measured in M6: B_MAX = 4 final; m_max = 50 provisional (D83) | m_max re-confirmed at the end of the real-seed milestone |
+| Reserve R, ticket deposit, largest K for `close()` | Measured with the real scripts in M6: d = 0.13 KAS final (D80); K = 16 and R = 1.69 KAS final (M7, D83 re-confirmed) | — |
+| Largest bundle per `buy()` (b_max) and m_max | Measured in M6: B_MAX = 4 final; m_max = 50 final (M7, D83 re-confirmed) | — |
 | Which per-transaction mass limit the network relays | Resolved: the block limits, per transaction (feasibility Q7) | Re-run the testnet-10 probes on each rusty-kaspa bump |
 | Covenant family structure and shape policy | **Open** | M1 spec (section 6) |
-| Native randomness | **Parked** | Section 11 |
+| Seed from the anchor block | Built and tested (M7; testnet-10 accepted) | Miner-withholding bias on the release gate (D100) |
 
 **Pinned releases:**
 - rusty-kaspa v2.1.0, commit `01b532e8b553523216471682649693af92f0fd16` [S5]. It has the same consensus rules after Toccata and the same Appendix A limits as v2.0.1 (feasibility Q6). v2.1.0 treats Toccata as always active and has no activation parameter. The mainnet activation score, DAA 474,165,565, appears only in v2.0.1 (`cfafeb4c…`, `consensus/core/src/config/params.rs:724`).
@@ -97,7 +97,7 @@ The resulting requirement: **every rule and every result is enforced by L1; off-
 |:--------------|:----------------|:-------------------------------------------------|
 | `buy()` | Player | In any shard of the open round: records every combination of a bundle in the counter, splits the price (5.1), pays the referral output if any and creates one ticket for the bundle |
 | `close()` | Anyone, after the round deadline and once the previous round is drawn | Freezes all shards of the ending round, pays the `close()` caller and **opens the next round immediately**. The next round's bonus range m comes from the game-size rule (4.6) |
-| `draw()` | Anyone, once the seed block exists | Sets the winning numbers. Proves the jackpot and second-prize counts and funds all prize pools. Settles the house vault, pays the protocol fee and the `draw()` caller, and absorbs expired pools into the boost pot. Fixes the next round's jackpot |
+| `draw()` | Anyone, from D with the anchor proof; from D + draw_window as a void (M7) | Sets the winning numbers. Proves the jackpot and second-prize counts and funds all prize pools. Settles the house vault, pays the protocol fee and the `draw()` caller, and absorbs expired pools into the boost pot. Fixes the next round's jackpot |
 | `claim()` | Anyone (normally the winner) | Proves one bundled combination's total holder count across all K shards and pays its prize to the ticket's fixed payout script |
 
 Supporting functions:
@@ -112,8 +112,8 @@ Supporting functions:
 |:----------------|:-----------------------------------------|
 | Round open | Players `buy()` at any time |
 | Deadline T | `close()` becomes valid once round r−1 has been drawn. It freezes round r, chooses m for round r+1 and opens round r+1 in one transaction. After T each shard accepts at most one more buy (7.1), so sales slow to a stop until `close()` |
-| After the seed block | `draw()` for round r settles round r and fixes the jackpot J of round r+1 |
-| Draw + 7 days | Claim deadline. From then on, any later `draw()` may absorb what is left in round r's pools into the boost pot. `return_deposit()` becomes valid as described in 7.5 |
+| From D (the marker's creation DAA + seed_offset) | `draw()` for round r, with the anchor proof while X is inside the opcode window (about 12 h), settles round r and fixes the jackpot J of round r+1; from D + draw_window (24 h) a void instead (7.3, section 11) |
+| D + draw_window + claim_window (D98) | Claim deadline. From then on, any later `draw()` may absorb what is left in round r's pools into the boost pot. `return_deposit()` becomes valid as described in 7.5 |
 
 MegaPot uses the same two-step shape: `runJackpot()` locks the round and requests randomness, and a callback settles it. Here `close()` is the lock (and opens the next round at once), and `draw()` is the settlement.
 
@@ -125,10 +125,10 @@ flowchart TD
   P -.->|"referral share"| RF["Referrer output"]
   S -.-> T["Ticket (bundle)<br/>player-held UTXO"]
   S --> C["close()<br/>anyone, after deadline"]
-  C --> F["Frozen marker r<br/>roots, sales, J(r), seed ref"]
+  C --> F["Frozen marker r<br/>roots, sales, J(r)"]
   C --> N["Round r+1 opens at once<br/>controller + K shards<br/>m from the game-size rule"]
-  F --> D["draw()<br/>anyone, once the seed block exists"]
-  R["Seed source<br/>(parked)"] -.-> D
+  F --> D["draw()<br/>anyone, from D (or void from D + draw_window)"]
+  R["Anchor block X<br/>(first chain block with DAA ≥ D)"] -.-> D
   V["House vault<br/>jackpot + second prize"] <--> D
   D --> PP["Prize pools<br/>jackpot, second prize, lower tiers"]
   D --> BP["Boost pot<br/>to later jackpots"]
@@ -139,9 +139,7 @@ flowchart TD
   CL --> W["Winner paid<br/>slice / holders"]
   PP -.->|"leftovers, after the claim window"| BP
   classDef fn fill:#d0bfff,stroke:#8b5cf6;
-  classDef parked fill:#ffc9c9,stroke:#ef4444,stroke-dasharray:5 5;
   class C,D,CL fn;
-  class R parked;
 ```
 
 # 4. Game and prize model
@@ -222,7 +220,7 @@ h comes from the per-combination counters (section 8). Every `buy()` updates the
 
 ## 4.5 Claim window
 
-Winners have **at least 7 days** after the draw to claim. Kaspa has no transaction expiry, so the window is enforced from the other side: every action that ends a claim is valid only after the claim deadline (draw + 7 days, checked with a lower-bound locktime).
+Winners have **at least 7 days** after the draw to claim. Kaspa has no transaction expiry, so the window is enforced from the other side: every action that ends a claim is valid only after the claim deadline (D_claim = D + draw_window + claim_window, at least 7 days + 12 h after any draw, D98; checked with a lower-bound locktime).
 - `draw()` may absorb a pool only after its deadline. The remainder of every absorbed pool, including unclaimed jackpot and second-prize money, goes to the boost pot.
 - `return_deposit()` may consume a ticket only once its round's claim deadline is provably past (7.5).
 
@@ -358,7 +356,7 @@ This settlement is exact, so backers' results are final at every draw. No vault 
   - `draw()` converts the pending totals in aggregate, at its post-settlement price: it mints shares for pending deposits and burns pending withdrawal shares. It writes one settlement record when anything is pending, so `draw()` never gathers individual requests and its input count does not depend on them.
   - Withdrawals are capped so the vault keeps L(r+1), counting the same draw's converted deposits (D69). The excess stays pending, pro rata, for the next draw.
   - Each request is later settled against that draw's record by `settle()`, by anyone (D77): a share position for a deposit, a payout for a withdrawal. Each settlement takes its pro-rata part of the record's *remaining* totals, rounded down, and the last settler of each side takes exactly what is left, so nothing is left as dust (D72). Amounts are fixed at the draw, so the owner's timing gives no option. A drained record is consumed and its R refunded to its funder.
-  - There is no cancellation. A refund exists only if the target draw never happens (parked missed-draw item).
+  - There is no cancellation. If the target draw never happens the round is voided after D + draw_window (section 11, D96), which settles the vault and converts pending requests as a draw does.
   - Because the price is set after the round's own settlement, knowing that round's seed early gives no advantage. The research doc's "lock before the seed" requirement (E4) is therefore not needed. *Flag: deviation from the research doc.*
   - Requests serialize on the vault UTXO and must wait until the vault is VAULT_REQ_DELAY = 600 DAA old, so after every vault spend `draw()` has a window in which no request can race it. This allows at most one request per 600 DAA (about 1,440 a day), won by whoever is mined first. A deposit request needs D ≥ MIN_DEPOSIT = 10 KAS (D85). A withdrawal request takes the whole position, or w ≥ wmin shares and leaves a remainder ≥ wmin, where wmin = (S + VS) / q with q = (A + VA) / W_MIN_VALUE, W_MIN_VALUE = 10 KAS (wmin = 1 if q = 0): at the request-time price, every partial withdrawal and every remainder is worth about 10 KAS or more (vault check W4b; D86, O-M6-2). Request griefing is mitigated by cost only, each slot locking about 10 KAS plus R until the next settlement; the fee auction does not help at 10 BPS, because the first request is mined within about 0.5 s (testnet-10, D87, O-M6-1). The residual, and vaults holding less than 10 KAS (q = 0), are on the release gate; batching is out of scope.
 - **Rounding.** Shares round down on deposit and assets round down on withdrawal. A zero-share mint is impossible: `draw()` converts the deposits only if the aggregate mint gives every request at least one share; otherwise the record is in refund mode and each deposit settlement repays its deposit (D70). A withdrawal payout below P_MIN accrues in the request and is paid with its final settlement. Products of shares and prices use `mulfrac` (floor(a × r / c) without a 64-bit overflow, D73) and are range-checked (R8).
@@ -430,7 +428,7 @@ An admin key, committed at deployment, can change s_F, s_R and the fee address. 
 | Round controller | Round number, m, price, deadline (absolute DAA), active shares and pending admin parameters, fee address, admin key, J(r), J_boost(r), G2(r), L(r), V_rec, fee accumulator A, previous-round-drawn flag, set-params-used flag, reserve funder. Value: boost pot + A (+ R) | One round |
 | Shard (K per round) | Round, shard index, m, price, deposit d, s_R, counter root, gross sales S, referral paid P_R. Value: S − P_R (+ R) | One round |
 | Ticket | Round, round deadline T (absolute DAA, from the shard), bundle of combinations (6 bytes each), claimed bitmap, payout script. Value: d × b | Until fully claimed or deposit returned |
-| Frozen marker | Round, all K roots, S, P_R, m, J, J_boost, G2, shares, absolute seed reference, reserve funder. Value: S − P_R − C_close + J_boost (+ R) | Until `draw()` |
+| Frozen marker | Round, all K roots, S, P_R, m, J, J_boost, G2, shares, reserve funder (no seed reference since M7: the marker's creation DAA score fixes D, D93, D99). Value: S − P_R − C_close + J_boost (+ R) | Until `draw()` |
 | Prize pool (jackpot, second prize, each lower tier) | Round, tier, slice (J, G2 or slice_t), winning numbers, m, K roots, claim deadline, reserve funder | Until absorbed after the window |
 | Round result record | Winning numbers, roots, slices, m, claim deadline, pool reserve funder: the public data claimants need and pools are rebuilt from | Kept by wallets and indexers (section 9) |
 | House vault | Last drawn round, total_assets, total_shares, pending deposit assets, pending withdrawal shares, locked liability L, and the record, request and position template hashes (instance constants set at genesis). Value: total_assets + pending deposits + R | Permanent, touched every draw and every request |
@@ -450,7 +448,7 @@ Every state begins with a role byte and its round number (R5).
     - OpOutputCovenantId only for genesis outputs, and to check that unbound outputs (caller, referral, fee, payout, change) report the zero ID.
 
     SilverScript v1.0.0 does not expose OpOutputAuthorizingInput; the authorized-output index is its exposed equivalent. *(Proposal; confirm in the M1 spec. It replaces the per-index covenant-ID check proposed with v0.4.1 (DECISIONS rows on R2 and the design rename), which proves membership but not which input authorized the output.)*
--   **R3 Absolute time.** Deadlines and the seed reference are stored as absolute DAA scores and never derived from when an object was last spent.
+-   **R3 Absolute time.** Deadlines are stored as absolute DAA scores and never derived from when an object was last spent. The anchor reference D is the marker's creation DAA score plus a committed offset; the marker cannot be refreshed, so D cannot move (M7, D93, D99).
 -   **R4 Reconstructible state.** Prize pools, which can stay idle for days, carry only data reconstructible from the round result record and their UTXO value. The controller and the vault are spent at least once per round.
 -   **R5 Authenticated roles.** Every state starts with a role byte and the round number. Every consumer checks covenant ID + role + round before using an input.
     - Another role's state is read only with `readInputStateWithTemplate` and written only with `validateOutputStateWithTemplate` or `validateOutputStateWithInputTemplate`.
@@ -491,7 +489,7 @@ Buyers of the same shard at the same moment conflict. One succeeds and the other
 
 Valid only after the round deadline (lower-bound locktime) and only if the controller's flag shows that round r−1 has been drawn. Spends the controller and all K shards of round r and the caller's funding. Creates:
 
--   the frozen marker for round r. It records all K roots, S, P_R, m, J, J_boost, G2, the shares and the seed reference (the maximum creation DAA score of its inputs plus a committed offset, stored as an absolute value). Its value is in 5.5;
+-   the frozen marker for round r. It records all K roots, S, P_R, m, J, J_boost, G2 and the shares. It holds no seed reference: the marker's own creation DAA score fixes D, from which `draw()` finds the anchor block (D93, section 11). Its value is in 5.5;
 -   the controller for round r+1:
     - m(r+1) from the game-size rule (4.6) and the parameters (pending admin values applied);
     - the boost pot and fee accumulator carried over;
@@ -501,11 +499,11 @@ Valid only after the round deadline (lower-bound locktime) and only if the contr
 
 Because round r's shards are consumed, no purchase can change round r's counters after `close()`. Purchases in flight against old shards fail and rebuild against round r+1. This is the sales cutoff; no transaction-expiry primitive is needed. Requiring round r−1 to be drawn first keeps the rounds strictly ordered. If a `draw()` is late, the next round's shards each accept one buy after its deadline and then wait for `close()`, so sales pause until the late draw happens.
 
-`close()` sets the next deadline T(r+1) = max(scheduled deadline, its own DAA score + D_min), where D_min is a committed minimum sales period. Its own DAA score is the maximum creation DAA score of its inputs, as for the seed reference. New shards are therefore always created before their round's deadline, so a late `close()` cannot open a round that sells nothing *(proposal with the late-buy bound; confirm in the M1/M2 specs)*.
+`close()` sets the next deadline T(r+1) = max(scheduled deadline, its own DAA score + D_min), where D_min is a committed minimum sales period. Its own DAA score is the maximum creation DAA score of its inputs. New shards are therefore always created before their round's deadline, so a late `close()` cannot open a round that sells nothing *(proposal with the late-buy bound; confirm in the M1/M2 specs)*.
 
 ## 7.3 draw()
 
-Valid once the seed source for the frozen marker's seed reference exists (parked, section 11). Spends:
+Valid from D (the frozen marker's creation DAA score + seed_offset) with the 272-byte proof of the anchor block X, or as a void (empty proof) from D + draw_window (section 11). Spends:
 - the frozen marker of round r;
 - the house vault;
 - the controller of round r+1 (still open, because `close()` of round r+1 waits for this draw);
@@ -514,13 +512,14 @@ Valid once the seed source for the frozen marker's seed reference exists (parked
 
 The script:
 
--   derives the winning numbers from the seed: 5 distinct numbers in 1..30 and a bonus in 1..m, by a bias-negligible mapping;
+-   derives the winning numbers from X.hash (D94): 5 distinct numbers in 1..30 and a bonus in 1..m, by a bias-negligible mapping;
 -   verifies the K leaves of the winning five main numbers against the K frozen roots, and from them computes h_J and n2 (8.4);
 -   computes each lower-tier budget and slice from S and the shares, and the jackpot and second-prize pools from J, G2, h_J and n2 (5.3);
 -   creates one pool per paying lower tier, plus the jackpot pool if h_J ≥ 1 and the second-prize pool if n2 ≥ 1. Each carries the winning numbers, m, the K roots and the claim deadline;
 -   settles the vault (5.4), pays the protocol fee if it reaches the minimum output, pays C_draw to the caller and absorbs expired pools into the boost pot;
 -   converts the vault's pending requests in aggregate and, when anything is pending, creates the settlement record at output 3 + np (np = the number of new pools), with its R posted by the caller (5.4);
--   fixes J(r+1) by the rule in 4.6 from V' before the conversions, records it with V_rec = the vault's total_assets after the conversions (D71) in the round r+1 controller, and sets its flag.
+-   fixes J(r+1) by the rule in 4.6 from V' before the conversions, records it with V_rec = the vault's total_assets after the conversions (D71) in the round r+1 controller, and sets its flag;
+-   in void mode (D96) has no winners and creates no pools: H, J_boost and every B_t go to the boost pot (V' = total_assets); the fee, C_draw, the conversions and J(r+1) are as in a draw (conservation D105).
 
 Every output follows from the inputs and fixed rules. The caller's wallet assembles the transaction and the K proofs; it decides nothing.
 
@@ -546,11 +545,11 @@ Anyone may submit a claim, because the payout script is fixed in the ticket; the
 
 | Transition | Rule |
 |:----------------|:------------------------------------------------|
-| `return_deposit()` | Anyone. The ticket cannot read the claim deadline, because `draw()` sets it after the ticket exists. *Proposal (confirm in the M4 spec):* valid either (a) when co-spending any prize pool of the same round whose claim deadline has passed (lower-bound locktime; the pool is recreated unchanged), or (b) from T + D_ret. T is the round deadline stored in the ticket. D_ret is a committed delay of at least the allowed draw delay plus 7 days, which covers rounds whose pools were all absorbed. Consumes the ticket and pays d × b to its payout script. Unclaimed winning indices are forfeited, as they would be at absorption. If `draw()` is later than T + D_ret − 7 days, path (b) shortens the window; this belongs to the parked missed-draw item |
+| `return_deposit()` | Anyone. The ticket cannot read the claim deadline, because `draw()` sets it after the ticket exists. *Proposal (confirm in the M4 spec):* valid either (a) when co-spending any prize pool of the same round whose claim deadline has passed (lower-bound locktime; the pool is recreated unchanged), or (b) from T + D_ret. T is the round deadline stored in the ticket. D_ret is a committed delay of at least the allowed draw delay plus 7 days, which covers rounds whose pools were all absorbed. Consumes the ticket and pays d × b to its payout script. Unclaimed winning indices are forfeited, as they would be at absorption. Path (b) can precede a pool's claim deadline only if `close()` is accepted later than T + 5,183,400 DAA (about 6 days), so the shortening is bounded (D102) |
 | `set_params()` | Admin key only, once per round, caps checked in script. Writes the pending slot of the open round's controller (5.6) |
 | `request_deposit()` / `request_withdraw()` | Backer requests: spend the vault (once it is 600 DAA old), add to its pending totals and create a vault request. A deposit names any owner and needs D ≥ 10 KAS; a withdrawal needs the position owner's input and takes the whole position, or w ≥ wmin with a remainder ≥ wmin (W4b, 5.4) |
 | `settle()` | Anyone. Settles one request against its draw's settlement record: a share position for a deposit (or the deposit back in refund mode), a payout for a withdrawal, with the request's R returned to its owner (5.4) |
-| `refresh()` | Any idle long-lived object may be re-spent into an identical successor after an idle delay, republishing its state (R3 keeps all times fixed). This covers the marker, pools, tickets, share positions, vault requests and settlement records; the vault needs none, because every `draw()` re-spends it |
+| `refresh()` | Any idle long-lived object may be re-spent into an identical successor after an idle delay, republishing its state (R3 keeps all times fixed). This covers pools, tickets, share positions, vault requests and settlement records, but not the marker (D99: a refreshed marker would move the anchor); the vault needs none, because every `draw()` re-spends it |
 
 # 8. The combination counter
 
@@ -575,7 +574,7 @@ For each round, the number of holdings of each exact combination. It is one of M
 
 ## 8.3 Why sharding
 
-Every purchase must spend one shard. With one global counter, all buyers would conflict. With K shards and free choice of shard, buyers spread out and proceed in parallel. K is limited by how many shards `close()` can consume in one transaction, bound by transient mass (feasibility Q5; the M0 probes gave 23–62 depending on shard script size). With the real scripts, `close()` uses 86.8 / 91.9 / 97.1 / 102.2 % of transient at K = 16 / 17 / 18 / 19, so the largest K is 16 within 90 % and 18 within 100 % (M6, D83; provisional until the real-seed milestone). Larger K makes the `draw()` and `claim()` proofs larger.
+Every purchase must spend one shard. With one global counter, all buyers would conflict. With K shards and free choice of shard, buyers spread out and proceed in parallel. K is limited by how many shards `close()` can consume in one transaction, bound by transient mass (feasibility Q5; the M0 probes gave 23–62 depending on shard script size). With the real scripts, `close()` uses 86.8 / 91.9 / 97.1 / 102.2 % of transient at K = 16 / 17 / 18 / 19, so the largest K is 16 within 90 % and 18 within 100 % (M6, D83; final after the M7 re-measurement: 86.5 / 91.6 / 96.7 / 101.9 %). Larger K makes the `draw()` and `claim()` proofs larger.
 
 Purchases conflict when two buyers pick the same shard while its successor is not yet usable. A fresh buy finds its shard busy with probability a = λτ/K (shard utilisation; M6, D88). On testnet-10 a buy chained on an unaccepted successor was accepted after τ_chain = 0.919 s (median), and the successor was merged after τ_merge = 1.655 s. At K = 16 and λ = 1 buy/s that gives a first-attempt conflict rate of about 0.056 to 0.104.
 
@@ -617,7 +616,7 @@ Kaspa nodes keep only the hash of a covenant's state. The data itself is in tran
 | Forged count at purchase | Solved in model | Merkle update checked against the shard root |
 | Under-reported holder count at claim | Solved in model | Claim must prove all K leaves against the frozen roots |
 | Buying after the close | Solved in model | Round shards consumed by `close()`; no later purchase can reach them |
-| Diluting a winner by buying copies after the numbers are known | Solved in model, given an unpredictable seed | Counters frozen at `close()`, before the seed reference (section 11) |
+| Diluting a winner by buying copies after the numbers are known | Solved in model, given an unpredictable seed | Counters frozen at `close()`, before the anchor block (section 11) |
 | Double claim of a holding | Solved in model | Claimed bitmap in the ticket successor; last claim consumes the ticket |
 | Overdrawing a pool | Solved in model | Section 4.4 |
 | Overdrawing the vault | Solved in model | L ≤ cap × V when J is fixed (cap on total L proposed, 4.6); withdrawals locked above L (4.4, 5.4) |
@@ -634,7 +633,7 @@ Kaspa nodes keep only the hash of a covenant's state. The data itself is in tran
 | `return_deposit()` before the window ends | Solved in model | Co-spent pool past its deadline, or T + D_ret (7.5) |
 | Late winner raced by `return_deposit()` after the deadline | Accepted | The guaranteed window is 7 days (4.5) |
 | Nobody calls `close()` | Liveness only | Sales pause after the deadline (one buy per shard); anyone, including players, can call; caller reward |
-| Nobody calls `draw()` in time | **Parked** | The seed block is only verifiable for about 12 h [S4]. Until `draw()` succeeds, round r's funds and the vault liability stay locked, and round r+1 cannot close (its sales pause after its deadline). A non-rerollable fallback belongs to the randomness work |
+| Nobody calls `draw()` in time | Solved in model | The anchor block is only verifiable for about 12 h [S4]. From D + draw_window anyone can void the round (D96); the drawer itself enforces draw_window ≥ VOID_MIN = 2F (SA12). A void has no winners and sets drawn = 1, so it cannot re-roll; the round's funds go to the boost pot |
 | Wrong jackpot or second-prize proof at draw | Solved in model | K leaves verified against the frozen roots |
 | Shard contention under heavy load | Mitigated | K shards, free shard choice, wallet retries |
 | Post-deadline buys starving `close()` | Solved in model (proposal) | Shard created at or after T accepts only `close()` (7.1) |
@@ -646,22 +645,27 @@ Kaspa nodes keep only the hash of a covenant's state. The data itself is in tran
 | Network refuses large `close()` or small outputs | Measured | v2.1.0 nodes apply the block limits per transaction. M0's `buy()`, claim and `close()` shapes (K ≤ 62) were accepted and mined on testnet-10 (feasibility Q7). Outputs below 0.02 KAS plain or 0.08 KAS covenant-bound are invalid. |
 | Arithmetic overflow | Implementation gate | Checked 64-bit arithmetic; ordered operations and bounded values (4.6) |
 | Lost shard data after 30 h, including a round that overruns because a `draw()` is late | Mitigated | Wallets keep all K shard trees; any single copy suffices, checked against the roots |
-| Miner manipulation of the seed | **Parked** | Section 11 |
+| Miner manipulation of the seed | **Accepted, OPEN release gate** | The anchor block's miner can withhold it and re-sample; the bias is bounded by α against ε, not by J (D100 as amended; section 11) |
 | Persistent censorship | Fundamental limitation | No application can force inclusion |
 
-# 11. Randomness (parked)
+# 11. Randomness: the anchor block's hash
 
-This draft does not choose a seed source. The interface is fixed: `close()` stores an absolute seed reference after which the seed source must occur, and `draw()` derives the winning numbers from that source. Requirements for the eventual design:
-- the source is fixed before it is knowable and after counters freeze;
-- the covenant authenticates the uniquely eligible source;
-- no caller can choose between sources or wait for a better one;
-- a missed draw cannot cause a re-roll;
-- miner withholding and selection under Kaspa's rules are modelled;
-- the maximum jackpot is bounded by the cost of manipulation.
+The seed is the hash of one selected-chain block after `close()`, the anchor block X (M7, `docs/specs/7.md`). Nobody stores or chooses a seed reference.
 
-Earlier project research on deriving the seed from Kaspa block data is the starting point. Two constraints already apply to it:
-- Under KIP-21, OpChainblockSeqCommit succeeds only for a selected-chain block within finality depth (about 12 hours), and it is re-evaluated after a reorg. Any seed design therefore needs a missed-window fallback; that fallback is part of the parked work.
-- The test-only seed path must be impossible to build for mainnet.
+- **Anchor rule (D93).** D = the marker's creation DAA score (that of the chain block that accepted `close()`) + seed_offset, a committed constant of 600 DAA (D97). seed_offset ≥ 1 is enforced at genesis and by `close()`, so X is never the block that accepted the close. X is the first selected-chain block with DAA score ≥ D. DAA score never decreases along the chain, so X is unique: daa(X) ≥ D and daa(P) < D for its selected parent P. The closer chooses only when to submit `close()`.
+- **Seed (D94).** blake2b("KLOT/seed" ‖ cov ‖ round ‖ X.hash), mapped to the winning numbers as before (D42). X.hash is a PoW sample, so every alternative costs a block. SeqCommit(X) is not used: it commits nothing of X's own PoW, so X's miner could choose among values for free.
+- **Proof (D95 as amended).** One 272-byte argument: X's hash and its KIP-21 commitment preimage (152 B), then P's preimage without its hash (120 B). The drawer recomputes both commitments, calls OpChainblockSeqCommit once on X.hash and requires equality, `pc == x_pc` (P is X's selected parent), daa(X) ≥ D and daa(P) < D. The opcode admits only a selected-chain block within finality depth (about 12 hours) and re-evaluates it after a reorg; a draw whose X leaves the chain fails, and the new chain has its own anchor.
+- **Void (D96).** `draw()` with an empty proof is valid from D + draw_window, with draw_window = 2F = 864,000 DAA (24 h, D97). The drawer refuses draw_window < VOID_MIN = 2F on every spend, so the floor does not depend on genesis. A void has no winners and no pools; the round's money goes to the boost pot (7.3). Draw and void exclude each other: at D + 2F, X is outside the opcode window from every point of view, as long as at most F − 2·248 = 431,504 red blocks were merged in those 24 h (spec A5 with its amendment, D97). The claim deadline is D + draw_window + claim_window (D98).
+
+The requirements set for the seed design are met:
+- the source is fixed before it is knowable and after counters freeze: D follows from the marker, and X lies after the close (D93);
+- the covenant authenticates the uniquely eligible source (D95; tested against neighbouring, side, out-of-window and forged blocks);
+- no caller can choose between sources or wait for a better one: X is unique, waiting only risks the void, and the marker has no `refresh()` (D99);
+- a missed draw cannot cause a re-roll: the void has no winners and sets drawn = 1 (D96);
+- miner withholding and selection under Kaspa's rules are modelled (spec A6, D100 as amended);
+- "the maximum jackpot is bounded by the cost of manipulation" is answered by D100: the bound is α against ε, not J. The anchor's miner can withhold X and re-sample; this pays when its rentable burst hashrate α exceeds the player's expected loss fraction ε, which the whale check can push near 0. This bias is **OPEN** on the release gate; the candidate fix is a VDF over X.hash proven with OpZkPrecompile.
+
+The test-only seed path is deleted (D101). The only TEST-ONLY item left is the short-void drawer variant used by the testnet-10 void probe; it is compiled out of `mainnet` builds. On testnet-10 a real draw and a void were accepted (D103).
 
 # 12. Costs and limits
 
@@ -671,7 +675,7 @@ M0 measured the building blocks with probe scripts (`docs/feasibility.md`, `docs
 
   > R = max(4C(K + 2) / L, 4C(K + 1) / (L − 10,101)), with C = 10¹² and L = 500,000
 
-  That is 1.44 KAS at K = 16, 2.72 KAS at K = 32 and 5.31 KAS at K = 64 (Q4). The first term is K + 2 fresh R-outputs with no input relief. The second is a controller that keeps a large boost pot while the caller's output is about 1 KAS; it binds from about 3.96 KAS (K ≥ 48). `draw()` has its own condition, which also counts its pools, its settlement record and its reserve refunds (Q4), and R must satisfy the tighter of the two. With the real scripts (M6, D83) `close()` binds: its storage worst case has K + 3 fresh R-outputs, so R = 4C(K + 3) / (0.9 L) = 1.69 KAS at K = 16 (89.9 % measured); `draw()` alone needs 1.529 KAS. Genesis has K + 4 outputs at R but is exempt from the 90 % margin (U-M6-1). R = 1.69 KAS is provisional until the real-seed milestone;
+  That is 1.44 KAS at K = 16, 2.72 KAS at K = 32 and 5.31 KAS at K = 64 (Q4). The first term is K + 2 fresh R-outputs with no input relief. The second is a controller that keeps a large boost pot while the caller's output is about 1 KAS; it binds from about 3.96 KAS (K ≥ 48). `draw()` has its own condition, which also counts its pools, its settlement record and its reserve refunds (Q4), and R must satisfy the tighter of the two. With the real scripts (M6, D83) `close()` binds: its storage worst case has K + 3 fresh R-outputs, so R = 4C(K + 3) / (0.9 L) = 1.69 KAS at K = 16 (89.9 % measured); `draw()` alone needs 1.529 KAS. Genesis has K + 4 outputs at R but is exempt from the 90 % margin (U-M6-1). R = 1.69 KAS is final (re-confirmed in M7);
 - the minimum ticket value at p = 1 KAS is 0.0828 KAS without a referral output, and 0.1045 KAS with the 0.1 KAS referral output (Q4). With the real scripts the ticket deposit is d = 0.13 KAS, final (D80): the b = 1 `buy()` with a 0.1 KAS referral then uses 84.5 % of storage (the 90 % floor is 0.1193 KAS, M6-e);
 - `close()` is bound by transient mass, not compute (Q5);
 - storage mass makes small standalone outputs invalid or throughput-limiting, which sets M_ref and the fee payout minimum.
@@ -679,8 +683,8 @@ M0 measured the building blocks with probe scripts (`docs/feasibility.md`, `docs
 | Transition | Main cost driver | Still to measure |
 |:----------------|:----------------------------------|:-------------------------------------|
 | `buy()` | b Merkle paths of depth 18, each used twice, leaf bytes per combination; ticket and referral outputs | Shard script size per bundle slot and b_max (M1); M_ref (M1) |
-| `close()` | K shard inputs carrying the shard script, K + 2 fresh R-outputs | Measured in M6: largest K = 16 within 90 % (provisional, D83) |
-| `draw()` | K paths and leaves, K × m_max count sums, pool outputs with fresh R | Measured in M6: m_max = 50 within 90 % (provisional, D83); re-run with the real-seed drawer |
+| `close()` | K shard inputs carrying the shard script, K + 2 fresh R-outputs | Measured in M6: largest K = 16 within 90 % (final, re-confirmed in M7, D83) |
+| `draw()` | K paths and leaves, K × m_max count sums, pool outputs with fresh R | Measured in M6: m_max = 50 within 90 % (final, re-confirmed with the M7 drawer, D83) |
 | `claim()` | K paths and leaves, bundle index | Script and proof size (M4) |
 
 Platform limits: Appendix A.
@@ -702,10 +706,10 @@ Three consequences remain:
 1. **One round, small K** (M1–M4). `buy()` with bundles, the counter leaf, the split and the referral output. `close()` with the game-size rule and admin parameters. `draw()` with a test-only seed, with the jackpot and second prize won and not won. `claim()` with K-leaf proofs and `return_deposit()`. Tests cover duplicates, an unheld winning combination, double claims and forged or under-reported counts.
 2. **House vault shares** (M5). Deposits and withdrawals across draws and the liability lock.
 3. **K shards and limits** (M6, done). Largest K, b_max and m_max with real scripts; purchase conflict rate.
-4. **Real seed** (M7). Replaces the test-only seed (section 11) and fixes the seed_ref choice at `close()`; re-confirms K, R and m_max.
+4. **Real seed** (M7, done). The anchor block's hash replaces the test-only seed, and `close()` no longer forms a seed reference (section 11); K, R and m_max re-confirmed.
 5. **Testnet-10** (M8). Several rounds including an m change, a referral, an admin change and the retention cases of section 9.
 
-No real-value launch while randomness is parked.
+No real-value launch while the miner-withholding bias is OPEN (D100).
 
 # 14. Decisions and open items
 
@@ -724,7 +728,7 @@ No real-value launch while randomness is parked.
 -   Every protocol UTXO carries a reserve R; no standalone tiny outputs.
 -   Claim window: at least 7 days.
 -   Rounds strictly ordered: `close()` of a round waits for the previous round's `draw()`.
--   Randomness parked.
+-   Seed = the anchor block's hash, with a void fallback (M7, D93–D99).
 
 **Open**
 
@@ -738,10 +742,11 @@ No real-value launch while randomness is parked.
 -   Lower-tier money of other players in the whale check (4.6).
 -   Request griefing residual (mitigated by cost only, D87) and partial withdrawals while the vault holds less than 10 KAS (O-M6-3): release gate. The S₀ floor is closed (D84); batching is out of scope (M6).
 -   Round length, given the roughly 30-hour data window (section 9).
--   Final R, K and m_max: measured in M6 (R = 1.69 KAS, K = 16, m_max = 50), provisional until re-confirmed at the end of the real-seed milestone (D83). The ticket deposit d = 0.13 KAS is final (D80).
+-   Final R, K and m_max: measured in M6 (R = 1.69 KAS, K = 16, m_max = 50), final (M7, D83 re-confirmed). The ticket deposit d = 0.13 KAS is final (D80).
 -   Ticket transfer.
 -   Admin key rotation.
--   Missed-draw fallback, and what happens to locked funds if `draw()` never succeeds (with randomness).
+-   Missed-draw fallback, and what happens to locked funds if `draw()` never succeeds: closed by the void (D96).
+-   Miner-withholding bias (D100 amended): VDF+ZK spike and a rentable-hashrate measurement, release gate.
 
 # Appendix A. Kaspa platform facts
 
@@ -785,7 +790,7 @@ Verified against the audited Code4rena snapshot 538649e8a05b07efa706083d1158c65f
 | Prize = tier pool ÷ (all winning combinations + duplicate winners) | GuaranteedMinimumPayoutCalculator | Prize = slice per winning combination, split among its holders |
 | Referral fees | Jackpot | Single-level: s_R of the purchase paid inside `buy()`; no share of winnings in v1 |
 | Protocol fee taken from LP profit (as stated by the project; not re-verified at S11) | Jackpot | Protocol fee s_F taken from sales |
-| Permissionless `runJackpot()` plus randomness callback | runJackpot, scaledEntropyCallback | `close()` plus `draw()`; randomness parked |
+| Permissionless `runJackpot()` plus randomness callback | runJackpot, scaledEntropyCallback | `close()` plus `draw()`; seed from the anchor block (M7) |
 | Claim by ticket owner, ticket burned | claimWinnings | Claim per bundled combination pays its fixed script; anyone may submit |
 | Pending LP deposits and withdrawals | JackpotLPManager | Vault requests converted at a draw's share price |
 | Unlimited ticket sales | buyTickets | Unlimited ticket sales |
