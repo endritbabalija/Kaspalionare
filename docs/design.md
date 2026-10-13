@@ -251,9 +251,9 @@ A full-coverage buyer recovers four things:
 - the jackpot and every second prize.
 
 Since the shares sum to 1, the left side equals C × p × (s_H + s_F). Consequences:
-- If margin ≤ (s_H + s_F) / ((1 − e) × s_H), the edge rule already implies the whale check for the house part. That bound is 1.256 at the starting values, and at least 1/(1 − e) = 1.176 for any s_F and s_R.
-- Only the boost pot J_boost can then fail the whale check.
-- The margin is open (M2 spec) and must respect this bound.
+- If margin ≤ (s_H + s_F) / ((1 − e) × s_H), the edge rule already implies the whale check for the house part. That bound is 1.256 at the starting values, and at least 1/(1 − e) = 1.176 for any s_F and s_R. Only the boost pot J_boost can then fail the whale check.
+- Above that bound the whale check is the stricter of the two for the house part as well: it sets m and limits J_house, and the edge rule holds with slack, so backers keep more than e.
+- The margin is fixed at genesis in [MARGIN_MIN, 2.0], with MARGIN_MIN = 1.5 enforced by `close()`, `draw()` and genesis (D108, D109, D113). The floor is above the 1.256 bound on purpose: it limits the anchor miner's gain from re-rolling the seed (D100). It is provisional until the seed-fairness decision (D111, D112). At 1.5 and the starting values the edge rule is never the binding check.
 
 Lower-tier money funded by *other* players' purchases is not in the check, because it cannot be bounded at `close()`. A whale profits from it only if others buy well over C combinations, and then duplicates dilute the whale's jackpot. This is an open item for the M2 spec.
 
@@ -285,6 +285,7 @@ Top-up moves edge above target to players. Because m is a whole number, the edge
 - Top-up: raises J_house to 1,040,421 KAS (the edge exactly 15%), if the cap allows it. With G2 = floor(J × g / 10⁴) = 10,404 KAS, liability L = 1,165,269 KAS, about 11.7% of V'.
 - Whale check: 1,852,578 × 0.79 = 1,463,537 ≥ margin × 1,165,269, which holds for any margin ≤ 1.256.
 - Other jackpots at this price: J = 5,000,000 needs m = 125.
+- The lines above use a margin of 1.17. **At the deployed floor of 1.5** (D113), the whale check binds instead. Each combination may carry at most q = 0.79 / 1.5 = 0.5267 KAS of jackpot money, against the edge allowance of 0.629 KAS. m = 13 fails (1,120,000 > 975,690 KAS), so m = 16 and C = 2,280,096. The top-up stops at J_house = 1,044,217 KAS, where J_house + G2 × 15 reaches the whale limit of 1,200,850 KAS (about 12.0 % of V'). The edge rule holds with slack, and backers keep about 29 % of house income instead of 15 %.
 
 **Arithmetic.** Each comparison is ordered so that every intermediate fits in signed 64 bits. For example, the allowance per combination a = floor(p × (10⁴ − e) × s_H / 10⁸) is computed first, then multiplied by C. Rounding always favours the checks. The M2 spec lists the order of operations and the maximum of every quantity.
 

@@ -135,7 +135,7 @@ and updates the sections below before it ends. Handoff completeness beats row co
 ## Open questions for the owner
 - (S1, RESOLVED 2026-10-14) Numbering: the owner renumbered the M8 decisions to D113–D125 (spec 8, milestones and this file updated).
 - (S1, RESOLVED 2026-10-14) Floor ordering versus research row D112: the owner chose to keep the 1.5 floor now as D109 planned; it stays provisional (one constant per script) and RSD (D111, D112) remains a separate release-gate decision.
-- (S1, RECORDED 2026-10-14) design.md 4.6 vs margin 1.5: proposal row in `docs/DECISIONS.md` ("Proposed design edit … design 4.6 at margin above 1.256"); the owner applies or rejects it.
+- (S1, DONE 2026-10-14) design.md 4.6 updated to the 1.5 floor at the owner's request (DECISIONS row "Design 4.6 edit applied").
 
 ## Known failing / skipped tests
 - `spike_vdf` `sv_measure_masses_and_stack` overflows its stack in a debug build (STATUS_STACK_OVERFLOW, 0xc00000fd). **Pre-existing:** reproduced at HEAD 93d5413 in a temporary worktree (2026-10-14). CLAUDE.md runs spike_vdf with `--release`. Not fixed (outside S1).
