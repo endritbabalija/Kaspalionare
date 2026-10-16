@@ -3075,6 +3075,8 @@ dependencies = [
  "kaspa-txscript-zk-sdk",
  "risc0-zkvm",
  "secp256k1",
+ "serde",
+ "serde_json",
  "silverscript-abi",
 ]
 

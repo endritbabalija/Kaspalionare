@@ -8,14 +8,18 @@
 
 pub mod anchor;
 pub mod buy;
+pub mod bundle;
 pub mod claim;
 pub mod close;
 pub mod combo;
+pub(crate) mod decode;
 pub mod draw;
 pub mod game;
 pub mod genesis;
+pub mod index;
 pub mod ledger;
 pub mod params;
 pub mod smt;
 pub mod state;
+pub mod store;
 pub mod vault;

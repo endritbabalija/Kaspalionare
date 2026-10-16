@@ -422,6 +422,12 @@ pub struct Chain {
     pub requests: Vec<(TransactionOutpoint, RequestState, u64, u64)>,
     /// M5: live settlement records (outpoint, state, value, creation DAA).
     pub records: Vec<(TransactionOutpoint, RecordState, u64, u64)>,
+    /// Spec M8 (IX1): every transaction applied to the ledger, in order, with the DAA it was
+    /// applied at and the entries it spent (the indexer's input).
+    pub log: Vec<lottery::index::Accepted>,
+    /// Set by `fabricate_ticket` / `fabricate_pool`: the ledger holds a UTXO no transaction
+    /// created, so `log` alone does not reproduce it.
+    pub fabricated: bool,
 }
 
 impl Chain {
@@ -470,6 +476,8 @@ impl Chain {
             positions: vec![(outs[g.position_output()], g.position.clone(), g.reserve(), daa)],
             requests: vec![],
             records: vec![],
+            log: vec![lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries)],
+            fabricated: false,
         }
     }
 
@@ -498,6 +506,7 @@ impl Chain {
     pub fn buy(&mut self, i: usize, c: &BuyCase, ops: Vec<TransactionOutpoint>, daa: u64) -> Final {
         let f = accept(&self.buy_built(c, ops));
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("buy applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         self.shards[i] = (outs[0], c.successor(), daa);
         self.trees[i] = c.proofs().2;
         self.tickets.push((outs[1], c.ticket(), f.tx.outputs[1].value, daa));
@@ -536,6 +545,7 @@ impl Chain {
         let x = c.expected();
         let f = accept(&self.close_built(c, ops));
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("close applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         let k = c.k();
         self.controller = (outs[0], x.controller.clone(), daa);
         self.pot = x.values[0] - x.controller.acc as u64 - x.controller.reserve as u64;
@@ -560,6 +570,7 @@ impl Chain {
         b.outpoints = std::iter::once(self.params.0).chain(fops).collect();
         let f = accept(&b);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("set_params applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         self.params = (outs[0], sp.successor(), daa);
         f
     }
@@ -619,6 +630,7 @@ impl Chain {
         // one with nothing pending is the M4 draw, accepted as before.
         let f = if x.rec { super::m5::accept_draw5("draw (conversion)", c, &self.draw_built(c, ops)) } else { accept_draw(&self.draw_built(c, ops)) };
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("draw applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         self.drawer = (outs[0], x.drawer.clone(), daa);
         self.vault = (outs[1], x.vault.clone(), daa);
         self.controller = (outs[2], x.controller.clone(), daa);
@@ -684,6 +696,7 @@ impl Chain {
     pub fn fabricate_ticket(&mut self, state: TicketState, value: u64, daa: u64) -> usize {
         let e = UtxoEntry::new(value, self.t.ticket_spk(&state), daa, false, Some(self.cov));
         let op = self.ledger.insert(e);
+        self.fabricated = true;
         self.tickets.push((op, state, value, daa));
         self.tickets.len() - 1
     }
@@ -693,6 +706,7 @@ impl Chain {
     pub fn fabricate_pool(&mut self, state: PoolState, remaining: u64, daa: u64) -> usize {
         let e = UtxoEntry::new(remaining + state.reserve as u64, self.t.pool_spk(&state), daa, false, Some(self.cov));
         let op = self.ledger.insert(e);
+        self.fabricated = true;
         self.pools.push((op, state, remaining, daa));
         self.pools.len() - 1
     }
@@ -745,6 +759,7 @@ impl Chain {
         assert!(x.rejects.is_empty(), "Chain::claim of a case the reference rejects: {:?}", x.rejects);
         let f = accept_m4("claim", &self.claim_built(c, ops.clone()));
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("claim applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         let pi = self.pools.iter().position(|p| p.0 == ops[1]).expect("claimed pool tracked");
         self.pools[pi] = (outs[0], x.pool.clone(), self.pools[pi].2 - x.prize as u64, daa);
         let ti = self.tickets.iter().position(|t| t.0 == ops[0]).expect("claiming ticket tracked");
@@ -788,6 +803,7 @@ impl Chain {
         b.outpoints = ops.clone();
         let f = accept_m4("return_deposit", &b);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("return applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         if let ReturnPath::WithPool { .. } = c.path {
             let pi = self.pools.iter().position(|p| p.0 == ops[1]).expect("co-spent pool tracked");
             self.pools[pi].0 = outs[0];
@@ -834,6 +850,7 @@ impl Chain {
         };
         let f = accept_m4(step, &b);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("refresh applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         match &c.obj {
             RefreshObj::Pool(_) => {
                 let pi = self.pools.iter().position(|p| p.0 == ops[0]).expect("refreshed pool tracked");

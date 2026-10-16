@@ -568,6 +568,94 @@ impl ClaimCase {
     }
 }
 
+impl ClaimCase {
+    /// Spec M8 A4: the next claim of the live ticket `ticket`, built offline from a store
+    /// (an index or a wallet, `ClaimStore`) and the caller's funding UTXOs; no RPC type in
+    /// the signature. It claims the ticket's first unclaimed index whose combination wins a
+    /// tier that has a live pool of the ticket's round (`from_store_index`).
+    pub fn from_store<S: crate::store::ClaimStore + ?Sized>(
+        store: &S,
+        ticket: harness::TransactionOutpoint,
+        funding: &[crate::store::Funding],
+        payer: &crate::store::Payer,
+    ) -> Result<(Self, Vec<harness::TransactionOutpoint>), String> {
+        let (tk, _, _) = store.ticket(&ticket)?;
+        let pools = store.pools(tk.round)?;
+        let claimed = tk.claimed.first().copied().unwrap_or(0xff);
+        for idx in 0..tk.b.clamp(0, 8) {
+            if claimed & (1u8 << idx) != 0 || tk.bundle.len() < 6 * (idx as usize + 1) {
+                continue;
+            }
+            let comb: [u8; 6] = tk.bundle[6 * idx as usize..6 * idx as usize + 6].try_into().unwrap();
+            if pools.iter().any(|p| tier_of(&comb, &p.1.win) == Some(p.1.tier)) {
+                return Self::from_store_index(store, ticket, idx, funding, payer);
+            }
+        }
+        Err(format!("ticket {ticket}: no unclaimed index wins a tier with a live pool of round {}", tk.round))
+    }
+
+    /// The claim of index `idx` of the live ticket `ticket` from a store: the ticket and the
+    /// live pool of its tier come from the store, the count proofs from the round's frozen
+    /// trees (`ClaimStore::trees` refuses an incomplete or open round). The proofs are not
+    /// checked here against the pool's roots: the store is untrusted and the ticket script
+    /// checks every proof against them (D115; `roots_match` is the offline pre-check). The
+    /// funding key and the fee are the caller's `payer` (S2c should-fix 2: no default); the
+    /// change goes back to the funding key. Returns the case and the outpoints in input order.
+    pub fn from_store_index<S: crate::store::ClaimStore + ?Sized>(
+        store: &S,
+        ticket: harness::TransactionOutpoint,
+        idx: i64,
+        funding: &[crate::store::Funding],
+        payer: &crate::store::Payer,
+    ) -> Result<(Self, Vec<harness::TransactionOutpoint>), String> {
+        let t = store.templates()?;
+        let (tk, tv, tdaa) = store.ticket(&ticket)?;
+        let trees = store.trees(tk.round)?;
+        if !(0..tk.b).contains(&idx) || tk.bundle.len() < 6 * (idx as usize + 1) {
+            return Err(format!("ticket {ticket}: index {idx} outside the bundle"));
+        }
+        let comb: [u8; 6] = tk.bundle[6 * idx as usize..6 * idx as usize + 6].try_into().unwrap();
+        let (pop, pool, pv, pdaa) = store
+            .pools(tk.round)?
+            .into_iter()
+            .find(|p| tier_of(&comb, &p.1.win) == Some(p.1.tier))
+            .ok_or_else(|| format!("ticket {ticket} index {idx}: no live pool of a tier it wins"))?;
+        let k = trees.len();
+        if !(1..=K_MAX).contains(&k) || !(2..=M_CLAIM).contains(&pool.m) {
+            return Err(format!("round {}: k = {k}, m = {}", tk.round, pool.m));
+        }
+        let mut c = Self::fabricated_with(k, pool.m, TIER_LOWER0, 20_000_000, &[1], &t);
+        c.b_max = t.b_max;
+        c.ticket = tk;
+        c.ticket_value = tv;
+        c.ticket_daa = tdaa;
+        c.pool = pool;
+        c.pool_value = pv;
+        c.pool_daa = pdaa;
+        c.trees = trees;
+        c.idx = idx;
+        c.cov = store.cov();
+        c.funding = funding.iter().map(|f| FundingIn { value: f.value, daa: f.daa }).collect();
+        // S2c should-fix 2: the caller's funding key and fee, never the builder defaults.
+        c.funding_sk = payer.funding_sk;
+        c.fee = payer.fee;
+        // S2c should-fix 3 (D115): the store is untrusted; a model panic is an error.
+        let x = crate::index::model("claim", || c.expected())?;
+        if !x.rejects.is_empty() {
+            return Err(format!("ticket {ticket} index {idx}: the claim reference rejects it: {:?}", x.rejects));
+        }
+        let mut ops = vec![ticket, pop];
+        ops.extend(funding.iter().map(|f| f.outpoint));
+        Ok((c, ops))
+    }
+
+    /// The offline pre-check of a store's trees: their roots are the pool's frozen roots.
+    pub fn roots_match(&self) -> bool {
+        let roots: Vec<[u8; 32]> = self.trees.iter().map(|t| t.root()).collect();
+        MarkerState::roots_bytes(&roots) == self.pool.roots && self.pool.k == self.trees.len() as i64
+    }
+}
+
 /// A fabricated ticket (D63) of round 1 with deadline TEST_DEADLINE and TEST_PAYOUT.
 pub fn fabricated_ticket(bundle: &[Combo], b_max: usize) -> TicketState {
     let mut bytes = bundle_bytes(bundle);

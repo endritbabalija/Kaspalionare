@@ -619,6 +619,7 @@ impl Chain {
         let f = accept5("request_deposit", &Case5::Deposit(c.clone()), &b);
         check_deposit(c, &f);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("deposit applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         self.vault = (outs[0], x.vault.clone(), daa);
         self.requests.push((outs[1], x.request.clone(), x.values[1], daa));
         f
@@ -662,6 +663,7 @@ impl Chain {
         let f = accept5("request_withdraw", &Case5::Withdraw(c.clone()), &b);
         check_withdraw(c, &f);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("withdraw applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         self.vault = (outs[0], x.vault.clone(), daa);
         self.requests.push((outs[1], x.request.clone(), x.values[1], daa));
         let pi = self.positions.iter().position(|p| p.0 == ops[1]).expect("withdrawn position tracked");
@@ -703,6 +705,7 @@ impl Chain {
         let f = accept5("settle", &Case5::Settle(c.clone()), &b);
         check_settle(c, &f);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("settle applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         let ri = self.records.iter().position(|r| r.0 == ops[1]).expect("record tracked");
         match x.record_output {
             Some(o) => self.records[ri] = (outs[o], x.record.clone(), x.values[o], daa),
@@ -762,6 +765,7 @@ impl Chain {
         b.outpoints = ops.clone();
         let f = accept5(&format!("refresh ({})", c.obj.name()), &Case5::Refresh(c.clone()), &b);
         let outs = self.ledger.apply(&f.tx, &f.entries, daa).expect("refresh applies");
+        self.log.push(lottery::index::Accepted::new(f.tx.clone(), daa, &f.entries));
         macro_rules! upd {
             ($v:expr) => {{
                 let i = $v.iter().position(|p| p.0 == ops[0]).expect("refreshed object tracked");

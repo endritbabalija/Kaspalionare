@@ -413,6 +413,17 @@ pub fn relay_floor_fee(m: &harness::Masses) -> u64 {
     fee_mass * harness::MIN_FEERATE_SOMPI_PER_GRAM
 }
 
+/// Spec M8 D120: the fee of a transaction of fee mass `mass` (the builder's exact mass, as
+/// `relay_floor_fee` counts it) at `rate` sompi per gram, the rate raised to the floor of
+/// 100 sompi per gram (design section 9: "It takes fees from the node's estimator, at
+/// least 100 sompi per gram"; the mempool's DEFAULT_MINIMUM_RELAY_TRANSACTION_FEE,
+/// rusty-kaspa v2.1.0 `mining/src/mempool/config.rs:20`, `harness::MIN_FEERATE_SOMPI_PER_GRAM`).
+/// Checked: an overflowing product is an error, never a wrapped fee.
+pub fn fee_for(mass: u64, rate: u64) -> Result<u64, String> {
+    let r = rate.max(harness::MIN_FEERATE_SOMPI_PER_GRAM);
+    mass.checked_mul(r).ok_or_else(|| format!("fee_for: mass {mass} x rate {r} sompi/gram overflows u64"))
+}
+
 /// Placeholder states for compiling (the template hash does not depend on state values).
 fn dummy_controller() -> ControllerState {
     ControllerState {

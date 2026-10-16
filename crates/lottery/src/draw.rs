@@ -36,6 +36,7 @@ use crate::anchor::AnchorProof;
 use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, Template, Templates, b_max, spk_of};
 use crate::close::{CloseCase, FundingIn, TEST_DEADLINE, TEST_ROUND_LEN};
 use crate::combo::unrank;
+use crate::decode::{pushes, script_num, state_values};
 use crate::game::{
     CLAIM_WINDOW, Conversion, DRAW_WINDOW, F_MIN, FeeSplit, JackpotFix, JackpotRule, PoolSet, RoundAmounts, SeedNumbers, VA, VS,
     anchor_daa, boost_after, claim_deadline, convert, draw_amounts, fee_split, fix_jackpot, guarded_add, muldiv, pool_set, seed_numbers, vault_settle,
@@ -195,6 +196,11 @@ pub struct DrawCase {
     /// x_hash)`, rebuilt from the current fields at every `build`, so a test that changes
     /// marker_daa, the controller's seed_offset or x_hash keeps a valid anchor.
     pub sim: Option<Arc<ChainSim>>,
+    /// Spec M8 A4 (`from_store`): the anchor proof given directly (from RPC or a saved copy).
+    /// When set, it is the `anchor` argument and X.hash is its X's hash; `x_hash` is set to
+    /// the same hash, so with `sim = None` a local run uses `ChainSim::anchored(D, X.hash)`.
+    /// A `Lie::anchor` still overrides it.
+    pub proof: Option<AnchorProof>,
     /// Spec M7 D96: a void (empty anchor, lock >= D + draw_window, no winners).
     pub void: bool,
     /// Reserve funder of the new pools (argument and pool field).
@@ -388,6 +394,7 @@ impl DrawCase {
             funding: vec![FundingIn { value: 100 * KAS, daa: (d + DRAW_WINDOW + 10_000) as u64 }],
             x_hash: TEST_X_HASH,
             sim: None,
+            proof: None,
             void: false,
             funder: Payout::Schnorr(xonly(&FUNDING_SK)),
             fee: KAS / 2,
@@ -439,6 +446,9 @@ impl DrawCase {
         if self.void {
             return vec![];
         }
+        if let Some(p) = &self.proof {
+            return p.to_bytes();
+        }
         AnchorProof::from_sim(&self.chain(), self.d() as u64).to_bytes()
     }
 
@@ -447,6 +457,9 @@ impl DrawCase {
     pub fn x_hash(&self) -> [u8; 32] {
         if let Some(a) = self.lie.anchor.as_ref().filter(|a| a.len() >= 32) {
             return a[..32].try_into().unwrap();
+        }
+        if let Some(p) = &self.proof {
+            return p.x_hash();
         }
         match &self.sim {
             Some(s) => s.anchor_for(self.d() as u64).0.hash.as_bytes(),
@@ -966,6 +979,108 @@ impl DrawCase {
     }
 }
 
+impl DrawCase {
+    /// Spec M8 A4: the `draw()` of the closed round, built offline from an index alone, the
+    /// anchor proof (`None`: a void) and the caller's funding UTXOs; no RPC type in the
+    /// signature. Absorbs nothing (`from_store_absorbing`). Returns the case and the
+    /// outpoints in input order (set them on the `Built`).
+    ///
+    /// Every spent object (drawer, marker, vault, controller) is the index's live UTXO with
+    /// its rebuilt state, value and creation DAA; the count proofs come from the round's
+    /// frozen trees, which `Rebuild::trees` refuses for an incomplete round (no proof is
+    /// offered from it). The anchor must pass the off-chain part of check 8 for D (P is X's
+    /// selected parent by commitment, dX >= D > dP). The funder (who the record and the
+    /// pools refund) and the payer (funding key and fee, `fee_for`) are required arguments
+    /// (S2c should-fix 2: no builder default, never the public test key). Nothing here is
+    /// trusted: the scripts check the proofs against the frozen roots (D115).
+    pub fn from_store(
+        ix: &crate::index::Rebuild,
+        anchor: Option<AnchorProof>,
+        funding: &[crate::store::Funding],
+        funder: Payout,
+        payer: &crate::store::Payer,
+    ) -> Result<(Self, Vec<TransactionOutpoint>), String> {
+        Self::from_store_absorbing(ix, anchor, funding, &[], funder, payer)
+    }
+
+    /// `from_store` absorbing the live pools at `absorb` (inputs 4.., in that order).
+    pub fn from_store_absorbing(
+        ix: &crate::index::Rebuild,
+        anchor: Option<AnchorProof>,
+        funding: &[crate::store::Funding],
+        absorb: &[TransactionOutpoint],
+        funder: Payout,
+        payer: &crate::store::Payer,
+    ) -> Result<(Self, Vec<TransactionOutpoint>), String> {
+        use crate::index::{Role, State};
+        let t = ix.templates().clone();
+        let (ml, ms) = ix.singleton(Role::Marker)?;
+        let State::Marker(mk) = ms else { unreachable!("role checked") };
+        // The trees first: an incomplete round is refused before anything else.
+        let trees = ix.trees(mk.round)?;
+        let (dl, ds) = ix.singleton(Role::Drawer)?;
+        let (vl, vs) = ix.singleton(Role::Vault)?;
+        let (cl, cs) = ix.singleton(Role::Controller)?;
+        let (State::Drawer(drawer), State::Vault(vault), State::Controller(ctrl)) = (ds, vs, cs) else { unreachable!("roles checked") };
+        let mut c = Self::new_with(trees.len(), &t);
+        c.drawer = drawer.clone();
+        c.drawer_daa = dl.daa;
+        c.marker = mk.clone();
+        c.marker_daa = ml.daa;
+        c.vault = vault.clone();
+        c.vault_daa = vl.daa;
+        c.controller = ctrl.clone();
+        c.controller_daa = cl.daa;
+        c.pot = cl.value.checked_sub((ctrl.acc as u64).checked_add(ctrl.reserve as u64).ok_or("acc + R overflows")?).ok_or("controller value below acc + R")?;
+        c.trees = trees;
+        let roots = c.marker.roots.clone();
+        c.sync_roots();
+        if c.marker.roots != roots {
+            return Err(format!("round {}: the index's trees do not give the marker's roots", mk.round));
+        }
+        c.cov = ix.cov();
+        c.sim = None;
+        c.absorbed = absorb
+            .iter()
+            .map(|op| {
+                let l = ix.live().get(op).ok_or_else(|| format!("pool {op} is not live in the index"))?;
+                match &l.state {
+                    Some(State::Pool(p)) => {
+                        // S2d (N4): an absorbed pool's round must be complete in the index,
+                        // as the drawn round's (`trees` refuses an unclosed or incomplete
+                        // round and an index with instance-wide gaps): a missed transition of
+                        // that round means the index's view of its pools cannot be trusted.
+                        ix.trees(p.round).map_err(|e| format!("absorbed pool {op}: {e}"))?;
+                        let remaining = l.value.checked_sub(p.reserve as u64).ok_or("pool value below R")?;
+                        Ok(PoolIn { state: p.clone(), remaining, daa: l.daa })
+                    }
+                    _ => Err(format!("{op} is not a pool of known state")),
+                }
+            })
+            .collect::<Result<_, String>>()?;
+        c.funding = funding.iter().map(|f| FundingIn { value: f.value, daa: f.daa }).collect();
+        match anchor {
+            None => c.set_void(true),
+            Some(p) => {
+                if !p.consistent_with(c.d()) {
+                    return Err(format!("the anchor proof does not anchor D = {} (P must be X's selected parent, dX >= D > dP)", c.d()));
+                }
+                c.proof = Some(p);
+                c.x_hash = p.x_hash();
+                c.set_void(false);
+            }
+        }
+        c.funder = funder;
+        c.funding_sk = payer.funding_sk;
+        c.fee = payer.fee;
+        crate::index::model("draw", || c.expected())?;
+        let mut ops = vec![dl.outpoint, ml.outpoint, vl.outpoint, cl.outpoint];
+        ops.extend_from_slice(absorb);
+        ops.extend(funding.iter().map(|f| f.outpoint));
+        Ok((c, ops))
+    }
+}
+
 /// One pool of a round result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultPool {
@@ -1244,71 +1359,7 @@ impl RoundResult {
     }
 }
 
-/// The data pushes of a push-only script (a signature script), in order: OP_0 -> empty,
-/// OP_DATA_1..75 / OP_PUSHDATA1/2/4 -> the data, OP_1NEGATE -> [0x81], OP_1..OP_16 -> [n]
-/// (the canonical forms `ScriptBuilder::add_data` emits, rusty-kaspa v2.1.0
-/// `crypto/txscript/src/script_builder.rs:126-212`).
-fn pushes(script: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let mut out = vec![];
-    let mut i = 0;
-    let take = |i: &mut usize, n: usize| -> Result<Vec<u8>, String> {
-        let end = i.checked_add(n).filter(|&e| e <= script.len()).ok_or("push past the end of the script")?;
-        let v = script[*i..end].to_vec();
-        *i = end;
-        Ok(v)
-    };
-    while i < script.len() {
-        let op = script[i];
-        i += 1;
-        let data = match op {
-            0x00 => vec![],
-            0x01..=0x4b => take(&mut i, op as usize)?,
-            0x4c => {
-                let n = take(&mut i, 1)?[0] as usize;
-                take(&mut i, n)?
-            }
-            0x4d => {
-                let b = take(&mut i, 2)?;
-                take(&mut i, u16::from_le_bytes([b[0], b[1]]) as usize)?
-            }
-            0x4e => {
-                let b = take(&mut i, 4)?;
-                take(&mut i, u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)?
-            }
-            0x4f => vec![0x81],
-            0x51..=0x60 => vec![op - 0x50],
-            _ => return Err(format!("opcode {op:#04x} in a push-only script")),
-        };
-        out.push(data);
-    }
-    Ok(out)
-}
-
-/// The state field values of `redeem` under template `t` (prefix and suffix must match).
-fn state_values(t: &Template, redeem: &[u8]) -> Result<std::collections::BTreeMap<String, ArtifactValue>, String> {
-    if redeem.len() < t.prefix.len() + t.suffix.len() || !redeem.starts_with(&t.prefix) || !redeem.ends_with(&t.suffix) {
-        return Err(format!("redeem script is not a {} instance", t.name()));
-    }
-    let state = &redeem[t.prefix.len()..redeem.len() - t.suffix.len()];
-    let c = t.art.contracts.values().next().unwrap();
-    silverscript_abi::decode_runtime_state_script(&t.art, &c.runtime_state, state).map_err(|e| format!("{} state: {e}", t.name()))
-}
-
-/// A script number push (little-endian sign-magnitude, at most 8 bytes; empty = 0), as
-/// `ScriptBuilder::add_i64` encodes an int argument.
-fn script_num(b: &[u8]) -> Result<i64, String> {
-    if b.len() > 8 {
-        return Err(format!("script number of {} bytes", b.len()));
-    }
-    let Some((&last, _)) = b.split_last() else { return Ok(0) };
-    let mut mag: u64 = 0;
-    for (i, &x) in b.iter().enumerate() {
-        let x = if i == b.len() - 1 { x & 0x7f } else { x };
-        mag |= (x as u64) << (8 * i);
-    }
-    let v = i64::try_from(mag).map_err(|_| "script number out of range".to_string())?;
-    Ok(if last & 0x80 != 0 { -v } else { v })
-}
+// `pushes`, `state_values` and `script_num` moved to `crate::decode` (M8 S2).
 
 
 #[cfg(test)]

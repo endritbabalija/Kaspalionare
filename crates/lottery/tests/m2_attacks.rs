@@ -636,7 +636,17 @@ fn r2_reviewer_reproduction_bad_genesis_never_closes() {
     reject_at(&after, CTRL);
     // The same instance with the largest valid room (sum(st) = 7,400) closes after the
     // same admin change (s_H' = 0).
-    let mut ok = Chain::genesis_with(4, |g| g.controller.st = [4_000, 3_000, 400, 0, 0], true);
+    // M8 S2 (review SF1): at s_H = 1,000 bp the round-1 edge limit a N m is 121,130.1 KAS,
+    // below the fixture L(1) of 545,000 KAS, so this instance deploys with J(1) = 0 (the
+    // test is about the share room, not round 1's jackpot).
+    let mut ok = Chain::genesis_with(
+        4,
+        |g| {
+            g.controller.st = [4_000, 3_000, 400, 0, 0];
+            g.set_jackpot(0);
+        },
+        true,
+    );
     let mut sp = SetParamsCase::new();
     sp.s_f = 1_000;
     sp.s_r = 1_500;

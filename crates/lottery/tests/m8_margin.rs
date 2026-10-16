@@ -270,3 +270,178 @@ fn mf5_q_share_of_price() {
         assert!((q - want).abs() < 5e-5);
     }
 }
+
+// ---------------------------------------------------------------- SF1 genesis round-1 whale check
+
+/// The round-1 limits from the round-1 controller (its shares, e, margin, price, m):
+/// edge E = a N m with a = `allowance(p, s_H, e)` and whale W = q N m with
+/// q = `whale_allowance(p, w, margin)` (design 4.6; the same functions `close()` and `draw()`
+/// use for round r + 1). Computed here from the primitives, independently of `validate()`.
+fn round1_limits(c: &ControllerState) -> (i64, i64) {
+    let sh = Shares::of(c);
+    let a = lottery::game::allowance(c.price, sh.s_h(), c.e);
+    let q = whale_allowance(c.price, sh.w(), c.margin);
+    (a * N * c.m, q * N * c.m)
+}
+
+/// Set J(1) = j_house + j_boost with G2(1) = muldiv(J(1), g) (S2c should-fix 1: genesis
+/// ties G2 to g as draw() does; before S2c this took an explicit G2), L(1) = J_house +
+/// G2 (m - 1) in the controller and the vault, and a boost pot that covers J_boost.
+fn set_round1(g: &mut GenesisCase, j_house: i64, j_boost: i64) {
+    let c = &mut g.controller;
+    c.jackpot = j_house + j_boost;
+    c.j_boost = j_boost;
+    c.g2 = lottery::game::muldiv(c.jackpot, c.g);
+    c.liability = j_house + c.g2 * (c.m - 1);
+    g.vault.liability = c.liability;
+    g.pot = j_boost as u64;
+}
+
+/// J + muldiv(J, g) (m - 1): what the whale check weighs at J(1) = J (exact, i128).
+fn round1_money(c: &ControllerState, j: i64) -> i128 {
+    j as i128 + lottery::game::muldiv(j, c.g) as i128 * (c.m as i128 - 1)
+}
+
+/// The largest J in [0, TOTAL_MAX] with `round1_money(J) <= limit` (it grows by at least one
+/// sompi per sompi of J), by bisection, independently of `validate()`.
+fn largest_j(c: &ControllerState, limit: i64) -> i64 {
+    let (mut lo, mut hi) = (0i64, TOTAL_MAX);
+    assert!(round1_money(c, lo) <= limit as i128);
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if round1_money(c, mid) <= limit as i128 { lo = mid } else { hi = mid - 1 }
+    }
+    lo
+}
+
+fn refused(g: &GenesisCase, needle: &str, name: &str) {
+    match g.validate() {
+        Err(e) => assert!(e.contains(needle), "{name}: refused for another reason: {e}"),
+        Ok(()) => panic!("{name}: genesis accepted (SF1: round 1's jackpot is not checked against the margin)"),
+    }
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+    assert!(r.is_err(), "{name}: the builder deployed it");
+}
+
+/// SF1 (M8 S1 review, owner 2026-10-14): genesis applies the game-size rule to round 1's
+/// fixed jackpot, J + G2 (m - 1) <= q N m (whale) and J_house + G2 (m - 1) <= a N m (edge),
+/// with round 1's shares, e and margin. Before S2 `validate()` checked only the ranges and
+/// L(1) <= cap x V0, so the M2-M7 default fixture (m 10, J(1) 1,000,000 KAS, G2 10,000 KAS:
+/// 1,090,000 KAS, 45 % over W = 750,531.59 KAS at 1.5) was accepted.
+#[test]
+fn sf1_genesis_round1_whale_check() {
+    let base = genesis_at(MARGIN_MIN);
+    let c = &base.controller;
+    let (e_lim, w_lim) = round1_limits(c);
+    println!("SF1 round 1 (m {}, margin {}): edge a N m = {e_lim}, whale q N m = {w_lim} sompi", c.m, c.margin);
+    assert_eq!(w_lim, 75_053_159_049_960 /* = 52,666,666 x 142,506 x 10 */);
+    // 1. The pre-S2 default fixture: refused by the whale check.
+    let mut old = base.clone();
+    old.set_jackpot(1_000_000 * KAS as i64);
+    assert_eq!(old.controller.liability, 1_090_000 * KAS as i64);
+    // It breaks both limits: 1,090,000 KAS > W = 750,531.59 KAS and > E = 896,362.74 KAS.
+    assert!(old.controller.liability > w_lim && old.controller.liability > e_lim);
+    refused(&old, "whale", "old default J(1) 1,000,000 KAS");
+    // 2. The new default (500,000 KAS, G2 5,000 KAS, L 545,000 KAS) passes at every margin
+    //    of [MARGIN_MIN, 2 BP] (W = 562,898.7 KAS at 2.0); MF3 runs the range.
+    assert_eq!((c.jackpot, c.j_boost, c.g2, c.liability), (500_000 * KAS as i64, 0, 5_000 * KAS as i64, 545_000 * KAS as i64));
+    assert_eq!(base.validate(), Ok(()));
+    // 3. Whale boundary, J_boost = 0, G2 = muldiv(J, g) (S2c re-derivation, old -> new:
+    //    before S2c G2 was held at 5,000 KAS and J + G2 (m - 1) = W exactly was the accepted
+    //    boundary; with G2 tied to g the money steps by more than 1 sompi per sompi of J, so
+    //    the boundary is the largest J* with J* + muldiv(J*, g) (m - 1) <= W, J* + 1 refused).
+    let j_w = largest_j(c, w_lim);
+    assert!(round1_money(c, j_w) <= w_lim as i128 && round1_money(c, j_w + 1) > w_lim as i128);
+    println!("SF1 whale boundary J* = {j_w} sompi (J* + G2 (m - 1) = {} <= W = {w_lim})", round1_money(c, j_w));
+    let mut at = base.clone();
+    set_round1(&mut at, j_w, 0);
+    assert_eq!(at.validate(), Ok(()), "J* + G2 (m - 1) <= q N m");
+    at.build();
+    let mut over = base.clone();
+    set_round1(&mut over, j_w + 1, 0);
+    refused(&over, "whale", "J* + 1");
+    // 4. The whale check counts J_boost; the edge rule does not. J_house small, J_boost up
+    //    to the whale limit (J = J*): accepted; one sompi more boost refused by the whale
+    //    check alone (the edge rule weighs J_house + G2 (m - 1), far below E).
+    let jh = 100_000 * KAS as i64;
+    let mut at = base.clone();
+    set_round1(&mut at, jh, j_w - jh);
+    assert_eq!(at.validate(), Ok(()), "boost at the whale limit");
+    let mut over = base.clone();
+    set_round1(&mut over, jh, j_w - jh + 1);
+    assert!(over.controller.jackpot - over.controller.j_boost + over.controller.g2 * (c.m - 1) <= e_lim);
+    refused(&over, "whale", "J_boost one sompi over the whale limit");
+    // 5. Edge boundary: at e = 5,000 a = 0.37 p < q, so the edge rule binds first (J_boost 0:
+    //    J_house + G2 (m - 1) is the same money). Largest J with it <= E accepted, + 1
+    //    refused by the edge rule (still below W).
+    let mut e_base = base.clone();
+    e_base.controller.e = 5_000;
+    let (e_lim5, w_lim5) = round1_limits(&e_base.controller);
+    assert!(e_lim5 < w_lim5 && w_lim5 == w_lim);
+    let j_e = largest_j(&e_base.controller, e_lim5);
+    assert!(round1_money(&e_base.controller, j_e + 1) <= w_lim5 as i128);
+    let mut at = e_base.clone();
+    set_round1(&mut at, j_e, 0);
+    assert_eq!(at.validate(), Ok(()), "J_house + G2 (m - 1) <= a N m");
+    let mut over = e_base.clone();
+    set_round1(&mut over, j_e + 1, 0);
+    refused(&over, "edge", "largest J at the edge rule + 1");
+    // 6. The largest J(1) through `set_jackpot` (G2 = muldiv(J, g)) at the fixture: J* + 1
+    //    is refused (money grows by at least 1 sompi per sompi of J).
+    let (mut lo, mut hi) = (0i64, 1_000_000 * KAS as i64);
+    let ok = |j: i64| {
+        let mut g = base.clone();
+        g.set_jackpot(j);
+        g.validate().is_ok()
+    };
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if ok(mid) { lo = mid } else { hi = mid - 1 }
+    }
+    println!("SF1 largest J(1) at m 10, margin 1.5 (G2 = muldiv(J, g)): {lo} sompi");
+    let mut g = base.clone();
+    g.set_jackpot(lo + 1);
+    refused(&g, "whale", "largest J(1) + 1");
+    assert_eq!(lo, j_w, "set_jackpot's boundary is the whale boundary J*");
+}
+
+/// SF1: the spec M8 A2 testnet instance (m 3, V0 100 KAS, J(1) 10 KAS, margin 1.5,
+/// round_len = d_min = 6,000, production windows) passes the round-1 check.
+#[test]
+fn sf1_testnet_instance_passes() {
+    use lottery::game::{CLAIM_WINDOW, SEED_OFFSET, VOID_MIN};
+    let mut g = genesis_at(MARGIN_MIN);
+    g.controller.m = 3;
+    for s in &mut g.shards {
+        s.m = 3;
+    }
+    g.controller.round_len = 6_000;
+    g.controller.d_min = 6_000;
+    g.controller.seed_offset = SEED_OFFSET;
+    g.drawer.draw_window = VOID_MIN;
+    g.drawer.claim_window = CLAIM_WINDOW;
+    g.set_vault(100 * KAS as i64);
+    g.set_jackpot(10 * KAS as i64);
+    let (e_lim, w_lim) = round1_limits(&g.controller);
+    println!("SF1 A2 instance: L(1) {} sompi, edge {e_lim}, whale {w_lim}", g.controller.liability);
+    assert_eq!(g.validate(), Ok(()));
+}
+
+/// S2c review should-fix 1: round 1's G2 is tied to g at genesis as draw() ties G2' to g
+/// for round r + 1 (G2' = muldiv(J', g), `game::JackpotFix::from_witness`): an instance
+/// whose G2(1) differs from muldiv(J(1), g) by one sompi either way (L(1) and the vault
+/// kept consistent, so only the new rule can refuse it) is refused; the fixture passes.
+#[test]
+fn sf1_g2_tied_to_g_at_genesis() {
+    let base = genesis_at(MARGIN_MIN);
+    assert_eq!(base.controller.g2, lottery::game::muldiv(base.controller.jackpot, base.controller.g));
+    assert_eq!(base.validate(), Ok(()));
+    for delta in [-1i64, 1] {
+        let mut g = base.clone();
+        let c = &mut g.controller;
+        c.g2 += delta;
+        c.liability = c.jackpot - c.j_boost + c.g2 * (c.m - 1);
+        g.vault.liability = g.controller.liability;
+        refused(&g, "muldiv", &format!("G2 = muldiv(J, g) {delta:+}"));
+    }
+}

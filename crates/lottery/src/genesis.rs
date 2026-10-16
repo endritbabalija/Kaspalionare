@@ -35,8 +35,8 @@ use kaspa_consensus_core::tx::GenesisCovenantGroup;
 use crate::buy::{Built, FUNDING_SK, Final, In, InKind, KAS, Templates, b_max, spk_of};
 use crate::close::{CloseCase, z18};
 use crate::game::{
-    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, MARGIN_MIN, M_DRAW, M_HARD, SHARE_UNIT, SHARES_MAX, S_F_CAP, S_R_CAP,
-    TOTAL_MAX, VOID_MIN, muldiv,
+    ASSETS_MAX, BP, CLAIM_WINDOW, DAA_MAX, DRAW_WINDOW, D_RET, F_MIN, F_MIN_FLOOR, F_MIN_MAX, G2_MAX, JackpotRule, MARGIN_MIN, M_DRAW, M_HARD, SHARE_UNIT, SHARES_MAX, S_F_CAP,
+    S_R_CAP, TOTAL_MAX, VOID_MIN, muldiv,
 };
 use crate::params::xonly;
 use crate::state::{ControllerState, DrawerState, K_MAX, ParamsState, Payout, PositionState, ShardState, VaultState};
@@ -100,7 +100,9 @@ pub struct GenesisCase {
 impl GenesisCase {
     /// Genesis of the `CloseCase::new(k)` fixture's round 1 (zero sales, drawn = 1 with
     /// J(1), J_boost(1), G2(1), L(1) and V_rec from deployment inputs), boost pot 0 unless
-    /// set, funded by `funding`.
+    /// set, funded by `funding`. J(1) = `GENESIS_JACKPOT` (500,000 KAS, J_boost 0, G2 5,000
+    /// KAS, L(1) 545,000 KAS): M8 S2 review SF1, the round-1 whale check refuses the
+    /// `CloseCase` value 1,000,000 KAS (1,090,000 KAS > q N m = 750,531.59 KAS at 1.5).
     pub fn new(k: usize, funding: Vec<(TransactionOutpoint, UtxoEntry)>) -> Self {
         Self::new_with(k, funding, &Templates::get(b_max()))
     }
@@ -130,7 +132,7 @@ impl GenesisCase {
             claim_window: CLAIM_WINDOW,
             draw_window: DRAW_WINDOW,
         };
-        Self {
+        let mut g = Self {
             b_max: t.b_max,
             controller,
             pot: 0,
@@ -146,7 +148,9 @@ impl GenesisCase {
             change: true,
             fee: KAS / 2,
             funding_sk: FUNDING_SK,
-        }
+        };
+        g.set_jackpot(GENESIS_JACKPOT);
+        g
     }
 
     pub fn k(&self) -> usize {
@@ -197,9 +201,10 @@ impl GenesisCase {
         self.vault.liability = c.liability;
     }
 
-    /// Vault value total_assets + pend_dep + R.
+    /// Vault value total_assets + pend_dep + R. Panics on a state outside its ranges; use
+    /// `checked_vault_value` on untrusted states (S2d: `bundle::verify`).
     pub fn vault_value(&self) -> u64 {
-        (self.vault.total_assets + self.vault.pend_dep) as u64 + self.reserve()
+        self.checked_vault_value().expect("vault value: state outside its ranges")
     }
 
     pub fn reserve(&self) -> u64 {
@@ -207,12 +212,35 @@ impl GenesisCase {
     }
 
     pub fn controller_value(&self) -> u64 {
-        self.pot + self.controller.acc as u64 + self.reserve()
+        self.checked_controller_value().expect("controller value: state outside its ranges")
     }
 
     /// Shard i's value S - P_R + R (S = P_R = 0 at genesis).
     pub fn shard_value(&self, i: usize) -> u64 {
-        (self.shards[i].sales - self.shards[i].ref_paid) as u64 + self.reserve()
+        self.checked_shard_value(i).expect("shard value: state outside its ranges")
+    }
+
+    /// The reserve R as u64, `None` if negative.
+    fn checked_reserve(&self) -> Option<u64> {
+        u64::try_from(self.controller.reserve).ok()
+    }
+
+    /// `vault_value` with checked arithmetic: `None` on a negative term or an overflow.
+    pub fn checked_vault_value(&self) -> Option<u64> {
+        let v = self.vault.total_assets.checked_add(self.vault.pend_dep)?;
+        u64::try_from(v).ok()?.checked_add(self.checked_reserve()?)
+    }
+
+    /// `controller_value` with checked arithmetic.
+    pub fn checked_controller_value(&self) -> Option<u64> {
+        self.pot.checked_add(u64::try_from(self.controller.acc).ok()?)?.checked_add(self.checked_reserve()?)
+    }
+
+    /// `shard_value` with checked arithmetic (`None` also for a missing shard).
+    pub fn checked_shard_value(&self, i: usize) -> Option<u64> {
+        let s = self.shards.get(i)?;
+        let v = s.sales.checked_sub(s.ref_paid)?;
+        u64::try_from(v).ok()?.checked_add(self.checked_reserve()?)
     }
 
     /// Every A3 range of the initial states (the bounds `close()` check 2 applies, spec M2
@@ -226,16 +254,22 @@ impl GenesisCase {
     }
 
     /// TEST-ONLY (spec M7 D103, `probe void-m7`): set `allow_short_void_window` and the draw
-    /// window, and point the instance constants that name templates (the drawer's pool_tpl,
-    /// vault_tpl and ticket_tpl, the vault's record_tpl, request_tpl and position_tpl) at the
-    /// short-void template set `templates()` now returns (they all commit, directly or not,
-    /// to the drawer hash). `validate` still refuses it off testnet/devnet. Not in a
-    /// `mainnet` build (SP12).
+    /// window, and point every template hash the genesis states carry (the controller's
+    /// route shard_tpl, marker_tpl and params_tpl, the drawer's pool_tpl, vault_tpl and
+    /// ticket_tpl, the vault's record_tpl, request_tpl and position_tpl) at the short-void
+    /// template set `templates()` now returns. The variant changes the drawer hash, so the
+    /// marker, vault and pool (drawer) and from them position (vault), request (position),
+    /// ticket (pool) and shard (ticket) differ from the production set; controller, params
+    /// and record do not. `validate` checks all nine against that set (S2c MF-A) and still
+    /// refuses the flag off testnet/devnet. Not in a `mainnet` build (SP12).
     #[cfg(not(feature = "mainnet"))]
     pub fn set_test_only_short_void_window(&mut self, draw_window: i64) {
         self.allow_short_void_window = true;
         self.drawer.draw_window = draw_window;
         let t = self.templates();
+        self.controller.shard_tpl = t.shard.hash;
+        self.controller.marker_tpl = t.marker.hash;
+        self.controller.params_tpl = t.params.hash;
         self.drawer.pool_tpl = t.pool.hash;
         self.drawer.vault_tpl = t.vault.hash;
         self.drawer.ticket_tpl = t.ticket.hash;
@@ -342,6 +376,31 @@ impl GenesisCase {
         if c.liability as i128 != c.jackpot as i128 - c.j_boost as i128 + c.g2 as i128 * (c.m as i128 - 1) {
             return Err("controller liability is not J_house + G2 (m - 1)".into());
         }
+        // M8 S2c (review should-fix 1): G2(1) is tied to g as draw() ties G2' to g for every
+        // later round (G2' = muldiv(J', g), `game::JackpotFix::from_witness`), so round 1's
+        // second prize follows the same rule. jackpot is in [0, TOTAL_MAX] and g in [0, 1000]
+        // (ranges above), so `muldiv` cannot panic.
+        if c.g2 != muldiv(c.jackpot, c.g) {
+            return Err(format!("g2 = {} is not muldiv(J, g) = {} (G2 is tied to g, review S2c)", c.g2, muldiv(c.jackpot, c.g)));
+        }
+        // M8 S2, review SF1 (D113): round 1 is born with its jackpot fixed, and neither
+        // close() nor draw() checks it (draw() fixes round r + 1), so genesis applies the
+        // game-size rule of design 4.6 to it with round 1's own shares, e and margin, in the
+        // limits `draw()` uses (`JackpotRule`: E = a N m, W = q N m, a = `allowance`,
+        // q = `whale_allowance`): the edge rule J_house + G2 (m - 1) <= a N m and the whale
+        // check J + G2 (m - 1) <= q N m (checked first: above margin 1.256 it is the one that
+        // binds, D113). Exact in i128. The ranges above (m <= M_DRAW, price <= PRICE_MAX, the
+        // share room so s_H >= 0, 0 <= v_rec) keep `JackpotRule::new` in i64; only its e_lim
+        // and w_lim are used (the cap check is below).
+        let rule = JackpotRule::new(c, c.v_rec);
+        let g2m = c.g2 as i128 * (c.m as i128 - 1);
+        let j_house = c.jackpot as i128 - c.j_boost as i128;
+        if c.jackpot as i128 + g2m > rule.w_lim as i128 {
+            return Err(format!("round 1 whale check: J + G2 (m - 1) = {} > q N m = {} at margin {} (design 4.6, review SF1)", c.jackpot as i128 + g2m, rule.w_lim, c.margin));
+        }
+        if j_house + g2m > rule.e_lim as i128 {
+            return Err(format!("round 1 edge rule: J_house + G2 (m - 1) = {} > a N m = {} (design 4.6, review SF1)", j_house + g2m, rule.e_lim));
+        }
         let v = &self.vault;
         if v.round != c.round - 1 {
             return Err(format!("vault round {} != controller round - 1", v.round));
@@ -443,6 +502,17 @@ impl GenesisCase {
         }
         if d.ticket_tpl != t.ticket.hash {
             return Err("drawer ticket_tpl does not match the compiled ticket template (D54)".into());
+        }
+        // M8 S2c (review MF-A): the controller's route table is state (controller.sil:9-11)
+        // and nothing on chain pins it: close() reads the params and shards under params_tpl
+        // and shard_tpl and creates the marker, which holds the round's money (marker.sil:10),
+        // under marker_tpl (controller.sil:~593). So each must be the compiled template's
+        // hash. With the vault's three (D74) and the drawer's three (D38, D54) above, every
+        // template hash a genesis state carries is checked (params, shard and position
+        // states carry none; pool, ticket, request, record and marker states are not genesis
+        // outputs, and draw() / buy() / request entries copy theirs from the checked ones).
+        if c.shard_tpl != t.shard.hash || c.marker_tpl != t.marker.hash || c.params_tpl != t.params.hash {
+            return Err("controller shard_tpl / marker_tpl / params_tpl do not match the compiled templates (route table, review MF-A)".into());
         }
         // Spec M7 D100: the seed's miner-withholding bias is OPEN on the release gate.
         if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
@@ -555,6 +625,12 @@ pub fn genesis_mass_check(m: &harness::Masses) -> Result<(), String> {
     Ok(())
 }
 
+/// The fixture J(1) of `GenesisCase::new` (M8 S2, review SF1): 500,000 KAS with J_boost 0,
+/// so J + G2 (m - 1) = 545,000 KAS at m 10, within the whale limit q N m at every margin
+/// in [MARGIN_MIN, 2 BP] (750,531.59 KAS at 1.5, 562,898.7 KAS at 2.0) and the edge limit
+/// a N m = 896,362.74 KAS. Was 1,000,000 KAS (the `CloseCase` value) before SF1.
+pub const GENESIS_JACKPOT: i64 = 500_000 * KAS as i64;
+
 /// Funding the test fixtures use for a genesis: covers the fixture vault V0 = 10,000,000 KAS
 /// plus the reserves and the fee.
 pub const GENESIS_FUNDING: u64 = 10_100_000 * KAS;
@@ -592,8 +668,12 @@ mod tests {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bad.build()));
         assert!(r.is_err(), "builder accepted a genesis that breaks the share-room invariant");
         // The largest room that passes: sum(st) = 10^4 - 100 - 2,500 = 7,400.
+        // M8 S2 (review SF1): at s_H = 1,000 bp the round-1 edge limit a N m is 121,130.1
+        // KAS, below the fixture L(1) of 545,000 KAS, so this share-room boundary runs with
+        // J(1) = 0 (it tests the share room, not the jackpot).
         let mut edge = good.clone();
         edge.controller.st = [4_000, 3_000, 400, 0, 0];
+        edge.set_jackpot(0);
         assert_eq!(edge.validate(), Ok(()));
         // A3 ranges, one at a time.
         let cases: Vec<(&str, fn(&mut GenesisCase))> = vec![
@@ -704,20 +784,38 @@ mod tests {
         refuse("drawn = 0", &g, "drawn");
         // Decision B: G2(1) <= G2_MAX = TOTAL_MAX / 254 (the drawer's A6 guard rejects any
         // second-prize pool above it). L(1) consistent and backed by the vault, so only the
-        // G2 check can refuse G2_MAX + 1; G2_MAX itself is accepted.
-        for (g2, ok) in [(G2_MAX, true), (G2_MAX + 1, false)] {
-            let mut g = good.clone();
+        // G2 check can refuse G2_MAX + 1 (G2_MAX itself was accepted before M8 S2c, below).
+        // M8 S2 (review SF1): the round-1 whale check needs J + G2 (m - 1) <= q N m, which
+        // the fixture (m 10, price 1 KAS: q N m = 750,531.59 KAS) cannot meet at G2 = G2_MAX
+        // (about 1.8 x 10^16 sompi). This boundary therefore runs at m = 2, price = PRICE_MAX
+        // (10^11 sompi), s_R = 0 and no tier shares (w = 9,900, q = 6.6 x 10^10, q N 2 =
+        // 1.881 x 10^16 >= G2_MAX + J), so only the G2 check can refuse G2_MAX + 1.
+        let mut wide = good.clone();
+        wide.controller.m = 2;
+        wide.controller.price = PRICE_MAX;
+        wide.controller.s_r = 0;
+        wide.controller.st = [0; 5];
+        wide.params.next_s_r = 0;
+        for s in &mut wide.shards {
+            s.m = 2;
+            s.price = PRICE_MAX;
+            s.s_r = 0;
+        }
+        // M8 S2c (review should-fix 1): G2(1) = muldiv(J(1), g) is now required too, and
+        // with g <= 1,000 bp that means J(1) >= 10 G2(1): at G2 = G2_MAX, J + G2 (m - 1) >=
+        // G2_MAX (m + 9), above q N m (9.4 x 10^15 m at price PRICE_MAX) for every m, so no
+        // genesis reaches G2 = G2_MAX; the G2_MAX guard stays and refuses G2_MAX + 1 first.
+        // Re-derived (old -> new): G2 = G2_MAX at the fixture's J(1) "accepted" -> refused
+        // by the muldiv rule; G2_MAX + 1 refused by the G2_MAX check as before.
+        for (g2, needle) in [(G2_MAX, "muldiv"), (G2_MAX + 1, "G2_MAX")] {
+            let mut g = wide.clone();
             g.controller.g2 = g2;
             g.controller.liability = g.controller.jackpot - g.controller.j_boost + g2 * (g.controller.m - 1);
             g.vault.liability = g.controller.liability;
             // M5 (D66): V0 <= ASSETS_MAX = TOTAL_MAX - 1 (was TOTAL_MAX). M6 (D84): S0 = V0 <=
             // SHARES_MAX, so the largest V0 is SHARES_MAX (was ASSETS_MAX).
             g.set_vault(SHARES_MAX);
-            if ok {
-                assert_eq!(g.validate(), Ok(()), "G2 = G2_MAX");
-            } else {
-                refuse("G2 = G2_MAX + 1", &g, "g2");
-            }
+            refuse(&format!("G2 = {g2}"), &g, needle);
         }
         // Review 3: G2 (m - 1) must not overflow. G2 = TOTAL_MAX = 2^62 and m = 5 give
         // 2^64, which wraps to 0 in a release build, so J = J_boost = L = 0 would pass the
@@ -906,6 +1004,79 @@ mod tests {
             let mut g = short.clone();
             g.network = net;
             assert!(g.validate().is_err(), "{net:?}");
+        }
+    }
+
+    /// M8 S2c (review MF-A fix-up): the TEST-ONLY variant genesis carries the variant set's
+    /// hashes in all nine template fields (the setter repoints the controller's route too:
+    /// shard and marker commit, through ticket/pool and directly, to the drawer hash; params
+    /// does not), and validate() checks each against that set: one bit flipped in any field,
+    /// or the production hash put back, is refused, by validate() and by the builder.
+    #[test]
+    #[cfg(not(feature = "mainnet"))]
+    fn s2c_mfa_variant_genesis_route_checked_against_variant_templates() {
+        let good = case();
+        let prod = Templates::get(good.b_max);
+        let mut short = good.clone();
+        short.set_test_only_short_void_window(1_200);
+        let tv = short.templates();
+        assert!(tv.short_void_window);
+        assert_eq!(short.validate(), Ok(()));
+        // Which hashes the variant changes (drawer -> marker, vault, pool -> position,
+        // ticket -> request, shard) and which it keeps (controller, params, record).
+        assert_ne!(tv.shard.hash, prod.shard.hash);
+        assert_ne!(tv.marker.hash, prod.marker.hash);
+        assert_eq!(tv.params.hash, prod.params.hash);
+        assert_eq!(tv.controller.hash, prod.controller.hash);
+        assert_eq!(tv.record.hash, prod.record.hash);
+        let c = &short.controller;
+        assert_eq!((c.shard_tpl, c.marker_tpl, c.params_tpl), (tv.shard.hash, tv.marker.hash, tv.params.hash));
+        // The variant genesis against the production set is refused (route mismatch).
+        assert!(short.validate_with(&prod).is_err());
+        type Edit = fn(&mut GenesisCase, &Templates);
+        let fields: [(&str, Edit); 9] = [
+            ("controller.shard_tpl", |g, p| g.controller.shard_tpl = p.shard.hash),
+            ("controller.marker_tpl", |g, p| g.controller.marker_tpl = p.marker.hash),
+            ("controller.params_tpl", |g, p| g.controller.params_tpl = p.params.hash),
+            ("vault.record_tpl", |g, p| g.vault.record_tpl = p.record.hash),
+            ("vault.request_tpl", |g, p| g.vault.request_tpl = p.request.hash),
+            ("vault.position_tpl", |g, p| g.vault.position_tpl = p.position.hash),
+            ("drawer.pool_tpl", |g, p| g.drawer.pool_tpl = p.pool.hash),
+            ("drawer.vault_tpl", |g, p| g.drawer.vault_tpl = p.vault.hash),
+            ("drawer.ticket_tpl", |g, p| g.drawer.ticket_tpl = p.ticket.hash),
+        ];
+        let flip = |g: &mut GenesisCase, name: &str| {
+            let f = match name {
+                "controller.shard_tpl" => &mut g.controller.shard_tpl,
+                "controller.marker_tpl" => &mut g.controller.marker_tpl,
+                "controller.params_tpl" => &mut g.controller.params_tpl,
+                "vault.record_tpl" => &mut g.vault.record_tpl,
+                "vault.request_tpl" => &mut g.vault.request_tpl,
+                "vault.position_tpl" => &mut g.vault.position_tpl,
+                "drawer.pool_tpl" => &mut g.drawer.pool_tpl,
+                "drawer.vault_tpl" => &mut g.drawer.vault_tpl,
+                "drawer.ticket_tpl" => &mut g.drawer.ticket_tpl,
+                _ => unreachable!(),
+            };
+            f[0] ^= 1;
+        };
+        for (name, to_prod) in fields {
+            let mut g = short.clone();
+            flip(&mut g, name);
+            let e = g.validate().expect_err(name);
+            assert!(e.contains("tpl"), "{name} flipped: refused for another reason: {e}");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.build()));
+            assert!(r.is_err(), "{name} flipped: the builder deploys it");
+            // The production hash in a variant genesis (mixed sets): refused where it differs.
+            let mut g = short.clone();
+            to_prod(&mut g, &prod);
+            let same = matches!(name, "controller.params_tpl" | "vault.record_tpl");
+            if same {
+                assert_eq!(g.validate(), Ok(()), "{name}: the production hash equals the variant's");
+            } else {
+                let e = g.validate().expect_err(name);
+                assert!(e.contains("tpl"), "{name} = production hash: refused for another reason: {e}");
+            }
         }
     }
 

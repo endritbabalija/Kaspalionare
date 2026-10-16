@@ -23,6 +23,14 @@ silverscript-abi.workspace = true
 blake2b_simd.workspace = true
 blake3.workspace = true
 secp256k1.workspace = true
+# Spec M8 A3, D121: the off-chain store formats (index/1, wallet/1, campaign/1, bundle/1).
+# The versions already in Cargo.lock (rusty-kaspa links them); `kaspa_consensus_core::tx::Transaction`
+# has its own serde implementation, used for the index log.
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+# M8 S2c (review MF-C): the index log stores each transaction as the hex of its Borsh
+# serialization (the version already in Cargo.lock, the one rusty-kaspa's derives use).
+borsh = "=1.8.1"
 
 [dev-dependencies]
 # Spike VDF+ZK (docs/specs/spike-vdf.md): a local Groth16 prover over BN254 at the arkworks
