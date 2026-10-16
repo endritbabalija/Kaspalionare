@@ -804,9 +804,9 @@ pub async fn round1_drawn_with(ctx: &mut Ctx, tag: &str, vr: Option<VaultRequest
     } else {
         // The anchor X (first chain block with DAA >= D) and P, from RPC, self-checked
         // (D103). c_start is the sink before close() was submitted, so its DAA is < D.
-        let a = crate::anchor::rpc_anchor(ctx, c_start, d_ref as u64).await?;
+        let a = crate::anchor::rpc_anchor(&ctx.client, c_start, d_ref as u64, &crate::anchor::Timeouts::default()).await?;
         // A few confirmations of X before the draw is built (X must stay a chain block).
-        crate::anchor::wait_blue_score(ctx, a.x.sim.blue_score + 50).await?;
+        crate::anchor::wait_blue_score(&ctx.client, a.x.sim.blue_score + 50, &crate::anchor::Timeouts::default()).await?;
         let sim = harness::ChainSim::from_real_chain(harness::Hash::from_bytes(a.p.fields.parent_commit), &[a.p.sim, a.x.sim]);
         d.sim = Some(std::sync::Arc::new(sim));
         d.x_hash = a.proof.x_hash();

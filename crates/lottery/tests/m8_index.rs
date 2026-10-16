@@ -893,7 +893,7 @@ fn ix6_store_formats_round_trip() {
     c.genesis.push(TransactionOutpoint::new(ch.log[0].tx.id(), 0).into());
     c.steps.push(StepJson {
         id: "C2".into(),
-        txids: vec![TxRef { txid: ch.log[1].tx.id().as_bytes(), node: "wss://example.invalid/testnet-10".into() }],
+        txids: vec![TxRef { txid: ch.log[1].tx.id().as_bytes(), node: "wss://example.invalid/testnet-10".into(), action: "C2/deposit".into() }],
         checks: vec![CheckJson { name: "9.99 KAS deposit refused".into(), ok: true, detail: "rejection reason text".into() }],
         daa: 123_456,
         wall_time: 1_760_000_000,

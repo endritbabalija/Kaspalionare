@@ -1,4 +1,6 @@
 //! M7 Stage 4 (spec D103, A9): the anchor proof of a real testnet-10 block, rebuilt from RPC.
+//! M8 S3: every function takes any `RpcApi` (no probe context, no network assumption), so
+//! the S4 simnet runner can reuse it; the waits are `Timeouts`.
 //!
 //! `draw()` takes X (the first selected-chain block with DAA score >= D) as 152 bytes (spec
 //! A3: hash, parent_commit, activity_root, miner_payload_root, sp_timestamp, daa_score,
@@ -50,7 +52,6 @@ use kaspa_seq_commit::types::{MergesetContext, MinerPayloadLeafInput, SeqCommitI
 use kaspa_smt::proof::OwnedSmtProof;
 use lottery::anchor::{AnchorProof, BlockFields};
 
-use crate::probe::Ctx;
 
 /// The mergeset orders tried for the miner payload root, the consensus order first.
 pub const ORDERS: [&str; 4] = [
@@ -75,8 +76,25 @@ pub struct RpcBlockProof {
     pub header_commit: Hash,
 }
 
-async fn block(ctx: &Ctx, h: Hash, txs: bool) -> Result<RpcBlock, String> {
-    ctx.client.get_block(h, txs).await.map_err(|e| format!("get_block({h}): {e}"))
+/// How long the anchor helpers wait (M8 S3: configurable; the defaults are the M7 values).
+#[derive(Clone, Copy, Debug)]
+pub struct Timeouts {
+    /// `find_anchor`: until a chain block with DAA >= D exists.
+    pub anchor: Duration,
+    /// `wait_blue_score`: until the sink's blue score reaches the target.
+    pub blue_score: Duration,
+    /// Poll interval of both.
+    pub poll: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self { anchor: Duration::from_secs(600), blue_score: Duration::from_secs(300), poll: Duration::from_secs(2) }
+    }
+}
+
+async fn block<C: RpcApi + ?Sized>(c: &C, h: Hash, txs: bool) -> Result<RpcBlock, String> {
+    c.get_block(h, txs).await.map_err(|e| format!("get_block({h}): {e}"))
 }
 
 /// Rebuild the A3 proof fields of chain block `hash` from RPC and check them:
@@ -85,8 +103,8 @@ async fn block(ctx: &Ctx, h: Hash, txs: bool) -> Result<RpcBlock, String> {
 /// (3) the full KIP-21 recomputation (kaspa_seq_commit) == the block's `accepted_id_merkle_root`;
 /// (4) `lottery::anchor::seq_commit` (the script's formula over the A3 bytes) == the same.
 /// Any failure is an error; nothing is built from an unchecked proof (spec D103).
-pub async fn anchor_from_rpc(ctx: &Ctx, hash: Hash) -> Result<RpcBlockProof, String> {
-    let b = block(ctx, hash, false).await?;
+pub async fn anchor_from_rpc<C: RpcApi + ?Sized>(c: &C, hash: Hash) -> Result<RpcBlockProof, String> {
+    let b = block(c, hash, false).await?;
     let v = b.verbose_data.as_ref().ok_or(format!("get_block({hash}): no verbose data"))?;
     if !v.is_chain_block {
         return Err(format!("block {hash} is not a chain block"));
@@ -98,7 +116,7 @@ pub async fn anchor_from_rpc(ctx: &Ctx, hash: Hash) -> Result<RpcBlockProof, Str
     if hdr.direct_parents().first() != Some(&sp) {
         return Err(format!("block {hash}: verbose selected parent {sp} != first direct parent {:?}", hdr.direct_parents().first()));
     }
-    let sp_hdr = block(ctx, sp, false).await?.header;
+    let sp_hdr = block(c, sp, false).await?.header;
 
     // Mergeset blocks: hash, blue work, coinbase payload.
     let mut ms: Vec<(Hash, Vec<u8>, Vec<u8>)> = vec![]; // (hash, blue_work BE, payload)
@@ -108,7 +126,7 @@ pub async fn anchor_from_rpc(ctx: &Ctx, hash: Hash) -> Result<RpcBlockProof, Str
         return Err(format!("block {hash}: selected parent {sp} not among the mergeset blues"));
     }
     for h in blues.iter().chain(reds.iter()) {
-        let mb = block(ctx, *h, true).await?;
+        let mb = block(c, *h, true).await?;
         let cb = mb.transactions.first().ok_or(format!("mergeset block {h}: no transactions"))?;
         ms.push((*h, mb.header.blue_work.to_be_bytes().to_vec(), cb.payload.clone()));
     }
@@ -133,7 +151,7 @@ pub async fn anchor_from_rpc(ctx: &Ctx, hash: Hash) -> Result<RpcBlockProof, Str
     let split: Vec<Hash> = std::iter::once(sp).chain(bl).chain(rd).collect();
     let orders = [consensus, rpc_order, descending, split];
 
-    let lane = ctx.client.get_seq_commit_lane_proof(hash, COINBASE_LANE_KEY).await.map_err(|e| format!("get_seq_commit_lane_proof({hash}): {e}"))?;
+    let lane = c.get_seq_commit_lane_proof(hash, COINBASE_LANE_KEY).await.map_err(|e| format!("get_seq_commit_lane_proof({hash}): {e}"))?;
     let context = mergeset_context_hash(&MergesetContext { timestamp: sp_hdr.timestamp, daa_score: hdr.daa_score, blue_score: hdr.blue_score });
     let mut found = None;
     for (i, o) in orders.iter().enumerate() {
@@ -200,18 +218,18 @@ pub async fn anchor_from_rpc(ctx: &Ctx, hash: Hash) -> Result<RpcBlockProof, Str
 
 /// The first selected-chain block X with DAA score >= `d` and its selected parent P, found
 /// by walking the virtual chain from `start` (a chain block with DAA < `d`, e.g. the sink
-/// taken before `close()` was submitted). Waits (up to 10 min) until such a block exists.
+/// taken before `close()` was submitted). Waits (up to `to.anchor`) until such a block exists.
 /// DAA is non-decreasing along the chain (`consensus/src/processes/difficulty.rs:27-30`), so
 /// a binary search over the added chain blocks finds X.
-pub async fn find_anchor(ctx: &Ctx, start: Hash, d: u64) -> Result<(Hash, Hash), String> {
+pub async fn find_anchor<C: RpcApi + ?Sized>(c: &C, start: Hash, d: u64, to: &Timeouts) -> Result<(Hash, Hash), String> {
     let t0 = Instant::now();
     loop {
-        let vc = ctx.client.get_virtual_chain_from_block(start, false, None).await.map_err(|e| format!("get_virtual_chain_from_block: {e}"))?;
+        let vc = c.get_virtual_chain_from_block(start, false, None).await.map_err(|e| format!("get_virtual_chain_from_block: {e}"))?;
         let added = vc.added_chain_block_hashes;
         if !vc.removed_chain_block_hashes.is_empty() {
             println!("find_anchor: start {start} is off the chain now ({} removed chain blocks); walking from the fork point", vc.removed_chain_block_hashes.len());
         }
-        let daa = |h: Hash| async move { block(ctx, h, false).await.map(|b| b.header.daa_score) };
+        let daa = |h: Hash| async move { block(c, h, false).await.map(|b| b.header.daa_score) };
         if let Some(&last) = added.last() {
             if daa(last).await? >= d {
                 // Binary search: first index with daa >= d.
@@ -221,7 +239,7 @@ pub async fn find_anchor(ctx: &Ctx, start: Hash, d: u64) -> Result<(Hash, Hash),
                     if daa(added[mid]).await? >= d { hi = mid } else { lo = mid + 1 }
                 }
                 let x = added[lo];
-                let xb = block(ctx, x, false).await?;
+                let xb = block(c, x, false).await?;
                 let p = xb.verbose_data.as_ref().ok_or("no verbose data")?.selected_parent_hash;
                 let pd = daa(p).await?;
                 if lo > 0 && added[lo - 1] != p {
@@ -234,26 +252,26 @@ pub async fn find_anchor(ctx: &Ctx, start: Hash, d: u64) -> Result<(Hash, Hash),
                 return Ok((x, p));
             }
         }
-        if t0.elapsed() > Duration::from_secs(600) {
-            return Err(format!("find_anchor: no chain block with DAA >= {d} within 10 min"));
+        if t0.elapsed() > to.anchor {
+            return Err(format!("find_anchor: no chain block with DAA >= {d} within {} s", to.anchor.as_secs()));
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(to.poll).await;
     }
 }
 
 /// Wait until the sink's blue score is at least `bs` (confirmations for X before building).
-pub async fn wait_blue_score(ctx: &Ctx, bs: u64) -> Result<(), String> {
+pub async fn wait_blue_score<C: RpcApi + ?Sized>(c: &C, bs: u64, to: &Timeouts) -> Result<(), String> {
     let t0 = Instant::now();
     loop {
-        let sink = ctx.client.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
-        let sbs = block(ctx, sink, false).await?.header.blue_score;
+        let sink = c.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
+        let sbs = block(c, sink, false).await?.header.blue_score;
         if sbs >= bs {
             return Ok(());
         }
-        if t0.elapsed() > Duration::from_secs(300) {
-            return Err(format!("sink blue score {sbs} < {bs} after 5 min"));
+        if t0.elapsed() > to.blue_score {
+            return Err(format!("sink blue score {sbs} < {bs} after {} s", to.blue_score.as_secs()));
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(to.poll).await;
     }
 }
 
@@ -266,10 +284,10 @@ pub struct RpcAnchor {
     pub proof: AnchorProof,
 }
 
-pub async fn rpc_anchor(ctx: &Ctx, start: Hash, d: u64) -> Result<RpcAnchor, String> {
-    let (xh, ph) = find_anchor(ctx, start, d).await?;
-    let x = anchor_from_rpc(ctx, xh).await?;
-    let p = anchor_from_rpc(ctx, ph).await?;
+pub async fn rpc_anchor<C: RpcApi + ?Sized>(c: &C, start: Hash, d: u64, to: &Timeouts) -> Result<RpcAnchor, String> {
+    let (xh, ph) = find_anchor(c, start, d, to).await?;
+    let x = anchor_from_rpc(c, xh).await?;
+    let p = anchor_from_rpc(c, ph).await?;
     if x.selected_parent != ph {
         return Err(format!("X {xh}: selected parent {} != P {ph}", x.selected_parent));
     }

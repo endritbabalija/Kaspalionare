@@ -1,0 +1,464 @@
+//! Spec M8 A4 (`tn10 indexer`, D115): an untrusted, file-based index of one lottery
+//! instance, read from a public node's virtual chain.
+//!
+//! RPC facts (rusty-kaspa v2.1.0, `refs/rusty-kaspa-v2.1.0`; details and the full citation
+//! list in `docs/specs/8-handoff.md`, S3a step 1):
+//! - `get_virtual_chain_from_block_v2(start, Some(Full), None)` (`rpc/core/src/api/rpc.rs:507-518`)
+//!   returns `removed_chain_block_hashes`, `added_chain_block_hashes` and, per added chain
+//!   block in order, `{chain_block_header, accepted_transactions}`
+//!   (`rpc/core/src/model/message.rs:2891-2900`, `rpc/core/src/model/tx.rs:658-663`).
+//! - One call returns a prefix of the chain: the batch is bounded by 10 x the mergeset size
+//!   limit in merged blocks and `added` is truncated to what fit
+//!   (`rpc/service/src/service.rs:1381, 1411`), so `poll` repeats until nothing is added.
+//! - Full verbosity is needed to rebuild a transaction at all (version, lock_time,
+//!   subnetwork_id and gas are Full, `rpc/core/src/convert/verbosity.rs:147-150`;
+//!   `TryFrom<RpcOptionalTransaction>`, `rpc/core/src/convert/tx.rs:208-232`) and for the
+//!   spent entries' creation DAA (`verbosity.rs:93-96`). `chain_tx` refuses a transaction
+//!   without them, so a node that does not return them stops the indexer.
+//! - A start hash below the node's retention root is refused by the node ("the queried hash
+//!   does not have retention root on its chain", `consensus/src/consensus/mod.rs:858-863`;
+//!   an unknown hash `HeaderNotFound`, `:437-446`): `poll` then stops with an error and
+//!   never skips ahead.
+//! - `get_block` returns a header-only (pruned) block with no transactions and an unknown
+//!   one as an error (`rpc/service/src/service.rs:493-503`, `consensus/src/consensus/mod.rs:1427-1439`):
+//!   `deleted_block` treats both as deletion evidence.
+//!
+//! What it keeps (A4): every accepted transaction that creates an output bound to the
+//! instance's covenant ID or spends a live instance UTXO, as `index/1` add lines; chain
+//! blocks the node removes become remove lines (newest first). Each kept transaction is
+//! applied to a `lottery::index::Rebuild`; an `Err` (an `Unknown` transaction, a rebuilt
+//! state that does not match) stops the indexer: nothing is ever skipped silently.
+
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use kaspa_consensus_core::Hash;
+use kaspa_consensus_core::tx::{Transaction, TransactionId};
+use kaspa_rpc_core::{RpcDataVerbosityLevel, RpcOptionalTransaction, api::rpc::RpcApi};
+use lottery::buy::Templates;
+use lottery::index::{Accepted, Event, Rebuild, Spent, State};
+use lottery::store::{self, IndexLog, IndexLogLine, IndexSnapshot, LogKind};
+
+pub const LOG_FILE: &str = "index-log.jsonl";
+pub const SNAPSHOT_FILE: &str = "index.json";
+
+/// The repo-root data directory `tn10-data/` (git-ignored).
+pub fn data_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tn10-data")
+}
+
+/// `tn10-data/<cov-hex>/`.
+pub fn instance_dir(cov: Hash) -> PathBuf {
+    data_root().join(store::to_hex(&cov.as_bytes()))
+}
+
+/// One accepted transaction as the node reports it.
+#[derive(Clone, Debug)]
+pub struct ChainTx {
+    pub tx: Transaction,
+    pub spent: Vec<Spent>,
+}
+
+/// One added chain block: its hash, DAA score and accepted transactions in order.
+#[derive(Clone, Debug)]
+pub struct ChainBlock {
+    pub hash: Hash,
+    pub daa: u64,
+    pub txs: Vec<ChainTx>,
+}
+
+/// One `get_virtual_chain_from_block_v2` answer, converted and checked.
+#[derive(Clone, Debug, Default)]
+pub struct ChainBatch {
+    pub removed: Vec<Hash>,
+    pub added: Vec<ChainBlock>,
+}
+
+/// A transaction from the node's Full-verbosity form, with its spent entries. Errors name
+/// the missing field: the indexer needs every one of them.
+pub fn chain_tx(rtx: RpcOptionalTransaction) -> Result<ChainTx, String> {
+    let claimed = rtx.verbose_data.as_ref().and_then(|v| v.transaction_id);
+    let mut spent = Vec::with_capacity(rtx.inputs.len());
+    for (i, inp) in rtx.inputs.iter().enumerate() {
+        let e = inp
+            .verbose_data
+            .as_ref()
+            .and_then(|v| v.utxo_entry.as_ref())
+            .ok_or_else(|| format!("input {i}: the node returned no spent UTXO entry (Full verbosity required)"))?;
+        let amount = e.amount.ok_or_else(|| format!("input {i}: the node returned no spent amount (Full verbosity required)"))?;
+        let daa = e.block_daa_score.ok_or_else(|| format!("input {i}: the node returned no spent creation DAA score (Full verbosity required)"))?;
+        spent.push(Spent { amount, daa });
+    }
+    let tx = Transaction::try_from(rtx).map_err(|e| format!("transaction fields missing (Full verbosity required): {e}"))?;
+    if let Some(id) = claimed {
+        if id != tx.id() {
+            return Err(format!("the node's transaction id {id} is not the rebuilt transaction's {}", tx.id()));
+        }
+    }
+    Ok(ChainTx { tx, spent })
+}
+
+/// Convert a v2 answer; every added chain block must come with its header hash, DAA score
+/// and accepted transactions, in the order of `added_chain_block_hashes`.
+pub fn batch_of(r: kaspa_rpc_core::GetVirtualChainFromBlockV2Response) -> Result<ChainBatch, String> {
+    let added_hashes = r.added_chain_block_hashes.as_ref().clone();
+    let acc = Arc::try_unwrap(r.chain_block_accepted_transactions).unwrap_or_else(|a| (*a).clone());
+    if acc.len() != added_hashes.len() {
+        return Err(format!("v2: {} added chain blocks but {} acceptance entries", added_hashes.len(), acc.len()));
+    }
+    let mut added = Vec::with_capacity(acc.len());
+    for (h, a) in added_hashes.into_iter().zip(acc) {
+        let hh = a.chain_block_header.hash.ok_or_else(|| format!("chain block {h}: no header hash"))?;
+        if hh != h {
+            return Err(format!("v2: acceptance entry header {hh} != added chain block {h}"));
+        }
+        let daa = a.chain_block_header.daa_score.ok_or_else(|| format!("chain block {h}: no DAA score (verbosity)"))?;
+        let txs = a.accepted_transactions.into_iter().map(chain_tx).collect::<Result<Vec<_>, _>>().map_err(|e| format!("chain block {h}: {e}"))?;
+        added.push(ChainBlock { hash: h, daa, txs });
+    }
+    Ok(ChainBatch { removed: r.removed_chain_block_hashes.as_ref().clone(), added })
+}
+
+/// A log entry currently in effect (an add line not removed).
+#[derive(Clone, Debug)]
+struct Active {
+    txid: TransactionId,
+    chain_block: Hash,
+    chain_daa: u64,
+    accepted: Accepted,
+    /// Whether the index applied it (an instance transaction) or it was foreign.
+    applied: bool,
+}
+
+/// What one `ingest` did.
+#[derive(Clone, Debug, Default)]
+pub struct Ingested {
+    pub blocks: usize,
+    pub removed_blocks: usize,
+    pub kept: usize,
+    pub reverted: usize,
+    /// Instance transactions applied, with their events, in order.
+    pub events: Vec<(Accepted, Event)>,
+}
+
+/// The index of one instance plus its files.
+pub struct Indexer {
+    dir: Option<PathBuf>,
+    pub t: Arc<Templates>,
+    pub cov: Hash,
+    genesis: Option<Vec<State>>,
+    pub ix: Rebuild,
+    lines: Vec<IndexLogLine>,
+    persisted: usize,
+    active: Vec<Active>,
+    /// The chain block the next poll starts from.
+    pub last: Hash,
+    pub last_daa: u64,
+    /// Transactions the caller waits for (any transaction, instance or not), and the chain
+    /// block and DAA that accepted them (dropped again if that block is removed).
+    watched: HashSet<TransactionId>,
+    accepted: HashMap<TransactionId, (Hash, u64)>,
+}
+
+impl Indexer {
+    /// A new index starting at chain block `start` (the chain block before genesis), or the
+    /// one in `dir` (resumed at its `last_chain_block`). `dir = None`: in memory only.
+    pub fn open(dir: Option<&Path>, t: Arc<Templates>, cov: Hash, genesis: Option<Vec<State>>, start: Hash, start_daa: u64) -> Result<Self, String> {
+        let mut me = Self {
+            dir: dir.map(Path::to_path_buf),
+            ix: Rebuild::new(t.clone(), cov, genesis.clone()),
+            t,
+            cov,
+            genesis,
+            lines: vec![],
+            persisted: 0,
+            active: vec![],
+            last: start,
+            last_daa: start_daa,
+            watched: HashSet::new(),
+            accepted: HashMap::new(),
+        };
+        let Some(dir) = dir else { return Ok(me) };
+        let log_path = dir.join(LOG_FILE);
+        if !log_path.exists() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            return Ok(me);
+        }
+        let text = fs::read_to_string(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+        let log = IndexLog::from_jsonl(&text)?;
+        me.ix = log.rebuild(me.t.clone(), cov, me.genesis.clone())?;
+        // Replay the lines once more to know which adds are in effect and which applied.
+        let mut probe = Rebuild::new(me.t.clone(), cov, me.genesis.clone());
+        for l in &log.lines {
+            let a = l.accepted()?;
+            match l.kind {
+                LogKind::Add => {
+                    let applied = probe.apply(&a).map_err(|e| format!("log line {}: {e}", l.seq))?.is_some();
+                    me.active.push(Active { txid: a.tx.id(), chain_block: Hash::from_bytes(l.chain_block), chain_daa: l.chain_daa, accepted: a, applied });
+                }
+                LogKind::Remove => {
+                    let i = me.active.iter().rposition(|x| x.txid.as_bytes() == l.txid).ok_or(format!("log line {}: remove of a transaction not in effect", l.seq))?;
+                    let x = me.active.remove(i);
+                    if x.applied {
+                        probe.revert(x.txid)?;
+                    }
+                }
+            }
+        }
+        me.lines = log.lines;
+        me.persisted = me.lines.len();
+        let snap_path = dir.join(SNAPSHOT_FILE);
+        if snap_path.exists() {
+            let s: IndexSnapshot = store::read(&fs::read_to_string(&snap_path).map_err(|e| e.to_string())?, store::INDEX)?;
+            if s.cov != cov.as_bytes() {
+                return Err(format!("{}: covenant ID {} is not {cov}", snap_path.display(), store::to_hex(&s.cov)));
+            }
+            if let Some(h) = s.last_chain_block {
+                me.last = Hash::from_bytes(h);
+            }
+        }
+        if let Some(a) = me.active.last() {
+            me.last_daa = me.last_daa.max(a.chain_daa);
+        }
+        Ok(me)
+    }
+
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Wait list: `accepted_at` reports these once a chain block accepts them.
+    pub fn watch(&mut self, txid: TransactionId) {
+        self.watched.insert(txid);
+    }
+
+    /// The chain block and DAA that accepted `txid`: an instance transaction in effect in
+    /// the log, or a watched one seen since `open`.
+    pub fn accepted_at(&self, txid: &TransactionId) -> Option<(Hash, u64)> {
+        if let Some(a) = self.active.iter().rev().find(|a| &a.txid == txid) {
+            return Some((a.chain_block, a.chain_daa));
+        }
+        self.accepted.get(txid).copied()
+    }
+
+    /// The chain block that accepted an instance transaction in effect.
+    pub fn chain_block_of(&self, txid: &TransactionId) -> Option<Hash> {
+        self.active.iter().rev().find(|a| &a.txid == txid).map(|a| a.chain_block)
+    }
+
+    pub fn lines(&self) -> &[IndexLogLine] {
+        &self.lines
+    }
+
+    fn relevant(&self, tx: &Transaction) -> bool {
+        tx.outputs.iter().any(|o| o.covenant.is_some_and(|b| b.covenant_id == self.cov)) || tx.inputs.iter().any(|i| self.ix.live().contains_key(&i.previous_outpoint))
+    }
+
+    fn push_line(&mut self, kind: LogKind, chain_block: Hash, chain_daa: u64, a: &Accepted) {
+        let seq = self.lines.len() as u64;
+        self.lines.push(match kind {
+            LogKind::Add => IndexLogLine::add(seq, chain_block, chain_daa, a),
+            LogKind::Remove => IndexLogLine::remove(seq, chain_block, chain_daa, a),
+        });
+    }
+
+    /// Apply one batch: removals first (each removed chain block's transactions reverted,
+    /// newest first; they must be the newest in effect), then each added chain block's kept
+    /// transactions in order. Stops at the first error (nothing of that block is kept as
+    /// "done": `last` still names the previous block, so a retry hits the same error).
+    pub fn ingest(&mut self, b: ChainBatch) -> Result<Ingested, String> {
+        let mut out = Ingested { removed_blocks: b.removed.len(), ..Default::default() };
+        if !b.removed.is_empty() {
+            let gone: HashSet<Hash> = b.removed.iter().copied().collect();
+            self.accepted.retain(|_, (h, _)| !gone.contains(h));
+            let n = self.active.iter().filter(|a| gone.contains(&a.chain_block)).count();
+            let tail = self.active.len() - n;
+            if self.active[tail..].iter().any(|a| !gone.contains(&a.chain_block)) {
+                return Err("reorg: the removed chain blocks' transactions are not the newest in the log".into());
+            }
+            while self.active.len() > tail {
+                let a = self.active.pop().expect("tail");
+                if a.applied {
+                    self.ix.revert(a.txid).map_err(|e| format!("reorg: {e}"))?;
+                }
+                self.push_line(LogKind::Remove, a.chain_block, a.chain_daa, &a.accepted);
+                out.reverted += 1;
+            }
+        }
+        for blk in b.added {
+            for ct in blk.txs {
+                if !self.relevant(&ct.tx) {
+                    let id = ct.tx.id();
+                    if self.watched.contains(&id) {
+                        self.accepted.insert(id, (blk.hash, blk.daa));
+                    }
+                    continue;
+                }
+                let id = ct.tx.id();
+                // A crash between appending the log and writing the snapshot replays the
+                // same block: an add already in effect for this block is not added twice.
+                if self.active.iter().any(|a| a.txid == id && a.chain_block == blk.hash) {
+                    continue;
+                }
+                let a = Accepted { tx: ct.tx, daa: blk.daa, spent: ct.spent };
+                let ev = self.ix.apply(&a).map_err(|e| format!("chain block {} (DAA {}): {e}", blk.hash, blk.daa))?;
+                self.push_line(LogKind::Add, blk.hash, blk.daa, &a);
+                self.active.push(Active { txid: id, chain_block: blk.hash, chain_daa: blk.daa, accepted: a.clone(), applied: ev.is_some() });
+                if self.watched.contains(&id) {
+                    self.accepted.insert(id, (blk.hash, blk.daa));
+                }
+                out.kept += 1;
+                if let Some(ev) = ev {
+                    out.events.push((a, ev));
+                }
+            }
+            self.last = blk.hash;
+            self.last_daa = blk.daa;
+            out.blocks += 1;
+        }
+        Ok(out)
+    }
+
+    /// Append the new log lines and rewrite `index.json` (log first: a crash in between is
+    /// repaired by the duplicate check in `ingest`).
+    pub fn persist(&mut self) -> Result<(), String> {
+        let Some(dir) = self.dir.clone() else { return Ok(()) };
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let log_path = dir.join(LOG_FILE);
+        let mut text = String::new();
+        if !log_path.exists() {
+            text.push_str(&IndexLog::header_line(self.cov)?);
+            text.push('\n');
+        }
+        for l in &self.lines[self.persisted..] {
+            text.push_str(&l.to_line()?);
+            text.push('\n');
+        }
+        if !text.is_empty() {
+            let mut f = OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+            f.write_all(text.as_bytes()).map_err(|e| format!("{}: {e}", log_path.display()))?;
+            f.sync_all().map_err(|e| e.to_string())?;
+        }
+        self.persisted = self.lines.len();
+        write_atomic(&dir.join(SNAPSHOT_FILE), &store::write(&IndexSnapshot::of(&self.ix, Some(self.last)), store::INDEX)?)
+    }
+
+    /// The oldest round whose earliest buy's accepting chain block is in effect in the log,
+    /// as (round, chain block), for the deletion check (A4 pruning evidence).
+    pub fn earliest_buy_blocks(&self) -> Vec<(i64, Hash)> {
+        self.ix
+            .rounds()
+            .values()
+            .filter_map(|r| {
+                let b = r.buys.first()?;
+                Some((r.round, self.chain_block_of(&b.txid)?))
+            })
+            .collect()
+    }
+}
+
+/// Write `path` through a temporary file and a rename.
+pub fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What one `poll` did.
+#[derive(Clone, Debug, Default)]
+pub struct PollStats {
+    pub calls: usize,
+    pub blocks: usize,
+    pub removed_blocks: usize,
+    pub txs_seen: usize,
+    pub kept: usize,
+    pub reverted: usize,
+    pub events: Vec<(Accepted, Event)>,
+    /// Inputs whose spent entry the node returned (the Full-verbosity self-check).
+    pub spent_entries: usize,
+}
+
+/// Poll the node until the index reaches its sink: v2 calls from `last` with Full
+/// verbosity, each batch ingested and persisted. A refused start hash (pruned or unknown)
+/// is an error that names it; nothing is skipped.
+pub async fn poll<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer) -> Result<PollStats, String> {
+    let mut st = PollStats::default();
+    loop {
+        let r = c.get_virtual_chain_from_block_v2(x.last, Some(RpcDataVerbosityLevel::Full), None).await.map_err(|e| {
+            format!("get_virtual_chain_from_block_v2 from {} (DAA {}): {e}; the resume block is unknown to this node or below its retention root: stopping, nothing skipped", x.last, x.last_daa)
+        })?;
+        st.calls += 1;
+        let b = batch_of(r)?;
+        let n_added = b.added.len();
+        st.txs_seen += b.added.iter().map(|k| k.txs.len()).sum::<usize>();
+        st.spent_entries += b.added.iter().flat_map(|k| &k.txs).map(|t| t.spent.len()).sum::<usize>();
+        let g = x.ingest(b)?;
+        x.persist()?;
+        st.blocks += g.blocks;
+        st.removed_blocks += g.removed_blocks;
+        st.kept += g.kept;
+        st.reverted += g.reverted;
+        st.events.extend(g.events);
+        // A call from the sink adds nothing: the index has caught up.
+        if n_added == 0 {
+            break;
+        }
+    }
+    Ok(st)
+}
+
+/// Deletion evidence for block `h` (A4): `Some(what the node returned)` if the node no
+/// longer serves its body (an error, or a header with no transactions), `None` if it does.
+pub async fn deleted_block<C: RpcApi + ?Sized>(c: &C, h: Hash) -> Result<Option<String>, String> {
+    match c.get_block(h, true).await {
+        Err(e) => Ok(Some(format!("get_block({h}) failed: {e}"))),
+        Ok(b) if b.transactions.is_empty() => Ok(Some(format!("get_block({h}) returned the header (DAA {}) with no transactions (body pruned)", b.header.daa_score))),
+        Ok(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaspa_consensus_core::subnets::SubnetworkId;
+    use kaspa_consensus_core::tx::{TransactionInput, TransactionOutpoint, TransactionOutput, ScriptPublicKey};
+
+    fn plain_tx(n: u8) -> Transaction {
+        let mut tx = Transaction::new(
+            1,
+            vec![TransactionInput::new(TransactionOutpoint::new(Hash::from_bytes([n; 32]), 0), vec![], 0, 0)],
+            vec![TransactionOutput::new(1_000, ScriptPublicKey::from_vec(0, vec![0x51]))],
+            0,
+            SubnetworkId::default(),
+            0,
+            vec![],
+        );
+        tx.finalize();
+        tx
+    }
+
+    fn block(n: u8, daa: u64, txs: Vec<Transaction>) -> ChainBlock {
+        ChainBlock { hash: Hash::from_bytes([n; 32]), daa, txs: txs.into_iter().map(|tx| ChainTx { spent: vec![Spent { amount: 2_000, daa: 1 }; tx.inputs.len()], tx }).collect() }
+    }
+
+    /// Foreign transactions are not kept; a watched one is reported with its block, and
+    /// forgotten when that block is removed; `last` follows the added blocks.
+    #[test]
+    fn foreign_and_watched() {
+        let t = Templates::get(lottery::buy::b_max());
+        let mut x = Indexer::open(None, t, Hash::from_bytes([9; 32]), None, Hash::from_bytes([1; 32]), 10).unwrap();
+        let (a, b) = (plain_tx(1), plain_tx(2));
+        x.watch(b.id());
+        let g = x.ingest(ChainBatch { removed: vec![], added: vec![block(2, 20, vec![a.clone()]), block(3, 30, vec![b.clone()])] }).unwrap();
+        assert_eq!((g.blocks, g.kept), (2, 0));
+        assert_eq!(x.last, Hash::from_bytes([3; 32]));
+        assert_eq!(x.accepted_at(&b.id()), Some((Hash::from_bytes([3; 32]), 30)));
+        assert_eq!(x.accepted_at(&a.id()), None, "not watched");
+        x.ingest(ChainBatch { removed: vec![Hash::from_bytes([3; 32])], added: vec![block(4, 31, vec![])] }).unwrap();
+        assert_eq!(x.accepted_at(&b.id()), None, "its block was removed");
+        assert!(x.lines().is_empty());
+    }
+}

@@ -17,3 +17,6 @@ wallets/
 
 # tn10 probe output
 crates/tn10/results-*.md
+
+# tn10 indexer, wallet and campaign files (spec M8 A3)
+tn10-data/

@@ -447,6 +447,12 @@ impl IndexLogLine {
         Self { kind: LogKind::Remove, ..Self::add(seq, chain_block, chain_daa, a) }
     }
 
+    /// This line as one JSON line (no newline), with the `write` checks (M8 S3: the tn10
+    /// indexer appends lines to `index-log.jsonl` instead of rewriting the file).
+    pub fn to_line(&self) -> Result<String, String> {
+        write_line(self)
+    }
+
     /// The accepted transaction; its id must be `txid`.
     pub fn accepted(&self) -> Result<Accepted, String> {
         let id = checked_id(&self.tx).map_err(|e| format!("log line {}: {e}", self.seq))?;
@@ -465,6 +471,11 @@ pub struct IndexLog {
 }
 
 impl IndexLog {
+    /// The header line of a log of instance `cov` (no newline).
+    pub fn header_line(cov: Hash) -> Result<String, String> {
+        write_line(&IndexLogHeader { format: INDEX.into(), cov: cov.as_bytes() })
+    }
+
     pub fn to_jsonl(&self) -> Result<String, String> {
         let mut s = write_line(&IndexLogHeader { format: INDEX.into(), cov: self.cov.as_bytes() })?;
         s.push('\n');
@@ -881,6 +892,10 @@ pub struct TxRef {
     pub txid: [u8; 32],
     /// The node the transaction was submitted to.
     pub node: String,
+    /// M8 S3 (A3 amendment): the runner's action name ("C2/buy/17"), so `campaign resume`
+    /// skips an action whose recorded transaction is chain-accepted (idempotent by txid).
+    #[serde(default)]
+    pub action: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -910,11 +925,15 @@ pub struct Campaign {
     pub step: String,
     pub genesis: Vec<OutpointJson>,
     pub steps: Vec<StepJson>,
+    /// M8 S3 (A3 amendment): the runner's named values that a resume needs (start hash,
+    /// the sink before each close, the soak's t0, the luck retries), as strings.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 impl Campaign {
     pub fn new() -> Self {
-        Self { format: CAMPAIGN.into(), cov: None, step: "C0".into(), genesis: vec![], steps: vec![] }
+        Self { format: CAMPAIGN.into(), cov: None, step: "C0".into(), genesis: vec![], steps: vec![], vars: BTreeMap::new() }
     }
 }
 

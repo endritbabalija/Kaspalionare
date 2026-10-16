@@ -6,7 +6,11 @@
 //! resolver when unset.
 
 mod anchor;
+mod bundle;
+mod campaign;
 mod cases;
+mod fees;
+mod indexer;
 mod net;
 mod probe;
 
@@ -116,14 +120,14 @@ async fn anchor_check(n: usize) -> Result<(), String> {
     let ctx = probe::Ctx { client, addr: address(&kp), sk: kp.secret_bytes(), report: vec![] };
     let start = ctx.client.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
     let sdaa = ctx.client.get_block(start, false).await.map_err(|e| e.to_string())?.header.daa_score;
-    let a = anchor::rpc_anchor(&ctx, start, sdaa + 100).await?;
+    let a = anchor::rpc_anchor(&ctx.client, start, sdaa + 100, &anchor::Timeouts::default()).await?;
     println!("anchor-check OK: D = {}, X {} (DAA {}), P {} (DAA {}); every self-check passed", a.d, a.x.sim.hash, a.x.sim.daa_score, a.p.sim.hash, a.p.sim.daa_score);
     if n > 0 {
         let vc = ctx.client.get_virtual_chain_from_block(start, false, None).await.map_err(|e| e.to_string())?;
         let mut tally = std::collections::BTreeMap::<(usize, usize), (usize, usize)>::new(); // (blues, reds) -> (blocks, order-0 matches)
         let mut orders = [0usize; anchor::ORDERS.len()];
         for h in vc.added_chain_block_hashes.iter().take(n) {
-            let b = anchor::anchor_from_rpc(&ctx, *h).await?;
+            let b = anchor::anchor_from_rpc(&ctx.client, *h).await?;
             orders[b.order] += 1;
             let e = tally.entry((b.mergeset_blues, b.mergeset_reds)).or_default();
             e.0 += 1;
@@ -199,14 +203,293 @@ fn main() -> ExitCode {
     }
 }
 
+const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | bundle [--out <file>] | bundle-verify <file>>
+probe cases: all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62 (conflict-m6 is not part of all)";
+
+/// The value after `--name` in `args`.
+fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
+fn has(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == name)
+}
+
+fn hash_arg(s: &str) -> Result<kaspa_consensus_core::Hash, String> {
+    let b: [u8; 32] = decode_hex(s)?.try_into().map_err(|_| format!("{s}: not 32 bytes"))?;
+    Ok(kaspa_consensus_core::Hash::from_bytes(b))
+}
+
+async fn live(env: &BTreeMap<String, String>) -> Result<(campaign::Node, Keypair), String> {
+    let kp = keypair(env)?;
+    let addr = address(&kp);
+    net::check_testnet(&addr)?;
+    let client = net::connect(env.get(URL_VAR).cloned()).await?;
+    let url = client.url().unwrap_or_default();
+    Ok((campaign::Node { client, addr, url, to: anchor::Timeouts::default() }, kp))
+}
+
+fn soak_mode(args: &[String]) -> Result<campaign::SoakMode, String> {
+    match flag(args, "--soak").unwrap_or("b") {
+        "a" | "A" => Ok(campaign::SoakMode::A),
+        "b" | "B" => Ok(campaign::SoakMode::B),
+        o => Err(format!("--soak {o}: expected a or b")),
+    }
+}
+
+fn opts(args: &[String]) -> Result<campaign::Opts, String> {
+    let mut o = campaign::Opts::default();
+    if let Some(u) = flag(args, "--until") {
+        if !campaign::STEPS.contains(&u) {
+            return Err(format!("--until {u}: not a step ({:?})", campaign::STEPS));
+        }
+        o.until = u.into();
+    }
+    o.soak = soak_mode(args)?;
+    if let Some(b) = flag(args, "--budget") {
+        o.budget = b.parse::<u64>().map_err(|e| format!("--budget: {e}"))? * campaign::KAS;
+    }
+    if let Some(b) = flag(args, "--c6-deposit") {
+        o.c6_deposit = b.parse::<u64>().map_err(|e| format!("--c6-deposit: {e}"))? * campaign::KAS;
+    }
+    if let Some(b) = flag(args, "--buys") {
+        o.buys = b.parse().map_err(|e| format!("--buys: {e}"))?;
+    }
+    Ok(o)
+}
+
+/// `campaign <start|resume|status>` (spec M8 A4, A5).
+async fn campaign_cmd(args: &[String]) -> Result<(), String> {
+    let env = load_env();
+    let root = indexer::data_root();
+    match args.first().map(String::as_str) {
+        Some("status") => {
+            let cov = flag(args, "--cov").map(hash_arg).transpose()?;
+            campaign::status(&root, cov, soak_mode(args)?)
+        }
+        Some("start") if has(args, "--dry-run") => {
+            // Read-only: the fee estimate from a public node if one answers; nothing is sent.
+            let kp = keypair(&env)?;
+            let rate = match net::connect(env.get(URL_VAR).cloned()).await {
+                Ok(c) => {
+                    let r = fees::estimate(&c).await;
+                    let _ = c.disconnect().await;
+                    r?
+                }
+                Err(e) => {
+                    println!("dry run: no node ({e}); fee rate = the 100 sompi/gram floor");
+                    fees::round_rate(0.0)?
+                }
+            };
+            println!("dry run: fee rate {} sompi/gram (normal bucket {})", rate.sompi_per_gram, rate.raw);
+            let o = opts(args)?;
+            let spk = kaspa_txscript::pay_to_address_script(&address(&kp));
+            let local = campaign::Local::new(spk, o.budget, 1_000_000, rate);
+            let dry_root = root.join("dry-run");
+            let _ = std::fs::remove_dir_all(&dry_root);
+            let mut r = campaign::Runner::new(local, dry_root, kp.secret_bytes(), o);
+            let t0 = std::time::Instant::now();
+            let res = r.run().await;
+            let spent = r.opts.budget.saturating_sub(r.net.balance());
+            println!(
+                "dry run: {} submissions ({} refused), {:.0} s; balance {} -> {} KAS (spent or locked {:.2} KAS)",
+                r.net.submitted,
+                r.net.refused,
+                t0.elapsed().as_secs_f64(),
+                r.opts.budget as f64 / 1e8,
+                r.net.balance() as f64 / 1e8,
+                spent as f64 / 1e8
+            );
+            if let Ok(t) = r.report() {
+                if let Some(dir) = r.x.as_ref().and_then(|x| x.dir().map(|d| d.to_path_buf())) {
+                    let _ = indexer::write_atomic(&dir.join("report.md"), &t);
+                    println!("dry run report: {}", dir.join("report.md").display());
+                }
+            }
+            res
+        }
+        Some("start") => {
+            if root.join("current").exists() {
+                return Err(format!("a campaign exists ({}): use `campaign resume` or `campaign status`", root.join("current").display()));
+            }
+            let (l, kp) = live(&env).await?;
+            let mut r = campaign::Runner::new(l, root, kp.secret_bytes(), opts(args)?);
+            r.run().await
+        }
+        Some("resume") => {
+            let cov = match flag(args, "--cov") {
+                Some(c) => hash_arg(c)?,
+                None => hash_arg(std::fs::read_to_string(root.join("current")).map_err(|_| "no current campaign; use --cov".to_string())?.trim())?,
+            };
+            let (l, kp) = live(&env).await?;
+            let mut r = campaign::Runner::new(l, root, kp.secret_bytes(), opts(args)?);
+            r.open(cov)?;
+            r.run().await
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
+/// `indexer`: poll a public node for one instance (A4); `--once` stops at the sink.
+async fn indexer_cmd(args: &[String]) -> Result<(), String> {
+    use kaspa_rpc_core::api::rpc::RpcApi;
+    let env = load_env();
+    let cov = hash_arg(flag(args, "--cov").ok_or("--cov <hex> required")?)?;
+    let dir = indexer::instance_dir(cov);
+    let bundle_path = flag(args, "--bundle").map(PathBuf::from).unwrap_or_else(|| dir.join("bundle.json"));
+    let (t, genesis) = if bundle_path.exists() {
+        let v = lottery::bundle::verify(&bundle::read(&bundle_path)?)?;
+        if v.cov != cov {
+            return Err(format!("{}: covenant ID {} is not {cov}", bundle_path.display(), v.cov));
+        }
+        (v.templates, Some(v.genesis_states))
+    } else {
+        println!("no bundle ({}): genesis output states unknown until spent; committed templates", bundle_path.display());
+        (lottery::buy::Templates::get(lottery::buy::b_max()), None)
+    };
+    let client = net::connect(env.get(URL_VAR).cloned()).await?;
+    let (start, sdaa) = match flag(args, "--start") {
+        Some(h) => {
+            let h = hash_arg(h)?;
+            let d = client.get_block(h, false).await.map(|b| b.header.daa_score).unwrap_or(0);
+            (h, d)
+        }
+        None if dir.join(indexer::LOG_FILE).exists() => (kaspa_consensus_core::Hash::from_bytes([0; 32]), 0),
+        None => return Err("a new index needs --start <chain block before genesis>".into()),
+    };
+    let mut x = indexer::Indexer::open(Some(&dir), t, cov, genesis, start, sdaa)?;
+    println!("indexer {cov}: resume from {} (DAA {}), {} log lines, {} live UTXOs", x.last, x.last_daa, x.lines().len(), x.ix.live().len());
+    loop {
+        let st = indexer::poll(&client, &mut x).await?;
+        println!(
+            "poll: {} calls, {} chain blocks (+{} removed), {} accepted txs seen, {} spent entries returned, {} kept, {} reverted, {} events; last {} (DAA {}); gaps {:?}",
+            st.calls,
+            st.blocks,
+            st.removed_blocks,
+            st.txs_seen,
+            st.spent_entries,
+            st.kept,
+            st.reverted,
+            st.events.len(),
+            x.last,
+            x.last_daa,
+            x.ix.gaps()
+        );
+        for (r, b) in x.earliest_buy_blocks() {
+            if let Some(e) = indexer::deleted_block(&client, b).await? {
+                println!("pruning evidence: round {r}'s earliest buy block {b}: {e}");
+            }
+        }
+        if has(args, "--once") {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
+/// `node-check`: read-only facts from a public node for S3: the pruning point, the v2 call
+/// with Full verbosity on recent chain blocks (spent entries present?), and for each given
+/// block hash what `get_block` and a v1/v2 call from it return.
+async fn node_check(args: &[String]) -> Result<(), String> {
+    use kaspa_rpc_core::{RpcDataVerbosityLevel, api::rpc::RpcApi};
+    let env = load_env();
+    let c = net::connect(env.get(URL_VAR).cloned()).await?;
+    let info = c.get_block_dag_info().await.map_err(|e| e.to_string())?;
+    let pp = c.get_block(info.pruning_point_hash, false).await.map_err(|e| e.to_string())?;
+    let sink = c.get_block(info.sink, false).await.map_err(|e| e.to_string())?;
+    println!(
+        "virtual DAA {}; sink {} DAA {}; pruning point {} DAA {} ({:.1} h back at 10 BPS)",
+        info.virtual_daa_score,
+        info.sink,
+        sink.header.daa_score,
+        info.pruning_point_hash,
+        pp.header.daa_score,
+        (info.virtual_daa_score - pp.header.daa_score) as f64 / 36_000.0
+    );
+    // Walk 200 selected parents back from the sink, then one v2 call with Full verbosity.
+    let mut h = info.sink;
+    for _ in 0..200 {
+        h = c.get_block(h, false).await.map_err(|e| e.to_string())?.verbose_data.ok_or("no verbose data")?.selected_parent_hash;
+    }
+    let t0 = std::time::Instant::now();
+    let r = c.get_virtual_chain_from_block_v2(h, Some(RpcDataVerbosityLevel::Full), None).await.map_err(|e| format!("v2: {e}"))?;
+    let secs = t0.elapsed().as_secs_f64();
+    let (nadd, nrem) = (r.added_chain_block_hashes.len(), r.removed_chain_block_hashes.len());
+    let b = indexer::batch_of(r)?;
+    let txs: usize = b.added.iter().map(|k| k.txs.len()).sum();
+    let ins: usize = b.added.iter().flat_map(|k| &k.txs).map(|t| t.spent.len()).sum();
+    let covtx = b.added.iter().flat_map(|k| &k.txs).filter(|t| t.tx.outputs.iter().any(|o| o.covenant.is_some())).count();
+    println!(
+        "v2 Full from 200 chain blocks back ({h}): {nadd} added, {nrem} removed chain blocks in {secs:.1} s; {txs} accepted transactions rebuilt (ids = the node's), {ins} inputs, each with its spent amount and creation DAA; {covtx} with covenant-bound outputs"
+    );
+    for a in args {
+        let h = hash_arg(a)?;
+        match indexer::deleted_block(&c, h).await? {
+            Some(e) => println!("block {h}: deleted: {e}"),
+            None => println!("block {h}: served with its body"),
+        }
+        match c.get_virtual_chain_from_block_v2(h, Some(RpcDataVerbosityLevel::Full), None).await {
+            Ok(r) => println!("v2 from {h}: {} added, {} removed chain blocks", r.added_chain_block_hashes.len(), r.removed_chain_block_hashes.len()),
+            Err(e) => println!("v2 from {h}: refused: {e}"),
+        }
+        match c.get_virtual_chain_from_block(h, false, None).await {
+            Ok(r) => println!("v1 from {h}: {} added, {} removed chain blocks", r.added_chain_block_hashes.len(), r.removed_chain_block_hashes.len()),
+            Err(e) => println!("v1 from {h}: refused: {e}"),
+        }
+    }
+    let _ = c.disconnect().await;
+    Ok(())
+}
+
+/// `bundle [--out <file>]`: the current campaign's bundle with the index's live UTXOs.
+async fn bundle_cmd(args: &[String]) -> Result<(), String> {
+    let env = load_env();
+    let root = indexer::data_root();
+    let cov = hash_arg(std::fs::read_to_string(root.join("current")).map_err(|_| "no current campaign".to_string())?.trim())?;
+    let dir = indexer::instance_dir(cov);
+    let g = bundle::read(&dir.join("bundle-genesis.json"))?;
+    let v = lottery::bundle::verify(&g)?;
+    let c: lottery::store::Campaign = lottery::store::read(&std::fs::read_to_string(dir.join("campaign.json")).map_err(|e| e.to_string())?, lottery::store::CAMPAIGN)?;
+    let start = hash_arg(c.vars.get("start_hash").ok_or("start_hash")?)?;
+    let mut x = indexer::Indexer::open(Some(&dir), v.templates.clone(), cov, Some(v.genesis_states), start, 0)?;
+    let (mut l, _) = live(&env).await?;
+    indexer::poll(&l.client, &mut x).await?;
+    let b = bundle::refreshed(&g, &x.ix, x.last, x.last_daa)?;
+    let out = flag(args, "--out").map(PathBuf::from).unwrap_or_else(|| dir.join("bundle-latest.json"));
+    indexer::write_atomic(&out, &lottery::store::write(&b, lottery::store::BUNDLE)?)?;
+    for line in bundle::verify_against(&mut l, &b).await? {
+        println!("{line}");
+    }
+    println!("wrote {} ({} live UTXOs at DAA {})", out.display(), b.live_utxos.len(), x.last_daa);
+    Ok(())
+}
+
+async fn bundle_verify_cmd(args: &[String]) -> Result<(), String> {
+    let env = load_env();
+    let path = PathBuf::from(args.first().ok_or("bundle-verify <file>")?);
+    let b = bundle::read(&path)?;
+    let (mut l, _) = live(&env).await?;
+    for line in bundle::verify_against(&mut l, &b).await? {
+        println!("{line}");
+    }
+    println!("bundle-verify {}: PASS", path.display());
+    Ok(())
+}
+
 async fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let rest = args.get(1..).unwrap_or(&[]);
     let res = match args.first().map(String::as_str) {
         Some("keygen") => keygen(),
         Some("info") => info().await,
         Some("anchor-check") => anchor_check(args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0)).await,
         Some("probe") => run_probes(args.get(1).map(String::as_str).unwrap_or("all")).await,
-        _ => Err("usage: tn10 <keygen | info | anchor-check | probe [all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62]> (conflict-m6 is not part of all)".into()),
+        Some("node-check") => node_check(rest).await,
+        Some("indexer") => indexer_cmd(rest).await,
+        Some("campaign") => campaign_cmd(rest).await,
+        Some("bundle") => bundle_cmd(rest).await,
+        Some("bundle-verify") => bundle_verify_cmd(rest).await,
+        _ => Err(USAGE.into()),
     };
     match res {
         Ok(()) => ExitCode::SUCCESS,
