@@ -25,7 +25,7 @@ A KAS-only lottery on Kaspa L1 built with Toccata covenants (SilverScript). Play
 - "Solved in model" in the design means solved on paper only. Nothing counts as implemented until compiled attack tests pass and the reviewer has checked it.
 
 ## Safety
-- Local script-engine tests and testnet-10 only. Never use mainnet nodes, mainnet addresses (`kaspa:`) or mainnet keys. A hook blocks this.
+- Local script-engine tests, a private simnet node on this PC with no peers (`crates/simnet`, D125), and testnet-10 only. Never use mainnet nodes, mainnet addresses (`kaspa:`) or mainnet keys. A hook blocks this.
 - Never commit private keys, seeds, mnemonics or node credentials. Personal settings go in `CLAUDE.local.md` (git-ignored).
 
 ## Stack and layout
