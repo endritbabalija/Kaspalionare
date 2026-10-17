@@ -8,7 +8,7 @@ Proposals in `docs/DECISIONS.md` marked "confirm in spec Mx" are settled in that
 
 Out of scope until later: economic tuning beyond the starting values, ticket transfer, any front end, mainnet.
 
-Seed: the seed source is the anchor block's hash (M7); the miner-withholding bias is OPEN on the release gate (D100, amended 2026-10-13). Mainnet fairness is on-chain only (D108, 2026-10-13): no VDF, no house secret, no oracle. The whale-margin floor goes to 1.5 as the first task of M8 (D109); the hashrate gate and a possible better floor are settled by the research session on the release gate.
+Seed: the seed source is the anchor block's hash (M7); the miner-withholding bias is OPEN on the release gate (D100, amended 2026-10-13). The on-chain-only search ended with a theorem (D110) and the owner reopened the delay path (D126, 2026-10-14): a fresh session picks between the refereed sequential delay (D111) and the ZK segmented VDF, then a seed milestone follows; the 1.5 floor is in (D113) and D112 says what it can return to.
 
 ---
 
@@ -194,8 +194,8 @@ Done when:
 - the verdict is recorded: fits as is, fits only with a split `draw()` (and what that costs), or does not fit;
 - the margin-floor question of the amended D100 row (ε = 0 at margin 1.0 for a self-referring caller) is answered or handed to the owner as a decision.
 
-## Research — on-chain-only seed fairness (release gate, after M8)
-Status: research done 2026-10-13, owner decision pending (D110 no delay-free mechanism exists; D111 candidate: refereed sequential delay, outline `docs/specs/seed-delay-outline.md`; D112 floor and gate per path; findings `docs/research/seed-fairness-findings.md`)
+## Research — on-chain-only seed fairness (done) and the delay seed design (next)
+Status: on-chain-only research done 2026-10-13 (D110 no delay-free mechanism exists; D111 candidate: refereed sequential delay, outline `docs/specs/seed-delay-outline.md`; D112 floor and gate per path; findings `docs/research/seed-fairness-findings.md`). **Owner decision 2026-10-14 (D126): the delay path is reopened.** Next: a fresh session compares RSD (D111) with the ZK segmented VDF (brief Part A3) and proposes one as the seed milestone with a spec outline; brief `docs/research/seed-fairness-brief.md` Part A. It runs as its own track; M8 continues (D113); the seed milestone's place against M8's testnet campaign is fixed in the seed spec (a changed `draw()` re-runs the affected rounds).
 
 No code, no testnet. The owner chose plan A (D108): the seed stays the anchor block's hash and nothing off chain is added. Measured on 13 Oct 2026, the two largest Kaspa pools hold about 27 % each (the largest 28–34 % depending on the source), which is at or above the break-even α ≈ ε that a 1.5 margin floor gives, and a 1.5 floor already costs ordinary players about 10 points of expected return. The session searches, with several agents and the literature, for a covenant-only mechanism or a tighter bound that makes the anchor miner's re-roll unprofitable for a 30–35 % pool operator without pricing the game that way, or shows none exists under the non-negotiables.
 
@@ -204,6 +204,19 @@ Done when:
 - the ruled-out list in D108 is either confirmed or overturned with a reason;
 - the whale-margin floor value and the hashrate-gate threshold are proposed as a decision for the owner, with the player-loss and jackpot effect of each candidate floor from `docs/costs.md` "Margin floor";
 - the outcome is recorded in `docs/DECISIONS.md`; if a mechanism is found it gets its own milestone spec before any code; if none is found, the release-gate item below is reworded as an accepted residual with its measured size.
+
+## Spike — RSD seed feasibility (seed track, alongside M8)
+Status: spec approved 2026-10-17 (`docs/specs/spike-rsd.md`, D128); not started. Direction D127 (RSD, outline `docs/specs/seed-delay-outline.md` section 5).
+
+Test-only probe covenants in `covenants/spike_rsd/` and a test target; a testnet-10 probe `rsd-inclusion` (not in `all`, up to 250 KAS of fees). No production covenant, design or game-rule change.
+
+Done when:
+- the largest Blake3 steps per transaction within 90 % is measured for the raw and the SilverScript verifier;
+- the fan-out refutation (commit, parallel chunks, final) runs in the local engine with its attack tests written first and one killed mutant per check;
+- claim-batch capacity, the claim-versus-refutation block-space ratio and the CPU reference per step are recorded;
+- testnet-10 inclusion latency of near-full transactions (single, 3- and 7-hop chains, k at once; floor, 2×, 10×) is in `docs/tn10-mass-check.md`, and k = 5 false claims are refuted on testnet;
+- the flood table (k = 5, 50, 500) and W_c from the outline formula are in `docs/costs.md` "Spike RSD";
+- the verdict (S3), s, N, W_c and fees per round are DECISIONS rows and update outline 5.1; `covenant-reviewer` has checked the probes and tests.
 
 ## M8 — Testnet-10 end to end
 Status: in progress (spec `docs/specs/8.md` approved 2026-10-13 in a design session; implementation in a fresh session, stages S1–S5 with the handoff `docs/specs/8-handoff.md`; S1 is the margin-floor change below (D109); adds a private simnet for the forced jackpot cases (D114, D125) and backer checks (D124))
