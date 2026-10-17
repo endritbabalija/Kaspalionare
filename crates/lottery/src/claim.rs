@@ -476,21 +476,29 @@ impl ClaimCase {
             rej("check 12: prize + ticket value > TOTAL_MAX");
         }
         // Outputs (checks 10-15).
-        let pool_out = (self.pool_value as i128 - prize as i128) as u64;
+        // Checked (S4 simnet SN2): a prize above the pool value (e.g. a repeat claim on a
+        // 1-sompi remainder) is a refusal, never a pool' that wraps to a huge u64. A value
+        // outside [0, u64::MAX] is listed as a check-8/12 reject and its output set to 0, so
+        // attack cases still build a well-formed transaction for the script to refuse.
+        let mut out = |v: i128, why: &str| -> u64 {
+            u64::try_from(v).unwrap_or_else(|_| {
+                rejects.push(why.to_string());
+                0
+            })
+        };
+        let mut values = vec![out(self.pool_value as i128 - prize as i128, "check 8: prize > pool value (pool' would be negative)")];
+        match mode {
+            ClaimMode::Final | ClaimMode::Accrue => values.push(out(self.ticket_value as i128 + prize as i128, "check 12: ticket value + prize outside u64")),
+            ClaimMode::Pay => {
+                values.push(self.ticket_value);
+                values.push(out(prize as i128, "check 8: prize negative"));
+            }
+        }
         let ticket_next = (mode != ClaimMode::Final).then(|| {
             let mut s = t.clone();
             s.claimed[0] = c | bit;
             s
         });
-        let mut values = vec![pool_out];
-        match mode {
-            ClaimMode::Final => values.push((self.ticket_value as i128 + prize as i128) as u64),
-            ClaimMode::Pay => {
-                values.push(self.ticket_value);
-                values.push(prize as u64);
-            }
-            ClaimMode::Accrue => values.push((self.ticket_value as i128 + prize as i128) as u64),
-        }
         let change_output = self.change.then(|| {
             values.push(change_value(&self.funding, self.fee));
             values.len() - 1
@@ -517,6 +525,14 @@ impl ClaimCase {
             change_output,
             rejects,
         }
+    }
+
+    /// The model as a refusal: `Err` (every failing reference check, e.g. "check 4: index
+    /// already claimed", "check 8: prize > remaining") instead of a transaction the script
+    /// would reject. Offline builders (`from_store_index`, the tn10 runner) use this.
+    pub fn checked_expected(&self) -> Result<ClaimExpected, String> {
+        let x = self.expected();
+        if x.rejects.is_empty() { Ok(x) } else { Err(format!("the claim reference rejects it: {:?}", x.rejects)) }
     }
 
     /// claim(idx, leaves, siblings, pool_pl, pool_sl).
@@ -640,10 +656,7 @@ impl ClaimCase {
         c.funding_sk = payer.funding_sk;
         c.fee = payer.fee;
         // S2c should-fix 3 (D115): the store is untrusted; a model panic is an error.
-        let x = crate::index::model("claim", || c.expected())?;
-        if !x.rejects.is_empty() {
-            return Err(format!("ticket {ticket} index {idx}: the claim reference rejects it: {:?}", x.rejects));
-        }
+        crate::index::model("claim", || c.checked_expected())?.map_err(|e| format!("ticket {ticket} index {idx}: {e}"))?;
         let mut ops = vec![ticket, pop];
         ops.extend(funding.iter().map(|f| f.outpoint));
         Ok((c, ops))
@@ -1011,6 +1024,49 @@ mod tests {
             }
             assert_eq!(tier_of(&combo_matching(&w, 0, false, m, 1).bytes(), &w), None);
         }
+    }
+
+    /// S4 simnet SN2 model bug: on an h = 2 jackpot of J = 100 KAS + 1 sompi, both paying
+    /// claims leave the pool at R + 1 sompi. A third claim (the first ticket's index 0
+    /// again) must be refused by the model, naming check 4 (claimed bit) and check 8
+    /// (prize > remaining), and pool' must never wrap below zero into a huge u64.
+    #[test]
+    fn sn2_third_claim_on_a_one_sompi_remainder_is_refused_without_wrap() {
+        let j = 100 * KAS as i64 + 1;
+        let mut c = ClaimCase::fabricated(2, 2, crate::state::TIER_JACKPOT, j, &[1, 1]);
+        c.pool_value = j as u64 + TEST_RESERVE;
+        // Claim 1 (PAY, index 0 of the b = 2 ticket).
+        let x1 = c.checked_expected().expect("claim 1 valid");
+        assert_eq!((x1.h, x1.prize, x1.mode), (2, j / 2, ClaimMode::Pay));
+        // Claim 2 (the other holder) takes the same floor(J / 2): pool' = R + 1 sompi.
+        let pool_after_two = x1.values[0] - (j / 2) as u64;
+        assert_eq!(pool_after_two, TEST_RESERVE + 1);
+        // Claim 3: ticket' (index 0 claimed) against the 1-sompi pool.
+        let mut c3 = c.clone();
+        c3.ticket = x1.ticket.clone().unwrap();
+        c3.pool_value = pool_after_two;
+        let x3 = c3.expected();
+        assert!(x3.rejects.iter().any(|r| r.starts_with("check 4")), "{:?}", x3.rejects);
+        assert!(x3.rejects.iter().any(|r| r.starts_with("check 8")), "{:?}", x3.rejects);
+        assert!(x3.values.iter().all(|&v| v <= crate::game::TOTAL_MAX as u64), "a wrapped output value: {:?}", x3.values);
+        let e = c3.checked_expected().expect_err("the model must refuse the third claim");
+        assert!(e.contains("check 4") && e.contains("check 8"), "{e}");
+        // The same pool with a fresh (unclaimed) index: only the insufficient pool refuses.
+        let mut c4 = c3.clone();
+        c4.ticket = c.ticket.clone();
+        let e = c4.checked_expected().expect_err("insufficient pool");
+        assert!(e.contains("check 8") && !e.contains("check 4"), "{e}");
+        assert!(c4.expected().values.iter().all(|&v| v <= crate::game::TOTAL_MAX as u64));
+        // The script refuses the well-formed (unwrapped) third claim in the local engine
+        // (ticket.sil check 4, line 158; check 8, line 259), not only consensus.
+        assert!(c3.build().finish().run().is_err(), "the engine must reject the third claim");
+        assert!(c4.build().finish().run().is_err(), "the engine must reject a claim above the remaining pool");
+        // The claimed bit alone (pool still covering the prize) is refused too (check 4).
+        let mut c5 = c3.clone();
+        c5.pool_value = x1.values[0];
+        let e = c5.checked_expected().expect_err("claimed bit");
+        assert!(e.contains("check 4") && !e.contains("check 8"), "{e}");
+        assert!(c5.build().finish().run().is_err(), "the engine must reject a repeat claim at check 4");
     }
 
     #[test]

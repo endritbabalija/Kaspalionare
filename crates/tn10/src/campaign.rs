@@ -4,7 +4,8 @@
 //! - Every transaction is built by the `lottery` builders from the instance's rebuilt state
 //!   (`lottery::index::Rebuild`, fed by the indexer from the node's virtual chain) or, for
 //!   claims, from the wallet store; the offline builders `DrawCase::from_store` (every draw,
-//!   from the index) and `ClaimCase::from_store` (C4/C6 from the wallet, C5c from the index)
+//!   from the index) and `ClaimCase::from_store` (C4/C6 from the wallet, C5c from the index,
+//!   C8c from both, compared, the indexer-built one submitted)
 //!   take no RPC type. Each one runs in the local v2.1.0 engine before submission.
 //! - `campaign/1` (`tn10-data/<cov>/campaign.json`) is written after every action. An action
 //!   is named ("C2/buy/17"); its txid is recorded before submission, and `resume` skips an
@@ -183,6 +184,84 @@ pub fn needs_pre_soak_close(deadline: u64, d_min: u64, virtual_daa: u64) -> bool
     virtual_daa + d_min / 2 > deadline
 }
 
+/// A claim's covenant inputs: ticket (0) and pool (1); funding from input 2 (A4 shape).
+pub const CLAIM_FUNDING_FROM: usize = 2;
+
+/// S4 owner note (dual claim, C8c): two builds of the same claim (wallet store and indexer
+/// store) must be identical in every field except the funding inputs' signature scripts
+/// (randomised Schnorr signatures), as IX2's `same_tx` (`m8_index.rs`) compares them: the
+/// signature scripts of inputs >= `from` are cleared, then the whole transactions must be
+/// equal. `Ok(detail)`: identical (the detail says whether the funding signatures differ);
+/// `Err`: the first difference found.
+pub fn same_except_funding_sigs(a: &Transaction, b: &Transaction, from: usize) -> R<String> {
+    if a.inputs.len() != b.inputs.len() || a.inputs.len() < from {
+        return Err(format!("input count {} vs {}", a.inputs.len(), b.inputs.len()));
+    }
+    let strip = |t: &Transaction| {
+        let mut t = t.clone();
+        for i in from..t.inputs.len() {
+            t.inputs[i].signature_script.clear();
+        }
+        t.finalize();
+        t
+    };
+    let (sa, sb) = (strip(a), strip(b));
+    if sa != sb {
+        let diff = (0..sa.inputs.len())
+            .find(|&i| sa.inputs[i] != sb.inputs[i])
+            .map(|i| format!("input {i}{}", if i < from { " (covenant)" } else { " (funding, outside its signature)" }))
+            .or_else(|| {
+                if sa.outputs.len() != sb.outputs.len() {
+                    return Some(format!("output count {} vs {}", sa.outputs.len(), sb.outputs.len()));
+                }
+                (0..sa.outputs.len()).find(|&i| sa.outputs[i] != sb.outputs[i]).map(|i| format!("output {i}"))
+            })
+            .unwrap_or_else(|| "a transaction field (version, lock time, subnetwork, gas, payload or mass)".into());
+        return Err(diff);
+    }
+    let sigs = (from..a.inputs.len()).filter(|&i| a.inputs[i].signature_script != b.inputs[i].signature_script).count();
+    Ok(format!(
+        "{} covenant inputs and all {} outputs identical; {sigs} of {} funding signature scripts differ (randomised Schnorr)",
+        from,
+        a.outputs.len(),
+        a.inputs.len() - from
+    ))
+}
+
+/// Dry-run hook (`TN10_DRY_C8_WIN=1`): the `Local` anchor of round `round` is ground until
+/// one of `combos` wins a tier, so the C8c dual claim is exercised (the live run is luck).
+#[derive(Clone, Debug)]
+pub struct ForceWin {
+    pub cov: [u8; 32],
+    pub round: i64,
+    pub m: i64,
+    pub combos: Vec<[u8; 6]>,
+}
+
+/// The first `xh` (from `seed`, a counter appended) whose seed makes one of `f.combos`
+/// win a tier; returns the hash and the number of tries.
+pub fn grind_anchor(seed: &[u8], f: &ForceWin) -> ([u8; 32], u64) {
+    for n in 0u64.. {
+        let mut xh = blake2b(&[seed, &n.to_le_bytes()].concat());
+        xh[0] |= 1;
+        let s = lottery::game::seed_numbers(&f.cov, f.round, &xh, f.m);
+        let win = [s.main[0], s.main[1], s.main[2], s.main[3], s.main[4], s.bonus];
+        if f.combos.iter().any(|c| lottery::game::tier_of(c, &win).is_some()) {
+            return (xh, n + 1);
+        }
+    }
+    unreachable!()
+}
+
+/// Which store a claim is built from. `Both` (S4 owner note, C8c): from the wallet and from
+/// the indexer, compared (`same_except_funding_sigs`), and the indexer-built one submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimFrom {
+    Wallet,
+    Index,
+    Both,
+}
+
 /// A panic in a builder (a reference that rejects) becomes an error.
 fn guarded<T>(what: &str, f: impl FnOnce() -> T) -> R<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
@@ -229,6 +308,8 @@ pub trait Net {
     /// Before a DAA-sensitive transaction: the node's entries of its inputs must be the
     /// builder's (amount, creation DAA, covenant ID).
     async fn verify_inputs(&mut self, f: &Final, ops: &[TransactionOutpoint]) -> R<()>;
+    /// Dry-run hook only (`ForceWin`); a live node ignores it.
+    fn force_win(&mut self, _f: ForceWin) {}
 }
 
 /// A public testnet-10 node (`net::connect` guards the network).
@@ -375,6 +456,9 @@ pub struct Local {
     /// (removed, then its transactions re-added in a new block at the same DAA), as on
     /// testnet-10 in S3b.
     pub reorg_first_buy: bool,
+    /// Test hook (`TN10_DRY_C8_WIN=1`, set by C8c): the next anchor is ground so that one of
+    /// our soak-round combinations wins a tier.
+    pub force: Option<ForceWin>,
 }
 
 impl Local {
@@ -393,6 +477,7 @@ impl Local {
             submitted: 0,
             refused: 0,
             reorg_first_buy: false,
+            force: None,
         };
         for _ in 0..4 {
             let op = me.ledger.fund(budget / 4, spk.clone(), start - 10_000);
@@ -526,8 +611,14 @@ impl Net for Local {
     }
     async fn anchor(&mut self, _start: Hash, d: u64) -> R<(AnchorProof, Option<Arc<ChainSim>>)> {
         self.wait_daa(d + 60, "X").await?;
-        let mut xh = blake2b(&[b"tn10 dry-run anchor".as_slice(), &d.to_le_bytes()].concat());
+        let seed = [b"tn10 dry-run anchor".as_slice(), &d.to_le_bytes()].concat();
+        let mut xh = blake2b(&seed);
         xh[0] |= 1;
+        if let Some(f) = self.force.take() {
+            let (g, tries) = grind_anchor(&seed, &f);
+            println!("  dry run: anchor ground in {tries} tries so that a round-{} combination of ours wins (TN10_DRY_C8_WIN)", f.round);
+            xh = g;
+        }
         let sim = ChainSim::anchored(d, Hash::from_bytes(xh));
         // `DrawCase::from_store` runs a given proof against `ChainSim::anchored(D, X.hash)`,
         // the same chain, so no sim is returned.
@@ -542,6 +633,9 @@ impl Net for Local {
     }
     async fn verify_inputs(&mut self, _f: &Final, _ops: &[TransactionOutpoint]) -> R<()> {
         Ok(())
+    }
+    fn force_win(&mut self, f: ForceWin) {
+        self.force = Some(f);
     }
 }
 
@@ -1380,9 +1474,13 @@ impl<N: Net> Runner<N> {
         Ok(x)
     }
 
-    /// Claims of every winning holding of round `r` (wallet or index store); returns how
-    /// many were accepted. `tamper_once`: first build the C4 untrusted-copy refusal.
-    async fn claims(&mut self, step: &str, prefix: &str, r: i64, from_index: bool, tamper_once: bool, max: usize) -> R<usize> {
+    /// Claims of every winning holding of round `r` (wallet, index or both stores); returns
+    /// how many were accepted. `tamper_once`: first build the C4 untrusted-copy refusal.
+    /// `ClaimFrom::Both`: each claim is built from both stores, both pass `roots_match`, the
+    /// two must be identical except the funding signatures (a check, recorded with both
+    /// txids before submission), and the indexer-built one is submitted.
+    async fn claims(&mut self, step: &str, prefix: &str, r: i64, from: ClaimFrom, tamper_once: bool, max: usize) -> R<usize> {
+        let from_index = from != ClaimFrom::Wallet;
         let mut n = 0;
         let tickets: Vec<TransactionOutpoint> = self.wallets.get(&r).map(|w| w.tickets.iter().map(|t| t.outpoint.outpoint()).collect()).unwrap_or_default();
         for mut op in tickets {
@@ -1402,7 +1500,22 @@ impl<N: Net> Runner<N> {
                 self.refresh_rate().await?;
                 let fund = self.one_fund(10 * KAS).await?;
                 let w = self.wallets.get(&r).cloned();
-                let built = if from_index {
+                let mut dual = None;
+                let built = if from == ClaimFrom::Both {
+                    let ix = &self.x()?.ix;
+                    if ix.live().get(&op).is_none() { break }
+                    let Some(w) = w.as_ref() else { break };
+                    if w.tickets.iter().all(|t| t.outpoint.outpoint() != op) { break }
+                    match (self.build_claim(w, op, &fund, false), self.build_claim(ix, op, &fund, false)) {
+                        (Ok((fw, _)), Ok((fi, ci))) => {
+                            dual = Some((fw.tx.id(), fi.tx.id(), same_except_funding_sigs(&fw.tx, &fi.tx, CLAIM_FUNDING_FROM)));
+                            Ok((fi, ci))
+                        }
+                        (Err(a), Err(b)) if a.contains("no unclaimed index wins") && b.contains("no unclaimed index wins") => break,
+                        (Err(e), _) => return Err(format!("dual claim, wallet store: {e}")),
+                        (_, Err(e)) => return Err(format!("dual claim, indexer store: {e}")),
+                    }
+                } else if from_index {
                     let ix = &self.x()?.ix;
                     if ix.live().get(&op).is_none() { break }
                     self.build_claim(ix, op, &fund, false)
@@ -1424,7 +1537,23 @@ impl<N: Net> Runner<N> {
                     };
                     self.refuse(step, &name, &tf, Refusal::Script, Some(0)).await?;
                 }
-                let x = guarded("claim reference", || c.expected())?;
+                let x = guarded("claim reference", || c.checked_expected())??;
+                if let Some((idw, idi, cmp)) = dual {
+                    let name = format!("{step}: wallet- and indexer-built claims identical except funding signatures ({action})");
+                    let ok = cmp.is_ok();
+                    let detail = format!(
+                        "wallet-built txid {idw}, indexer-built txid {idi} (the txid excludes signature scripts); both stores' trees give the pool's frozen roots (roots_match); {}; {}",
+                        match &cmp {
+                            Ok(d) => d.clone(),
+                            Err(d) => format!("DIFFER at {d}"),
+                        },
+                        if ok { "submitting the indexer-built one" } else { "nothing submitted" }
+                    );
+                    self.check(step, &name, ok, detail).await?;
+                    if let Err(d) = cmp {
+                        return Err(format!("{action}: the wallet- and indexer-built claims differ at {d} (no submission)"));
+                    }
+                }
                 let id = self.send_wait(step, &action, &f).await?;
                 let mode = format!("{:?}", x.mode);
                 println!("  claim {id}: tier {:?}, h {}, prize {}, mode {mode}", x.tier, x.h, kas(x.prize as u64));
@@ -1709,7 +1838,7 @@ impl<N: Net> Runner<N> {
                 }
                 r = open;
             }
-            let n = self.claims(s, &format!("C4/r{r}"), r, false, true, usize::MAX).await?;
+            let n = self.claims(s, &format!("C4/r{r}"), r, ClaimFrom::Wallet, true, usize::MAX).await?;
             if n > 0 {
                 return self.check(s, &format!("claims of every winning holding of round {r} from the wallet store, offline"), true, format!("{n} claims")).await;
             }
@@ -1864,7 +1993,7 @@ impl<N: Net> Runner<N> {
             self.draw(s, &draw4, 0).await?;
         }
         self.set_var("c5c_round", r4);
-        let n = self.claims(s, &format!("C5c/r{r4} index"), r4, true, false, 1).await?;
+        let n = self.claims(s, &format!("C5c/r{r4} index"), r4, ClaimFrom::Index, false, 1).await?;
         self.check(s, &format!("one round-{r4} claim from the indexer store"), true, if n > 0 { "exercised".to_string() } else { format!("not exercised: no winning round-{r4} holding of ours (luck)") }).await
     }
 
@@ -1909,7 +2038,7 @@ impl<N: Net> Runner<N> {
             self.check(s, &format!("m stays 2 after round {r}"), c.m == 2, format!("m {}", c.m)).await?;
             modes.extend(self.settle_all(s, &format!("C6/carried r{r}"), lottery::state::KIND_WITHDRAW, r, &carried).await?);
             self.settle_all(s, &format!("C6/deposit r{r}"), lottery::state::KIND_DEPOSIT, r, &[SettleMode::DepositConvert, SettleMode::DepositRefund]).await?;
-            self.claims(s, &format!("C6/r{r}"), r, false, false, usize::MAX).await?;
+            self.claims(s, &format!("C6/r{r}"), r, ClaimFrom::Wallet, false, usize::MAX).await?;
         }
         let left = self.lives(Role::Request)?.iter().filter(|(_, st)| matches!(st, State::Request(q) if q.kind == lottery::state::KIND_WITHDRAW)).count();
         self.check(
@@ -2014,8 +2143,9 @@ impl<N: Net> Runner<N> {
         self.check("C8b", "indexer caught up inside the pruning window", true, format!("last chain block {} (DAA {})", x.last, x.last_daa)).await
     }
 
-    /// C8c: close, deletion evidence, late draw from the index, claim from the wallet,
-    /// refresh of an idle ticket.
+    /// C8c: close, deletion evidence, late draw from the index, the dual claim (built from
+    /// the wallet and from the index, compared, the indexer-built one submitted), refresh of
+    /// an idle ticket.
     pub async fn c8c(&mut self) -> R<()> {
         let s = "C8c";
         let t0: u64 = self.var("soak_t0")?.parse().map_err(|e| format!("{e}"))?;
@@ -2062,16 +2192,30 @@ impl<N: Net> Runner<N> {
         }
         let draw = format!("C8/draw r{r} (indexer store, after deletion)");
         if !self.done(&draw) {
+            // Dry-run hook (`TN10_DRY_C8_WIN=1`): grind the simulated anchor so that one of
+            // our round-r combinations wins, exercising the dual claim below.
+            if self.net.dry() && std::env::var("TN10_DRY_C8_WIN").is_ok_and(|v| v == "1") {
+                let w = self.wallets.get(&r).ok_or("no wallet of the soak round")?;
+                let combos = w.tickets.iter().flat_map(|t| t.bundle.chunks_exact(6).map(|c| <[u8; 6]>::try_from(c).unwrap())).collect();
+                let f = ForceWin { cov: self.cov()?.as_bytes(), round: r, m: w.m, combos };
+                self.net.force_win(f);
+            }
             self.draw(s, &draw, 0).await?;
         }
-        let n = self.claims(s, &format!("C8/r{r}"), r, false, false, 1).await?;
-        self.check(s, "a soak-round claim from the wallet store (> 30 h old purchases)", true, if n > 0 { "exercised" } else { "not exercised: no winning holding (luck)" }).await?;
+        // S4 owner note: the claim is built from the wallet store and from the indexer store,
+        // compared, and the indexer-built one is submitted (A7: both items).
+        let n = self.claims(s, &format!("C8/r{r}"), r, ClaimFrom::Both, false, 1).await?;
+        let how = |what: &str| if n > 0 { format!("exercised ({what}; see the dual-claim check)") } else { format!("not exercised: no winning round-{r} holding of ours (luck)") };
+        self.check(s, "A7: a claim from wallet-kept trees > 30 h later", true, how("built from the wallet store, identical to the submitted one")).await?;
+        self.check(s, "A7: a claim from the indexer copy", true, how("the indexer-built claim was submitted")).await?;
         if !self.done("C8/refresh ticket") {
             // The oldest live ticket of the soak round (bought at t0, idle since).
+            // (min by creation DAA: a ticket' left by the claim above is new, not idle.)
             let tk = self
                 .lives(Role::Ticket)?
                 .into_iter()
-                .find(|(_, s)| matches!(s, State::Ticket(t) if t.round == r && t.payout_key == self.me.key33()))
+                .filter(|(_, s)| matches!(s, State::Ticket(t) if t.round == r && t.payout_key == self.me.key33()))
+                .min_by_key(|(l, _)| l.daa)
                 .ok_or("no live soak-round ticket of ours")?;
             self.net.wait_daa(tk.0.daa + D_IDLE as u64 + SETTLE_DAA, "ticket idle D_IDLE (24 h)").await?;
             self.refresh_rate().await?;
@@ -2276,5 +2420,53 @@ mod tests {
         assert!(needs_pre_soak_close(598_625_800, 6_000, 598_700_000));
         assert!(needs_pre_soak_close(598_625_800, 6_000, 598_623_000));
         assert!(!needs_pre_soak_close(598_625_800, 6_000, 598_622_000));
+    }
+
+    /// S4 dual claim: two builds of the same claim (randomised funding signatures) compare
+    /// equal; any change to a covenant input, a funding input outside its signature, an
+    /// output or the input count is a difference.
+    #[test]
+    fn dual_claim_comparison() {
+        let c = ClaimCase::new(2);
+        let a = c.build().finish().tx;
+        let b = c.build().finish().tx;
+        assert_eq!(a.inputs.len(), 3);
+        let ok = same_except_funding_sigs(&a, &b, CLAIM_FUNDING_FROM).expect("two builds of one claim");
+        assert!(ok.contains("2 covenant inputs and all 4 outputs identical"), "{ok}");
+        assert_eq!(a.id(), b.id(), "the txid excludes signature scripts");
+        // Only a funding signature differs (forced): still identical.
+        let mut f = a.clone();
+        f.inputs[2].signature_script[1] ^= 1;
+        f.finalize();
+        assert!(same_except_funding_sigs(&a, &f, CLAIM_FUNDING_FROM).unwrap().contains("1 of 1 funding signature scripts differ"));
+        let diff = |m: &dyn Fn(&mut Transaction)| {
+            let mut t = b.clone();
+            m(&mut t);
+            t.finalize();
+            same_except_funding_sigs(&a, &t, CLAIM_FUNDING_FROM).expect_err("must differ")
+        };
+        assert_eq!(diff(&|t| t.outputs[0].value += 1), "output 0");
+        assert_eq!(diff(&|t| t.outputs[3].value -= 1), "output 3");
+        assert_eq!(diff(&|t| t.inputs[0].signature_script[4] ^= 1), "input 0 (covenant)");
+        assert_eq!(diff(&|t| t.inputs[1].signature_script.push(0x51)), "input 1 (covenant)");
+        assert_eq!(diff(&|t| t.inputs[2].previous_outpoint.index += 1), "input 2 (funding, outside its signature)");
+        assert_eq!(diff(&|t| t.inputs[2].sequence += 1), "input 2 (funding, outside its signature)");
+        assert!(diff(&|t| { t.outputs.pop(); }).starts_with("output count"));
+        assert!(diff(&|t| { t.inputs.pop(); }).starts_with("input count"));
+        assert!(diff(&|t| t.lock_time += 1).starts_with("a transaction field"));
+        // With from = 3 (no funding exempt), the forced funding-signature change differs.
+        assert_eq!(same_except_funding_sigs(&a, &f, 3).unwrap_err(), "input 2 (covenant)");
+    }
+
+    /// The dry-run forced win: the ground anchor makes one of the combinations win a tier.
+    #[test]
+    fn grind_anchor_makes_a_combination_win() {
+        let combos: Vec<[u8; 6]> = (0..300u32).map(|i| Combo::new(unrank(i * 401), 1 + (i % 2) as u8).bytes()).collect();
+        let f = ForceWin { cov: [9; 32], round: 8, m: 2, combos: combos.clone() };
+        let (xh, tries) = grind_anchor(b"seed", &f);
+        let s = lottery::game::seed_numbers(&f.cov, 8, &xh, 2);
+        let win = [s.main[0], s.main[1], s.main[2], s.main[3], s.main[4], s.bonus];
+        assert!(combos.iter().any(|c| lottery::game::tier_of(c, &win).is_some()), "after {tries} tries");
+        assert_eq!(xh[0] & 1, 1);
     }
 }
