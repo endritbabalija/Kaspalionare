@@ -141,6 +141,29 @@ impl State {
         template_of(t, self.role()).redeem(&self.values())
     }
 
+    /// The encoded state alone, without the template's prefix and suffix (M8 `bundle/1`).
+    pub fn state_bytes(&self, t: &Templates) -> Vec<u8> {
+        template_of(t, self.role()).state_bytes(&self.values())
+    }
+
+    /// The state of `role` whose encoded state bytes are `bytes` (M8 `bundle/1`): the redeem
+    /// script prefix || bytes || suffix of the role's committed template is decoded and must
+    /// re-encode to the same bytes. Returns the state and its redeem script. A full redeem
+    /// script given as `bytes` (the pre-fix bundle shape) is refused by name.
+    pub fn from_state_bytes(t: &Templates, role: Role, bytes: &[u8]) -> Result<(State, Vec<u8>), String> {
+        let tpl = template_of(t, role);
+        if bytes.len() >= tpl.prefix.len() + tpl.suffix.len() && bytes.starts_with(&tpl.prefix) && bytes.ends_with(&tpl.suffix) {
+            return Err(format!("{role:?} state holds a full redeem script, not the state bytes (old bundle shape)"));
+        }
+        let redeem = [tpl.prefix.as_slice(), bytes, &tpl.suffix].concat();
+        let v = state_values(tpl, &redeem)?;
+        let s = typed(role, &v)?;
+        if s.redeem(t) != redeem {
+            return Err(format!("{role:?} state bytes do not re-encode to themselves"));
+        }
+        Ok((s, redeem))
+    }
+
     /// P2SH of the redeem script (what a covenant output carries).
     pub fn spk(&self, t: &Templates) -> ScriptPublicKey {
         pay_to_script_hash_script(&self.redeem(t))

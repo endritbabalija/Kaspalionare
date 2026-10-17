@@ -4,12 +4,14 @@
 //!   written by C1 before genesis was submitted), refreshes its live UTXOs and snapshot from
 //!   the index (after a poll), runs `lottery::bundle::verify`, and writes `bundle/1`.
 //! - `bundle-verify <file>` runs `lottery::bundle::verify` (covenant ID and template hashes
-//!   recomputed, every genesis check), then compares every live UTXO in the file with the
-//!   node's UTXO index; any mismatch is a non-zero exit.
+//!   recomputed, every genesis check, each live UTXO's redeem script rebuilt from its role's
+//!   template and its state bytes and hashed to its script), then compares every live UTXO
+//!   in the file (outpoint, script, value, creation DAA, covenant ID) with the node's UTXO
+//!   index; any mismatch is a non-zero exit.
 
 use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::tx::{ScriptPublicKey, TransactionOutpoint};
-use lottery::bundle::{Bundle, Snapshot, verify};
+use lottery::bundle::{Bundle, BundleLive, Snapshot, verify};
 use lottery::store::{self, IndexSnapshot};
 
 use crate::campaign::Net;
@@ -21,7 +23,8 @@ pub fn read(path: &std::path::Path) -> R<Bundle> {
 }
 
 /// Every live UTXO of `b` that the node does not hold as stated (missing, or another value,
-/// creation DAA or covenant ID).
+/// creation DAA, covenant ID or script). `verify` has already checked that each stated
+/// script is the P2SH of the redeem script rebuilt from its template and state bytes.
 pub async fn compare_live<N: Net>(net: &mut N, b: &Bundle) -> R<Vec<String>> {
     let mut bad = vec![];
     for l in &b.live_utxos {
@@ -50,7 +53,8 @@ pub async fn compare_live<N: Net>(net: &mut N, b: &Bundle) -> R<Vec<String>> {
 /// The genesis bundle with the index's live UTXOs and snapshot, verified.
 pub fn refreshed(genesis: &Bundle, ix: &lottery::index::Rebuild, last: Hash, last_daa: u64) -> R<Bundle> {
     let mut b = genesis.clone();
-    b.live_utxos = IndexSnapshot::of(ix, Some(last)).live_utxos;
+    let t = ix.templates();
+    b.live_utxos = IndexSnapshot::of(ix, Some(last)).live_utxos.iter().map(|l| BundleLive::of(l, t)).collect::<R<Vec<_>>>()?;
     b.snapshot = Some(Snapshot { daa: last_daa, chain_block: last.as_bytes() });
     verify(&b)?;
     Ok(b)
@@ -61,7 +65,7 @@ pub fn refreshed(genesis: &Bundle, ix: &lottery::index::Rebuild, last: Hash, las
 pub async fn verify_against<N: Net>(net: &mut N, b: &Bundle) -> R<Vec<String>> {
     let v = verify(b)?;
     let mut out = vec![format!(
-        "local: covenant ID {} recomputed, {} templates = the local compilation, genesis checks pass, {} live UTXOs decode",
+        "local: covenant ID {} recomputed, {} templates = the local compilation, genesis checks pass, {} live UTXOs: redeem = template + state bytes, P2SH = script",
         v.cov,
         b.templates.len(),
         b.live_utxos.len()
@@ -70,6 +74,6 @@ pub async fn verify_against<N: Net>(net: &mut N, b: &Bundle) -> R<Vec<String>> {
     if !bad.is_empty() {
         return Err(format!("{} of {} live UTXOs differ from the node {}:\n  {}", bad.len(), b.live_utxos.len(), net.node(), bad.join("\n  ")));
     }
-    out.push(format!("node {}: every live UTXO present with the stated value, creation DAA and covenant ID", net.node()));
+    out.push(format!("node {}: every live UTXO present with the stated script, value, creation DAA and covenant ID", net.node()));
     Ok(out)
 }

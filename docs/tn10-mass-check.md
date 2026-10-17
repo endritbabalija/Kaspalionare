@@ -532,3 +532,412 @@ By the time the anchor was looked up, the pre-close sink had left the chain (5 r
 - **Converting draw** (`vault-m5`): 140,498 / 444,512, which is +561 / +364 over the plain draw: the record output and the conversion work.
 
 Locked on testnet (no further entry exercised): for each of the four runs, the round 2 objects, drawer', vault' and the new pools (none in the void); in `vault-m5` also the new position and position'. Payouts, the record's refunded R, refunds and changes are ours. `draw-m7-late` (the 13 h out-of-window rejection) was not run (optional, D103).
+
+## M8: fast campaign C0-C7 on testnet-10 (spec 8 A2, A5; S3b, 2026-10-17)
+
+`tn10 campaign start --until C7 --c6-deposit 50` (then `campaign resume`) from `crates/`, release build, public testnet-10 nodes from the resolver (all version **2.1.0**, network `testnet-10`, synced, UTXO index on): `vector-10.kaspa.green` (164 transactions), `proton-10.kaspa.stream` (96), `quark-10.kaspa.red` (40); `muon-10.kaspa.blue` served one resume without submissions. Every transaction went through `submit_transaction` with orphans disallowed, after the local v2.1.0 engine accepted it (expected refusals: rejected locally first, then by the node). Fee rate: the node's normal bucket, 100 sompi/gram throughout (D120). The indexer ran inside the runner for the whole campaign (v2 virtual chain, Full verbosity); the wallet and indexer stores fed every offline build.
+
+**Instance (A2, production templates, no short-void variant):** covenant ID `e9f4f810c86467e7768aa1b42e6c62182b8a0d934bda922bdbb2804f223988d6`, genesis `e64f08175f833100814f1fd24d1a0d8e05e2dcefbf4828892515e400cdaabd57` (DAA about 598,543,920). K 16, B_MAX 4, margin 15,000, m 3 -> 2, round_len = d_min = 6,000, seed_offset 600, draw_window 864,000, V0 100 KAS, J1 10 KAS. Launch bundle `docs/launch/tn10-m8.json` (305 live UTXOs at DAA 598,620,952): `tn10 bundle-verify docs/launch/tn10-m8.json` **PASS** (covenant ID recomputed, 11 templates = the local compilation, genesis checks pass, every live UTXO present on `vector-10.kaspa.green` with its value, creation DAA and covenant ID).
+
+**Owner amendments applied (PENDING DECISIONS rows in `docs/specs/8-handoff.md`):** the C6 deposit of 50 tKAS (so the carried withdrawals settle FINAL); the budget cap raised from 900 to 950 tKAS spent or locked (the approved 556 / 750 were end figures; the peak is higher); and **C5b/C5c shifted by one round**. The runner was paused for the budget check after round 2's buys, and round 2 was closed about 14 min after its deadline T with inputs no newer than T. `close()` sets T' = max(T + round_len, own + d_min) with own = the newest input's creation DAA (`controller.sil:473-484`), so round 3's deadline (598,562,019) fell before its own creation (598,564,744): round 3 could not sell (shard check 6). Round 3 was closed with no sales and the sales-pause test ran on round 4. The runner now funds every `close()` with a freshly accepted input and refuses a close that would leave under d_min / 2 of sales (finding for the S5 reviewer: a late closer with old inputs can create a no-sales round; no funds at risk).
+
+### Result per step (62 checks, all ok)
+
+| step | result | what was shown |
+|---|---|---|
+| C0 | pass | balance 6,709.55 >= budget 2,000; fee rate 100 sompi/gram |
+| C1 | pass | genesis; covenant ID recomputed; bundle-verify against the node (21 live UTXOs, no mismatch) |
+| C2 | pass | round 1 (m 3): 75 buys b = 4 over 16 shards (300 tickets), one with a 0.4 KAS referral; 9.99 KAS deposit refused; 20 KAS deposit; `set_params` s_R -> 500 (nonce 1); second `set_params` refused; the buy after `set_params` still pays the referral at s_R 1,000 (0.4 KAS) |
+| C3 | pass | close r1: round 2 m' = 2 and s_R 500 in its controller and all 16 shards; wallet and indexer roots = frozen roots; draw 1 (real anchor): conversion and record = `game::convert` (deposit 20 KAS minted 615,460,425 shares), fee to round 2's fee address; deposit settled DepositConvert = `game::settle`; second settle refused |
+| C4 | pass | wallet-store claims offline: a claim with one leaf count changed by 1 refused; 2 claims of round 1 (tier 4, ACCRUE; the partial claim) |
+| C5 | pass | round 2 (m 2): 75 buys b = 4; b = 1 with a 0.05 KAS referral refused; b = 1 without accepted; b = 2 with a 0.1 KAS referral paid at s_R 500; depositor's partial withdrawal below wmin refused (w 303,240,973 of 615,460,425, wmin 312,219,453); the depositor's whole and the genesis backer's full (10^10 shares) withdrawals requested; close r2 (m' 2, roots equal) |
+| C5b (shifted) | pass | draw 2 (late) = model; **liability lock**: W 10,615,460,425, wc 8,492,369,140 < W, vault after = L' = 116.866 KAS exactly (slack 0); both withdrawals settle **PAY** = model with carried requests for round 3 (pay 27.10 and 440.36 KAS); round 3 recorded as opened past its deadline and closed with no sales; round 4: 20 buys b = 1 before its deadline, **16 buys after it (one per shard whose UTXO predated T)**, a further post-deadline buy refused (sales pause), `close()` of round 4 before draw 3 refused (strict order) |
+| C5c (shifted) | pass, one item not exercised | draw 3 held to D + 36,000 (**60 min late**, inside 12 h) = model (no pools, no fee output: no sales); carried withdrawals PAY = model; close r4 (fresh input, roots equal); **draw 4 built from the indexer store offline** = model; the round-4 claim from the indexer store **not exercised** (no winning round-4 holding) |
+| C6 | pass | carried settles PAY after draw 4; round 5: 40 buys, **50 KAS deposit**, close, draw 5 = model (deposit converted to 31,047,840 shares); carried withdrawals settle **FINAL** = model (pay 7.93 and 128.83 KAS, nothing left); deposit DepositConvert = model; 1 wallet claim (tier 4, ACCRUE); round 6: 40 buys, close, draw 6 = model; m stays 2; no live withdrawal request left |
+| C7 | pass | report written; every check of C0-C6 ok |
+
+### Expected refusals (each rejected by the local engine at input 0, then by the node with the matching reason)
+
+| check | txid (not accepted) | node reason |
+|---|---|---|
+| C2 request_deposit 9.99 KAS (MIN_DEPOSIT) | `cbd4b7e0f9c178a2704767afac5bcef6c7090be7643d061517b9d1afbcd09e73` | failed to verify the signature script: script ran, but verification failed |
+| C2 second `set_params` in round 1 (used = 1) | `9b051a01278c310912a4e11726ab69e4f5df351092a242f2d205ee856f4b899d` | failed to verify the signature script |
+| C3 second `settle()` of the spent request | `39c558ef2e7ef6b85a591c846ef4d0ef2c44872252e19d556caf61042213a044` | transaction ... is an orphan where orphan is disallowed |
+| C4 claim with one leaf count changed by 1 (untrusted copy) | `0822ca9f5aab66371af07a49e91df0a911a88b7589ed285ceb2f5f770ed8aa2d` | failed to verify the signature script |
+| C5 b = 1 with a 0.05 KAS referral (below M_REF) | `190ff38d46eeccef04546fe3b410d8cd8f7b86064deca2741244fb7a7c0fb343` | failed to verify the signature script |
+| C5 partial withdrawal leaving less than wmin | `5ff5a34fc35db85a73aab8873942562983f9032bc175bb3e0f9096e905c77869` | failed to verify the signature script |
+| C5b further buy on a post-deadline shard (sales pause) | `9ba9c10cf1d885eec7ee26241d1ce1248213bf446392fd1a89768264ba3802a5` | failed to verify the signature script |
+| C5b `close()` of round 4 before round 3's draw (strict order) | `d9219af71720d8933322c5ade722d04914e1bed5719a6bdbafa19e63bd4d0c74` | failed to verify the signature script |
+
+### Rounds, anchors and luck
+
+| round | m | sales | anchor X (DAA) | winning combination | our winning holdings |
+|---|---|---|---|---|---|
+| 1 | 3 | 76 buys | `5d7a30f960ff9fb6da36cc8b6303d46273ba38c6fb6b690d960e46119582d121` (598,551,178) | [1, 12, 17, 20, 30] + 2 | 2 (tier 4), claimed from the wallet |
+| 2 | 2 | 77 buys | `40828cfa5a82b897f37b0c8efc42a009b44b87673bf0240e88ed2df08ccffcdf` (598,565,344) | [5, 7, 12, 18, 30] + 2 | none |
+| 3 | 2 | none (opened past its deadline) | `de5c4619209c8ae254a43548da8fd8f006ef4b72f6267df4781913f02b08a95f` (598,570,834) | [1, 11, 13, 17, 19] + 1 | none (no tickets, no pools) |
+| 4 | 2 | 36 buys b = 1 | `e25139543e726b32ae09e2a1c38f091c599f8a6fee29d80d969af8d842ac133b` (598,608,025) | [9, 13, 18, 22, 30] + 2 | none |
+| 5 | 2 | 40 buys | `07f5f68949a6fd31fd23b9fb82f41ad1f355708d274ba9c8b7258d9570ebe0ca` (598,614,375) | [4, 9, 18, 22, 26] + 2 | 1 (tier 4), claimed from the wallet |
+| 6 | 2 | 40 buys | `d628d10b6461cd5a1a11a552aad78166ad41dee5b10f3e34f2e9b91ec04aac4e` (598,620,563) | [2, 5, 12, 21, 29] + 1 | none |
+
+No jackpot, duplicated jackpot combination or second-prize hit occurred (A5 records them only if they occur; they are forced on the private simnet in S4, D114). The C4 luck retry was not needed.
+
+**Not exercised on testnet-10 in S3b:** the round-4 claim from the indexer store (C5c; no winning holding, A5's retry covers only C4); a last claim (FINAL): every claim was ACCRUE (h = 1, tier 4); buys in round 3 (moved to round 4 by the amendment). The soak (C8) is S4.
+
+### Masses and fees per shape (all 300 accepted instance transactions; `tn10 masses`, mainnet mass parameters; the computed storage mass equals the committed one for every transaction)
+
+| shape | count | inputs | compute | transient | storage | priority mass | fee (KAS) | example txid |
+|---|---|---|---|---|---|---|---|---|
+| genesis (K = 16, V0 100 KAS, J1 10 KAS) | 1 | 1 | 11,223 | 8,372 | 460,925 | 460,925 | 0.4609 | `e64f08175f833100814f1fd24d1a0d8e05e2dcefbf4828892515e400cdaabd57` |
+| buy b = 4 | 229 | 2 | 46,014-46,022 | 158,456-158,488 | 76,973-83,938 | 79,228-83,938 | 0.0792-0.0839 | `f874f270b7f0d3ae98ef50001ad6029476bd34814a65c26200a4255199c52dfc` |
+| buy with referral (b = 4 x 2, b = 2 x 1) | 3 | 2 | 44,754-46,434 | 153,976-158,696 | 103,787-253,938 | 103,787-253,938 | 0.1038-0.2539 | `10241a9314f9d22876332eaa8fefe48b9a95b5148da9dc4a9f4f27cb66841503` |
+| buy b = 1 (C5) | 1 | 2 | 43,456 | 151,424 | 309,440 | 309,440 | 0.3094 | `0e498c9ac863b3b9a716a8982e8b8410f9e2e322f926f1e079a2717d384ac984` |
+| buy b = 1 before the deadline (C5b) | 20 | 2 | 43,456 | 151,424 | 313,857-322,547 | 313,857-322,547 | 0.3139-0.3225 | `367a62a48c3fd93112d3b7d1753bcaf1b08ee59366000b4b1c065c9f3baf45ea` |
+| buy b = 1 after the deadline (C5b) | 16 | 2 | 43,456 | 151,424 | 311,501-316,206 | 311,501-316,206 | 0.3115-0.3162 | `cdf14d7694bf487da74478747b1a53734fc5e194e9b4df518c6ee710535621b9` |
+| set_params | 1 | 2 | 6,404 | 13,896 | 23,654 | 23,654 | 0.0237 | `ef3f00a8416d077b8cc797409a26ed1b0d2a3cafc76173f9393274d7e1533d36` |
+| request_deposit | 2 | 2 | 23,195 | 77,580 | 23,982-24,298 | 38,790 | 0.0388 | `ae05e4a1f7a4c4544593bca93ed72082a843823a6f961e784aaf8136406a4115` |
+| request_withdraw | 2 | 3 | 24,729-24,730 | 82,516-82,520 | 23,744 | 41,258-41,260 | 0.0413-0.0413 | `ee68b8f6c73755278fcf35ef96de71aeca488adfc5e7f094ae15761d4f39bc32` |
+| close (K = 16) | 6 | 19 | 293,743 | 864,612 | 267,243-423,740 | 432,306 | 0.4323 | `5684a86b5a37acdc21805fa3329450b551552329ffb0107b34dfee9a71b7660a` |
+| draw (real anchor, K = 16) | 5 | 5 | 139,535-140,226 | 442,940-443,424 | 41,721-81,731 | 221,470-221,712 | 0.2215-0.2217 | `402d1ce519bee939e8c54c798e0260883dbdc2e9633c3708a9e36d2e329b9204` |
+| draw of the no-sales round, 60 min late (C5c) | 1 | 5 | 137,613 | 442,052 | 32,320 | 221,026 | 0.2210 | `596ef4386a228b0601ffce5e2e775828c73ee79162ba973f604908b17ff1fbae` |
+| settle (deposit convert, PAY, FINAL) | 10 | 3 | 22,002-23,159 | 73,248-73,596 | 1,302-29,797 | 36,624-36,798 | 0.0366-0.0368 | `3e3bf0d87268595d291922b3244c9381d1fc268fa795b1852b4d2fc3d4de6b38` |
+| claim (tier 4, ACCRUE) | 3 | 3 | 48,190-48,323 | 151,160-151,292 | 80,137-82,803 | 80,137-82,803 | 0.0801-0.0828 | `6d535230d8f5dadebf0dbc95421069759e972ca91830d875931dc93daed7257c` |
+
+300 distinct instance transactions; their fees total 35.5608 KAS.
+
+The `close()` masses equal M7's (293,743 / 864,612). The real-anchor draws (139,535-140,226 / 442,940-443,424) sit within a few hundred grams of M7's 139,891 / 443,964; the M8 draws also carry the conversion and the record. The b = 1 buys have a higher storage mass than the b = 4 buys because their funding change outputs are smaller (KIP-9 storage mass), not because of the script.
+
+### Spend, incidents and runner fixes
+
+- **Spend:** balance 6,709.548 -> 6,152.772 tKAS = **556.78 tKAS spent or locked** at the end (vault, pools, reserves and fees); **peak 843.73** (balance 5,865.82 after round 2's buys, before draw 2 and the withdrawal settles paid about 467 KAS back). Fees of the 300 instance transactions: 35.56 tKAS. The hard cap (900, raised to 950) was never crossed; a balance watchdog would have stopped the runner at 920.
+- **Chain reorgs:** 8 instance transactions were reverted by chain reorgs on testnet-10 and accepted again (index log `remove` lines at chain DAA 598,576,376 to 598,613,775). The index reverted and re-applied them; the runner's wallet feed did not handle the first revert (runner fix 2).
+- **Node hiccups:** "WebSocket disconnected" (C5, deadline wait) and "RPC request timeout" (C5c, draw 3 hold); both resumed with `campaign resume`, nothing in flight.
+- **Runner fixes (tn10 only, no covenant change):** (1) every `close()` spends a freshly accepted funding input and refuses a close leaving under d_min / 2 of sales (`close_deadline`, unit test with this run's numbers); (2) after a sync that reverted transactions, the wallets are rebuilt from the index log (reproduced in the dry run with `TN10_DRY_REORG=1`); (3) the C5b post-deadline check counts the accepted actions instead of the shards still predating the deadline (a resume had recorded "0 shards" though all 16 were accepted). Also a read-only `tn10 masses` subcommand for the table above.
+
+### Transactions per step (accepted; node; accepting chain block DAA)
+
+The refused transactions are in the table above. Fan-outs and fresh funding transfers to our own address are not instance transactions and are not listed.
+
+**C1** (1 transactions)
+
+- C1/genesis `e64f08175f833100814f1fd24d1a0d8e05e2dcefbf4828892515e400cdaabd57` (vector-10.kaspa.green, chain DAA 598,543,922)
+
+**C2** (78 transactions)
+
+- C2/buy/0 `10241a9314f9d22876332eaa8fefe48b9a95b5148da9dc4a9f4f27cb66841503` (vector-10.kaspa.green, chain DAA 598,543,966)
+- C2/buy/1 `f874f270b7f0d3ae98ef50001ad6029476bd34814a65c26200a4255199c52dfc` (vector-10.kaspa.green, chain DAA 598,543,966)
+- C2/buy/2 `6e888ec31400dbdbff46fcf7b5088bf3c0c79287c3c0d443ac121b3823b1b580` (vector-10.kaspa.green, chain DAA 598,543,966)
+- C2/buy/3 `721e9753fc55497b4871409ccb6a749e75d424be15a9df7982ff9ea4f6e27bde` (vector-10.kaspa.green, chain DAA 598,543,966)
+- C2/buy/4 `c9aa6102fb154c4b80e3162b7fc82bdcc122832b89f81a1a9405a6b5790bd090` (vector-10.kaspa.green, chain DAA 598,543,966)
+- C2/buy/5 `f68bfaa04f9714b08af0d595d570ff470f684e25d8abc291a9546ec9fbbf3cac` (vector-10.kaspa.green, chain DAA 598,543,972)
+- C2/buy/6 `13a16ff242c0bc5c6135974e383996abda2b0ba392775adc933882c96d3529f9` (vector-10.kaspa.green, chain DAA 598,543,972)
+- C2/buy/7 `676c3a3709454b9b89c13ee6c04a6dc09c0f77ae73f31c0078b3c180bc63ffd3` (vector-10.kaspa.green, chain DAA 598,543,972)
+- C2/buy/8 `03944439407bbc32b8f6779d77e3f733160c76a6402d44df86f7c4b054a573d7` (vector-10.kaspa.green, chain DAA 598,543,972)
+- C2/buy/9 `38d9bf443988b7d306d37c5895d76a762fa9e0db828bef57c43ddc728365c864` (vector-10.kaspa.green, chain DAA 598,543,972)
+- C2/buy/10 `3cc909ac097f18138a7b134ab5ed1b5fcd8f0dc7546bccea7d8a3b0e81cd1c32` (vector-10.kaspa.green, chain DAA 598,543,977)
+- C2/buy/11 `056ff5c8957d7088fb18022e86502421dcf74475df47eda62dd9f4651454b7e0` (vector-10.kaspa.green, chain DAA 598,543,977)
+- C2/buy/12 `00e5ebb6256e166f82428806977caa5fcd28ae1f078b743ab3beb910050bf7d1` (vector-10.kaspa.green, chain DAA 598,543,977)
+- C2/buy/13 `a1e4f7c8d5388990494de79a3730b3b68c9479708b0363c7b91df7b6a276530c` (vector-10.kaspa.green, chain DAA 598,543,979)
+- C2/buy/14 `7b8b53004ed16d196b59358795e981b9811697e7d670107d8e6a13a2bf02f53e` (vector-10.kaspa.green, chain DAA 598,543,977)
+- C2/buy/15 `f433d1f85d20650c3c80de0e3c252b74790d50a5d5d74e1eb14149680100f942` (vector-10.kaspa.green, chain DAA 598,543,977)
+- C2/buy/16 `dad281b57e7c9a421c4cc0cce690839eea066075f956e9dcaf88510a119c3b15` (vector-10.kaspa.green, chain DAA 598,544,018)
+- C2/buy/17 `b6135abef0e2fa179408706fb839df9e96193d8bc31a2abb823daa78385764f6` (vector-10.kaspa.green, chain DAA 598,544,018)
+- C2/buy/18 `d69428fd409e08d8a50edd15a1b0d765f9ddd287c43d503398d8c4d3495e596b` (vector-10.kaspa.green, chain DAA 598,544,018)
+- C2/buy/19 `01a33f8f5e2db9111b3c55b2ffb678fbb0844dd96b4315012082e397d8d37205` (vector-10.kaspa.green, chain DAA 598,544,020)
+- C2/buy/20 `0453e0880554f0ea3ad439a3456f79b1ae35d0602e906ae533f9e95baf11f14c` (vector-10.kaspa.green, chain DAA 598,544,020)
+- C2/buy/21 `01da9f00bc7723b532e092ac675aafee4907b9563a308e80c91380bacd5d9be1` (vector-10.kaspa.green, chain DAA 598,544,020)
+- C2/buy/22 `b5fb53103d60f97cd0c49c80281845f407e0377571cbc39325105d2fb2bb51b5` (vector-10.kaspa.green, chain DAA 598,544,020)
+- C2/buy/23 `485a84929692206650336dc6913901ebcfc90b22615180a8a9a1e0c00736b2c9` (vector-10.kaspa.green, chain DAA 598,544,020)
+- C2/buy/24 `bf73d8946386dbc90f7d96b7123ddd92b67560c4db530ee97d2c2a4c07b8f117` (vector-10.kaspa.green, chain DAA 598,544,020)
+- C2/buy/25 `29f2d1ef367a3caac3fb49b1c87a702943d1d90b77c735ee8a714a1d34f4fdfb` (vector-10.kaspa.green, chain DAA 598,544,028)
+- C2/buy/26 `832d2ce232d11643760512b4a014c169805cc24309bb10b0329cf8badccd512b` (vector-10.kaspa.green, chain DAA 598,544,028)
+- C2/buy/27 `ec45175e3b09174612707b25f3ae3185237293fa73adef74e2bfde2e3722fb3e` (vector-10.kaspa.green, chain DAA 598,544,028)
+- C2/buy/28 `e347d1712fb1eaf5c1884a222689e796d4d34cef77446105e6eaadfad7fee40e` (vector-10.kaspa.green, chain DAA 598,544,028)
+- C2/buy/29 `17dd091edc1a4a48f416df908f79740c55c50459b3f492e0f2052a5e009ada68` (vector-10.kaspa.green, chain DAA 598,544,028)
+- C2/buy/30 `642e187bec3df443542d85b5f8e2d08ae2e0e3ba76ed71f037513662470e959e` (vector-10.kaspa.green, chain DAA 598,544,028)
+- C2/buy/31 `122b8ccd60637ab90b4e5aeb0b46cb98742200ee407d4f04914f41a64a6a1315` (vector-10.kaspa.green, chain DAA 598,544,033)
+- C2/buy/32 `0e80be7f33af0bfb1f2dfd31a5303a58b73c9f17905a2a96a8a14b06130ba585` (vector-10.kaspa.green, chain DAA 598,544,061)
+- C2/buy/33 `98be3168c820bde81dda12ffa5305578f5a2eda9ae7542e634ff6643771055c2` (vector-10.kaspa.green, chain DAA 598,544,061)
+- C2/buy/34 `554ba7101458e2693a83027849f3bd4a467eda544216a6926e0675ed1e7874da` (vector-10.kaspa.green, chain DAA 598,544,061)
+- C2/buy/35 `e40d35cdddf7de6c3d558b06a5c35dbda22216fa06aaa4b1a07cb41628b62081` (vector-10.kaspa.green, chain DAA 598,544,069)
+- C2/buy/36 `037b29b0a00d406a0f3b3e28c9452e72024d6645796cb329a357857f91f335a4` (vector-10.kaspa.green, chain DAA 598,544,069)
+- C2/buy/37 `3794a35b159c3eb6c199e5c9f8be9b8c433673d3bf09ad50c05803209bc282c5` (vector-10.kaspa.green, chain DAA 598,544,069)
+- C2/buy/38 `a4c47546adf84dc444bc829e8fe9947233ed7a1afd21bafffc0d2aad8c54fe5f` (vector-10.kaspa.green, chain DAA 598,544,069)
+- C2/buy/39 `1c7a7cd0417feddacc1a6c19b0dd3b912cd5234b8e496783fb1189e06f9a11db` (vector-10.kaspa.green, chain DAA 598,544,069)
+- C2/buy/40 `37aa0625bd0b829242b8659e8844b75b09799201c94864e9260857d57c4c1604` (vector-10.kaspa.green, chain DAA 598,544,069)
+- C2/buy/41 `1c778ec475d00cea0f19a755bb51a0dc810ac4018337c5d784fb477d8ed510ad` (vector-10.kaspa.green, chain DAA 598,544,072)
+- C2/buy/42 `d5a39cbc45bfa5a673cf97f1e15a1b6dae4a51b837e8f93d610772b004d6141d` (vector-10.kaspa.green, chain DAA 598,544,072)
+- C2/buy/43 `41299d8d5c6551cbf12e1aed7e9bda9ddc07e8f373e7dbb5656447aec988ad39` (vector-10.kaspa.green, chain DAA 598,544,072)
+- C2/buy/44 `1f91ce8a1b9bafa6cabb4c4c1450550f53c5c17b662e11dfa8cd970cce1f0ccc` (vector-10.kaspa.green, chain DAA 598,544,073)
+- C2/buy/45 `c92fb48b4d1da05cc86c0e536b82bac1fba057136faf01ecdb8f39c4a126bf0e` (vector-10.kaspa.green, chain DAA 598,544,073)
+- C2/buy/46 `dbfab53ab8179b9aeb7dd276ed8f6a5e13438f5ca2ac0968cfe6592038707693` (vector-10.kaspa.green, chain DAA 598,544,073)
+- C2/buy/47 `df4864868f44cce7e2a24e234518f375afcf1e9d2e202b6b331b0a73228c01bd` (vector-10.kaspa.green, chain DAA 598,544,073)
+- C2/buy/48 `5c3f6612584ab3f0f1c5abf465e18de44860a753c6e5ae36b6e6aea643745f57` (vector-10.kaspa.green, chain DAA 598,544,119)
+- C2/buy/49 `d6e9afaedc9d562eed793e8effc71a7f3368f9726fdaa5272e50e3f94bd78e2d` (vector-10.kaspa.green, chain DAA 598,544,121)
+- C2/buy/50 `9fb481ecf421e2a0231bb479d8281accb3ff938311ae1c377b9da675b0f2a02b` (vector-10.kaspa.green, chain DAA 598,544,119)
+- C2/buy/51 `e623a12125d58eb2cba5d71ae60da15a6ef2fc47569f781f73840a0d125019e9` (vector-10.kaspa.green, chain DAA 598,544,119)
+- C2/buy/52 `e5de70848975beecdb35d2b35c7340cac128c88cb65783d029f7fdc33d545e70` (vector-10.kaspa.green, chain DAA 598,544,119)
+- C2/buy/53 `eecb222a183865a196888369f954cd7c1f08ea0b7bad5a830928b913acf7497f` (vector-10.kaspa.green, chain DAA 598,544,124)
+- C2/buy/54 `5097ebbd71be38fb63c8301e0d8e0369d8a595617df7da3e041ff388ecde3bbf` (vector-10.kaspa.green, chain DAA 598,544,124)
+- C2/buy/55 `bb631f74e67ddf30db6c7d36276694b12d4dc6514686b59ce720e41543b2c900` (vector-10.kaspa.green, chain DAA 598,544,124)
+- C2/buy/56 `5e308941cf6965299a42f790a5df998a5028bb369c6fa6bbacadfa9559c62d9f` (vector-10.kaspa.green, chain DAA 598,544,124)
+- C2/buy/57 `40f18cf2031dfcb04a1225c4ea672ac071f432ee2148bf063e356e668ea77d4d` (vector-10.kaspa.green, chain DAA 598,544,124)
+- C2/buy/58 `1025aa2043ef6c86b0e6c85cd21b85ceae3372ffecbe9ceb745c0369fa1d0453` (vector-10.kaspa.green, chain DAA 598,544,124)
+- C2/buy/59 `6d2a5cb9c6d4a3c6db05f22dcf68fb93418219746ea1d887fc2b6e3b1c6d4c8c` (vector-10.kaspa.green, chain DAA 598,544,128)
+- C2/buy/60 `4dc43957221cdd72d3a0c8125af61ed483a1d286dba69d259f3a2efeadfc4731` (vector-10.kaspa.green, chain DAA 598,544,128)
+- C2/buy/61 `47dd2424c41360977446468cb3f9d45c20f3538cd88c9710c2fb0cc45e10c4d2` (vector-10.kaspa.green, chain DAA 598,544,128)
+- C2/buy/62 `f26790e68d8cf5816a1e10db3504729b9940db23b3fd32991b5eae365cb8c9be` (vector-10.kaspa.green, chain DAA 598,544,128)
+- C2/buy/63 `309c7880c028615097cec56bf10332b40cc653c5bf3d5f9262b7fa2209f0559c` (vector-10.kaspa.green, chain DAA 598,544,128)
+- C2/buy/64 `523d51d519a23c0ca59405ff3a99f10fae0c573fc089ce0704bf0a8730a5aebd` (vector-10.kaspa.green, chain DAA 598,544,145)
+- C2/buy/65 `5da90552e7ea335ef7aa6898a13b50458f82bd8dd407fea370c8fd53a5b7b1f3` (vector-10.kaspa.green, chain DAA 598,544,145)
+- C2/buy/66 `bc027824ada4a8d4cfab1b5b844347f08f0311332c566ccc83ecf6e6f6a55bec` (vector-10.kaspa.green, chain DAA 598,544,145)
+- C2/buy/67 `7623fdc540b4f42f0f32b5ea5cea30c469a341ea2b1db81df47926975770b946` (vector-10.kaspa.green, chain DAA 598,544,145)
+- C2/buy/68 `4cf6950f95b7da25940a5ab92f7c0c12232b992013546cf69abeca81780d1d8c` (vector-10.kaspa.green, chain DAA 598,544,153)
+- C2/buy/69 `147a43c4f7ecb4d95f75aa7f0c41146ac045dabbed229c5d112689e6123217f2` (vector-10.kaspa.green, chain DAA 598,544,153)
+- C2/buy/70 `96bdd310d34b389a6f32400a987dbc2b7a94e466eb611dfb19e0d260fed37017` (vector-10.kaspa.green, chain DAA 598,544,153)
+- C2/buy/71 `0fd247a4aa1d7d98e4130b73dcb2e528d8516e56482196b8a092001e8a6c2835` (vector-10.kaspa.green, chain DAA 598,544,153)
+- C2/buy/72 `c0c6a88cfa4dcc46e9fd530f0eccdf2708eccd55bc9602787af3ee43308b6865` (vector-10.kaspa.green, chain DAA 598,544,153)
+- C2/buy/73 `386610789491c30e6a4b84f4ef399a0f9b3da8d26f1b5c9b41336e98c73589db` (vector-10.kaspa.green, chain DAA 598,544,153)
+- C2/buy/74 `2eea683e48747bfb472826767b08004de87516980ce23b77e1a37cb9fc91a587` (vector-10.kaspa.green, chain DAA 598,544,157)
+- C2/deposit 20 KAS `ae05e4a1f7a4c4544593bca93ed72082a843823a6f961e784aaf8136406a4115` (vector-10.kaspa.green, chain DAA 598,544,559)
+- C2/set_params s_R 500 `ef3f00a8416d077b8cc797409a26ed1b0d2a3cafc76173f9393274d7e1533d36` (vector-10.kaspa.green, chain DAA 598,544,586)
+- C2/buy after set_params `2a12c4509e699fe02730615030ea8ac6ef3b3034745f49bdd475c4c2f1a85417` (vector-10.kaspa.green, chain DAA 598,544,612)
+
+**C3** (3 transactions)
+
+- C3/close r1 `5684a86b5a37acdc21805fa3329450b551552329ffb0107b34dfee9a71b7660a` (vector-10.kaspa.green, chain DAA 598,550,578)
+- C3/draw r1 `402d1ce519bee939e8c54c798e0260883dbdc2e9633c3708a9e36d2e329b9204` (vector-10.kaspa.green, chain DAA 598,551,321)
+- C3/deposit/settle/ae05e4a1f7a4c4544593bca93ed72082a843823a6f961e784aaf8136406a4115:1 `3e3bf0d87268595d291922b3244c9381d1fc268fa795b1852b4d2fc3d4de6b38` (vector-10.kaspa.green, chain DAA 598,551,351)
+
+**C4** (2 transactions)
+
+- C4/r1/claim/d69428fd409e08d8a50edd15a1b0d765f9ddd287c43d503398d8c4d3495e596b:1/0 `6d535230d8f5dadebf0dbc95421069759e972ca91830d875931dc93daed7257c` (vector-10.kaspa.green, chain DAA 598,551,458)
+- C4/r1/claim/bc027824ada4a8d4cfab1b5b844347f08f0311332c566ccc83ecf6e6f6a55bec:1/0 `c80a3b4ccf8c1fcdc80a1592895b21d8d5c662c7ce00eb3df627a9c7c343193e` (vector-10.kaspa.green, chain DAA 598,551,705)
+
+**C5** (80 transactions)
+
+- C5/buy/0 `3bcafada48421343fc8f2290889462007e070a46e57e226c1eef6c2782ba754e` (vector-10.kaspa.green, chain DAA 598,551,806)
+- C5/buy/1 `eb20d715333f28e590c8083b9ab17d5a204447d231824be9bd98e06bc878f120` (vector-10.kaspa.green, chain DAA 598,551,806)
+- C5/buy/2 `f197d92b9c48aaf1af398b7958ff13c03ba3e092f3b57a5b83a6a3959fe302f2` (vector-10.kaspa.green, chain DAA 598,551,806)
+- C5/buy/3 `2f6b8616b57db653e2759daba30bf7d28d80c6dedf763052031cf071ef2ba990` (vector-10.kaspa.green, chain DAA 598,551,810)
+- C5/buy/4 `7f46f5edd674c5f87cfc0ec6abcd70ed7f651dc4cbd5a5cb88a4081ff90ce156` (vector-10.kaspa.green, chain DAA 598,551,810)
+- C5/buy/5 `2416ca93943e93132f89f15ca7720ad61e5f6bdd6afdfc71f2136edbae12a2f1` (vector-10.kaspa.green, chain DAA 598,551,810)
+- C5/buy/6 `ced72e7073f1fa178bcdd1e72ca0306c4251019dc8793a48a5bb5b7940bc19e9` (vector-10.kaspa.green, chain DAA 598,551,810)
+- C5/buy/7 `227bd9b4644e7924a95d37f387103e49d316f4396e01d87209fdb4692bff3731` (vector-10.kaspa.green, chain DAA 598,551,810)
+- C5/buy/8 `dc1382349cc1d2e2421c6ba002256ec70df4e32e14716ca024552ce60cdd9819` (vector-10.kaspa.green, chain DAA 598,551,810)
+- C5/buy/9 `6d78f9cf5a8acb4da313d66554fab80729cbfcc7807d003f70b0e1c0a105ff3e` (vector-10.kaspa.green, chain DAA 598,551,811)
+- C5/buy/10 `b0e182b7ce51c77ce355acf64f218b34c57a94a90bcb3a68b8a78f1951710a16` (vector-10.kaspa.green, chain DAA 598,551,811)
+- C5/buy/11 `edc753421e6102b8e1a99ee8162a4d4a784115069fea45dd2e2c5bdbcce2a93a` (vector-10.kaspa.green, chain DAA 598,551,811)
+- C5/buy/12 `7e964d09e7568f173a9f329de0d9bce3c209198ede0401cc2bda789d45759940` (vector-10.kaspa.green, chain DAA 598,551,811)
+- C5/buy/13 `33f2489192a88041d1da3d3202736566e8cec97b9f1fd1e79476347fe0f3174a` (vector-10.kaspa.green, chain DAA 598,551,811)
+- C5/buy/14 `962227b28a1129b246f0e5e05b2522b703e6ab66fd3dcc82a03a0afb6cd4a6e7` (vector-10.kaspa.green, chain DAA 598,551,811)
+- C5/buy/15 `3c9669f07edf18c9057d1b1a22b81b5f3839675583fe177fe8d21615c9eeb61d` (vector-10.kaspa.green, chain DAA 598,551,817)
+- C5/buy/16 `9294fd58ec3eae816772ef1efcb1e6143d8fc52d4e4847ad891e62d89c406188` (vector-10.kaspa.green, chain DAA 598,551,853)
+- C5/buy/17 `1d87bc0a6101a8e550c2f98458d6aeedf0ef6e4b235637b5417b362a0c822004` (vector-10.kaspa.green, chain DAA 598,551,853)
+- C5/buy/18 `77469306f6a01fd7ec0515e16bf5d44b86fe90f3842c423db802a48bc83b2201` (vector-10.kaspa.green, chain DAA 598,551,853)
+- C5/buy/19 `92534a01b16bb47dd2e3a13d4f1c33dfdb73577a397b4ba59e7f11b8ffd28e6c` (vector-10.kaspa.green, chain DAA 598,551,853)
+- C5/buy/20 `f4e3f815a8c89d36681636cab7948502e93034aa604cbe5ac990949cb82a0f92` (vector-10.kaspa.green, chain DAA 598,551,853)
+- C5/buy/21 `967a38200d68703b66596749d750164fc47ab4ee79dd8a90da2c281607c364fc` (vector-10.kaspa.green, chain DAA 598,551,853)
+- C5/buy/22 `23a8de41f5e4a1afa73ecbe37921d1222159cf8214b37b0825da5a031993967e` (vector-10.kaspa.green, chain DAA 598,551,860)
+- C5/buy/23 `bd82a8904e71df658a3e3478c6230488eb9d9932f3216e7ac313e2e184e8e944` (vector-10.kaspa.green, chain DAA 598,551,860)
+- C5/buy/24 `d98d5606d969ee73ca96f6c0ce3c05dca2c1d84c00ca12fff441c6f4f76f0bb1` (vector-10.kaspa.green, chain DAA 598,551,860)
+- C5/buy/25 `c3b7cb7702faab19777e4d5c3f07319d5b9f4de8a0e2a8dc9a702b9d97e8543a` (vector-10.kaspa.green, chain DAA 598,551,860)
+- C5/buy/26 `dd9a819b23bc80a3fef13cc4ca51247ba40bae23959ec56675dd26a9ac1cb867` (vector-10.kaspa.green, chain DAA 598,551,860)
+- C5/buy/27 `01822d3cdf68f215cc936e8cc8f343644501e392b6cb364750be47e05a8fe789` (vector-10.kaspa.green, chain DAA 598,551,860)
+- C5/buy/28 `76f751e08d1d0ed2c0f6ad1c06a570dec16fd69242c52f5a06cb86dfbca4640c` (vector-10.kaspa.green, chain DAA 598,551,867)
+- C5/buy/29 `3c813cd5410eff3011a38b5baaae9b0fb620bf57f8bfe0ef72f5c5aa5f6ccede` (vector-10.kaspa.green, chain DAA 598,551,867)
+- C5/buy/30 `f7822d8d1b6bdcc0c433021ee4522887f63f7808636c44b5de27796bcfeae072` (vector-10.kaspa.green, chain DAA 598,551,867)
+- C5/buy/31 `c9c7dcdfd0589abe9cf44ed9c6ae3defda5971bcdb88e542c88def58f1524525` (vector-10.kaspa.green, chain DAA 598,551,867)
+- C5/buy/32 `399e93674650664e077db93388f0878242e52e9cf8e52683f2301024797db8a4` (vector-10.kaspa.green, chain DAA 598,551,879)
+- C5/buy/33 `c2d3be9881cd31eea9e92793b50ef3d75a7fd1f7926a19bfb0f9030d16732a1b` (vector-10.kaspa.green, chain DAA 598,551,886)
+- C5/buy/34 `169dd1f2674b024f23232c384dc859bcae2ef8c38e7398cdeef2639bc66c89a2` (vector-10.kaspa.green, chain DAA 598,551,886)
+- C5/buy/35 `4a1a46e1533d7c511bae8661c31ce489b17ea8d2bd1c2672af751a5f2fad9c63` (vector-10.kaspa.green, chain DAA 598,551,886)
+- C5/buy/36 `7cb98c62a37c9a3300c8f017e9b995ac04ca02f5be2e80cdfb8fc2487c4e5ea3` (vector-10.kaspa.green, chain DAA 598,551,886)
+- C5/buy/37 `7540f7dc0de9cccc26bb62c9b8a97a23efe9b8ead137962cfc80cee86a238388` (vector-10.kaspa.green, chain DAA 598,551,886)
+- C5/buy/38 `0e4534c3c63b999fd6025718566235b5edd704af78a34a9ae33578cbd5bef431` (vector-10.kaspa.green, chain DAA 598,551,891)
+- C5/buy/39 `5c54107db1396daafcced108449fc595dbcef19ec9c60369a622cc856e2b9a96` (vector-10.kaspa.green, chain DAA 598,551,891)
+- C5/buy/40 `b9e79feca6bfe9a8cc63c06fb8aab266f553d62cc6bbdfdf4830c45ffde2ee2b` (vector-10.kaspa.green, chain DAA 598,551,891)
+- C5/buy/41 `ff1f63d24748a950528ef715b1cc45ae7589e463f3759f3161931ebbfdb7ce15` (vector-10.kaspa.green, chain DAA 598,551,891)
+- C5/buy/42 `021994e27cc569b1f4c1d16eaf6284513ba5a0b5291bdd806a688a1ef91de433` (vector-10.kaspa.green, chain DAA 598,551,891)
+- C5/buy/43 `989bcfdd0ec0f31ff6032d6a88768c9b489383303fbbb9a8939f0abbadd6de5a` (vector-10.kaspa.green, chain DAA 598,551,892)
+- C5/buy/44 `eca7dddd2f73bc238c23bc8c97b7505335ef7a65c1aca6df2e237883fcdbb099` (vector-10.kaspa.green, chain DAA 598,551,892)
+- C5/buy/45 `0f39e9ce1ed95fd6aa66a5e97d8d8f78cb0e308c5fd03e2e948dd9593f5c62ec` (vector-10.kaspa.green, chain DAA 598,551,892)
+- C5/buy/46 `5335fa1bfc93fcd3eb8eb93ecd7d3f00923bfc1f8ec28a8cc9d98f429b841622` (vector-10.kaspa.green, chain DAA 598,551,892)
+- C5/buy/47 `8a2075f4ec78de1346acfed7141e85d315bb578310a7671d6591aad8483444ba` (vector-10.kaspa.green, chain DAA 598,551,892)
+- C5/buy/48 `1fd414c011f383e5e200e6de29620febb99b23376b31d4d93d16d7fc4674f37f` (vector-10.kaspa.green, chain DAA 598,551,919)
+- C5/buy/49 `a1b5eab320e1ffb6b3a3fb693a68aeb5fa164875dfd1522db48bb7acbb1c105f` (vector-10.kaspa.green, chain DAA 598,551,919)
+- C5/buy/50 `9c730b36d0a50ca3f84919c73fd3aac68ce47ef778ce1d5524991f29e0363acb` (vector-10.kaspa.green, chain DAA 598,551,929)
+- C5/buy/51 `eafed34f8ad499560970d8ea425226296ef3bba1f76a1ab77090d0f839d6b21c` (vector-10.kaspa.green, chain DAA 598,551,929)
+- C5/buy/52 `06e5ffbd2488b4128fa8653807f8bd94795765e0e43a0ba7d2c60f2dd720d1e7` (vector-10.kaspa.green, chain DAA 598,551,929)
+- C5/buy/53 `170b61a98f9ba1cdf2f35a8da6895e1b45baa0e45b1c1288f4dc93d29c18d7a5` (vector-10.kaspa.green, chain DAA 598,551,929)
+- C5/buy/54 `e8c70a6ccde8c134ddeac0d852abf3fe7ada93f6c0dc0a3a7efc6583e083267c` (vector-10.kaspa.green, chain DAA 598,551,929)
+- C5/buy/55 `eb268985056b448b3413e25d6e3e92056eb9454f4df1fc5f64fa37d58c2bbe3e` (vector-10.kaspa.green, chain DAA 598,551,929)
+- C5/buy/56 `15b2fd14a4e922f00da7b458e2c4a383b6cf37bf596c239a573c9e958dea0969` (vector-10.kaspa.green, chain DAA 598,551,933)
+- C5/buy/57 `b6ca178a857b2066ee0d6579778cebb422b8d352752967c3a7ebf60b57172c29` (vector-10.kaspa.green, chain DAA 598,551,933)
+- C5/buy/58 `1111340a5ade272b35b9da285ac30a25b640dab7b987e8d8f20a75af929b81c9` (vector-10.kaspa.green, chain DAA 598,551,933)
+- C5/buy/59 `b8b12b2318db1936f91aa3712e8cc427fbf5cb4a7f646684cafabc25bf8b2f87` (vector-10.kaspa.green, chain DAA 598,551,933)
+- C5/buy/60 `1e07e0d66864bd67c0f6f6c6634bbc0bf327a1735eb12ca5daaa220f2b89d0c8` (vector-10.kaspa.green, chain DAA 598,551,933)
+- C5/buy/61 `1570dee3fcc1deaab4fb339ae4e4998e3350c0af071ae98bb0141949c067e5fe` (vector-10.kaspa.green, chain DAA 598,551,940)
+- C5/buy/62 `36b9b0363e1507421908ffa3950183227cb10afefa5de65201dee0baccb0d674` (vector-10.kaspa.green, chain DAA 598,551,940)
+- C5/buy/63 `1802cdddc923f748786cce834e694396b0e1419662fe684329b1dcb215349b2f` (vector-10.kaspa.green, chain DAA 598,551,940)
+- C5/buy/64 `1b58905e223aa3439d41b46513bc34fd2950080ee5f69c55aad129fa8bda6e30` (vector-10.kaspa.green, chain DAA 598,551,978)
+- C5/buy/65 `347358120d2a63552221d6c926a03804ac0d0de1a059e1457e8e72f53d8d2c83` (vector-10.kaspa.green, chain DAA 598,551,986)
+- C5/buy/66 `62826fcb5eded691e01f7be9341fed3986a546ef421c501130d537d99d8d01d8` (vector-10.kaspa.green, chain DAA 598,551,986)
+- C5/buy/67 `fabe299e7987e775f32e6c6e10099382f3f920c7513d1c8efd350817d5968444` (vector-10.kaspa.green, chain DAA 598,551,986)
+- C5/buy/68 `5483ee22d5fafb7d1f1edc94d44ecdce0ad0e0b8d468ab42f3f2ff0b17c8901f` (vector-10.kaspa.green, chain DAA 598,551,986)
+- C5/buy/69 `feaeacd35bd319aa38444f7aa7096814fc435988d4b0849a0c86d3fe08b1013b` (vector-10.kaspa.green, chain DAA 598,551,986)
+- C5/buy/70 `21efcea3afbdc02daec9b19078de43099e0a6a2aa404059645c1922e5a771adc` (vector-10.kaspa.green, chain DAA 598,551,994)
+- C5/buy/71 `388c3e5a680a05dfa5319e2cae14ecfbaf59dca25a977cdacf6fd9714cf89333` (vector-10.kaspa.green, chain DAA 598,551,994)
+- C5/buy/72 `7a60eebb8836483ca38ba28b1f1dc138254cf01d2d818629610bef1b48f0f70d` (vector-10.kaspa.green, chain DAA 598,551,994)
+- C5/buy/73 `405606b32fa998a72b5afd8981923c04e8384e165aa0e94b89e29bda7c8cc1e9` (vector-10.kaspa.green, chain DAA 598,551,994)
+- C5/buy/74 `76f1d482a499599076c091f81a1b7b6151b2866bb3a66f5a7c5764e9a6c54aca` (vector-10.kaspa.green, chain DAA 598,551,994)
+- C5/b=1 without referral `0e498c9ac863b3b9a716a8982e8b8410f9e2e322f926f1e079a2717d384ac984` (vector-10.kaspa.green, chain DAA 598,552,043)
+- C5/b=2 with 0.1 KAS referral `dcc813d9962c5c309a79cf8059e4c3316c9a15e5f11c672999700677728d6339` (vector-10.kaspa.green, chain DAA 598,552,043)
+- C5/depositor whole withdrawal `ee68b8f6c73755278fcf35ef96de71aeca488adfc5e7f094ae15761d4f39bc32` (vector-10.kaspa.green, chain DAA 598,552,080)
+- C5/genesis backer full withdrawal `6104ca564e7cf4bd04e3dbd196e30c3bcb90dc6817af7f48bff8388d41292d7b` (vector-10.kaspa.green, chain DAA 598,552,725)
+- C5/close r2 `11c54df612e05dc831848dedc086af6db30a2efc9d15bd960ca55fa80e78a4a0` (vector-10.kaspa.green, chain DAA 598,564,744)
+
+**C5b** (40 transactions)
+
+- C5b/draw r2 (late) `98635a7d20299bf82dc8c72a2155818cdd45bf433b99308ebedf77798514c15b` (quark-10.kaspa.red, chain DAA 598,570,087)
+- C5b/withdrawals/settle/ee68b8f6c73755278fcf35ef96de71aeca488adfc5e7f094ae15761d4f39bc32:1 `b583d8cd9149c36570546777f20ab984c52deab0ab5fa28b1745718003a12d5a` (quark-10.kaspa.red, chain DAA 598,570,107)
+- C5b/withdrawals/settle/6104ca564e7cf4bd04e3dbd196e30c3bcb90dc6817af7f48bff8388d41292d7b:1 `4587d7da9863a7312030467abab709ea1c4af5a06e935df68016ee06a3619190` (quark-10.kaspa.red, chain DAA 598,570,126)
+- C5b/close r3 (no sales) `e704c4fabb937e25eeb7e3935f80033d8c3944f8bb240e293c0969f31a3dd46e` (quark-10.kaspa.red, chain DAA 598,570,234)
+- C5b/buy/0 `ce9f94c156a9d332db336d5a6db0c7308caac225ffa45b75e6e0f78e2fd58e9e` (quark-10.kaspa.red, chain DAA 598,570,261)
+- C5b/buy/1 `3cc50dcbcb00d42843798cf4db824c367aa233e53a52a240ed37c6e859885c32` (quark-10.kaspa.red, chain DAA 598,570,264)
+- C5b/buy/2 `616176c43c50fc9e4a33f82bcdfe148e3d4e15dc56e26f34c6786f5bf94e710a` (quark-10.kaspa.red, chain DAA 598,570,259)
+- C5b/buy/3 `367a62a48c3fd93112d3b7d1753bcaf1b08ee59366000b4b1c065c9f3baf45ea` (quark-10.kaspa.red, chain DAA 598,570,257)
+- C5b/buy/4 `7dd55fa5c46c221e993fbfaa225b218c6ee1bd63692a17dde1e1a1ae08efc0d0` (quark-10.kaspa.red, chain DAA 598,570,263)
+- C5b/buy/5 `87111bb7ca8c678f70d818a3970974a6460e71782e06060a0596c60fe2bbc968` (quark-10.kaspa.red, chain DAA 598,570,275)
+- C5b/buy/6 `fd8ad737c1787f75ba7bfb1881fd8153e1e5129077e2940599a113f753ed0cd7` (quark-10.kaspa.red, chain DAA 598,570,265)
+- C5b/buy/7 `b76ae9ff7d87f78ea4328e4973fac8044d3acab77663ac29ebacd30161d449cb` (quark-10.kaspa.red, chain DAA 598,570,271)
+- C5b/buy/8 `3aa52f1964b2673fa1bc6dcd0d02a76618eaff01d505117883df396f862f3065` (quark-10.kaspa.red, chain DAA 598,570,266)
+- C5b/buy/9 `d2b439faa8984ace6d88b1db71b1a3258efdf3571fc33d5a769962a14b7013f4` (quark-10.kaspa.red, chain DAA 598,570,268)
+- C5b/buy/10 `98560574657c7bc589ad255182dff77e906cd484058fee3bd730ec3856669e45` (quark-10.kaspa.red, chain DAA 598,570,272)
+- C5b/buy/11 `8b8b424374f79dcb4c8f0b227bbf1abfa8da8823da1943567bdac02507059f46` (quark-10.kaspa.red, chain DAA 598,570,277)
+- C5b/buy/12 `449457109f85564a710c23dcac3e9f387017a8d536459f91fa1c094c606b82ca` (quark-10.kaspa.red, chain DAA 598,570,275)
+- C5b/buy/13 `f3ae41b90fb9814d2aac0c7890ab53db0ed975fe2afc48f7690f15b3bc575c25` (quark-10.kaspa.red, chain DAA 598,570,277)
+- C5b/buy/14 `d4b807a04c21a6ee32e9cae496053a901b2894e7c706d18e14790d5e58115ed9` (quark-10.kaspa.red, chain DAA 598,570,281)
+- C5b/buy/15 `3453b300d1357a756dfc2990f3c860b679d1740ecb6dbee82f15f9411540d0ba` (quark-10.kaspa.red, chain DAA 598,570,280)
+- C5b/buy/16 `8c0bb65e89279eb73081c00afe9eb302b16f0d4cb6b3870f0df7129e567cb6e3` (quark-10.kaspa.red, chain DAA 598,570,304)
+- C5b/buy/17 `506aa8322dc944f074c5d4a9a5b6700f8f6b94896f702c54e5e45fadf65b9191` (quark-10.kaspa.red, chain DAA 598,570,302)
+- C5b/buy/18 `781dafae7c6ca2b25a80bc6a6c75a265ac670010d98c4c354aba43ecee1e405d` (quark-10.kaspa.red, chain DAA 598,570,302)
+- C5b/buy/19 `082feb8ef3b4224ff68a9bb351a543e610e9f11da7d8127607126f861f06cf6d` (quark-10.kaspa.red, chain DAA 598,570,309)
+- C5b/post-deadline buy shard 0 `a0bc0bb59ce7ee45c18b1b107f381c2c2e78a59ed26d19970bd9d95bca6c8941` (quark-10.kaspa.red, chain DAA 598,576,368)
+- C5b/post-deadline buy shard 1 `cdf14d7694bf487da74478747b1a53734fc5e194e9b4df518c6ee710535621b9` (quark-10.kaspa.red, chain DAA 598,576,364)
+- C5b/post-deadline buy shard 2 `1f7fbe2d973483fa55919b9075788653f9cef108388fb3b3dcb482629c807891` (quark-10.kaspa.red, chain DAA 598,576,365)
+- C5b/post-deadline buy shard 3 `01eee28c6ce2556fe9818a6373a14042d88960fa8e9d8268e4554e5f2ed31279` (quark-10.kaspa.red, chain DAA 598,576,370)
+- C5b/post-deadline buy shard 4 `33e39a52a25c0914b3a0d212f45c972de0854dc606c934bf9ba9821b95acbd8d` (quark-10.kaspa.red, chain DAA 598,576,373)
+- C5b/post-deadline buy shard 5 `8af7b382676e27b336b6a342cfe355ed8953e3405cdf988b311aaee4a2d61ee6` (quark-10.kaspa.red, chain DAA 598,576,376)
+- C5b/post-deadline buy shard 6 `bb04bb0511cfc06f596123ea155b3f86abbf85222c8b42f2db7f64bf2f73a912` (quark-10.kaspa.red, chain DAA 598,576,379)
+- C5b/post-deadline buy shard 7 `9c18637d4e7569d00165b01b92faf2d696b3564e4d951922fbe91c5e3eb9ecd7` (quark-10.kaspa.red, chain DAA 598,576,372)
+- C5b/post-deadline buy shard 8 `02c31507764fb685e234379d6c579c93d5fd96166dbdce7186b5816f3abfcf97` (quark-10.kaspa.red, chain DAA 598,576,386)
+- C5b/post-deadline buy shard 9 `b6da9a7327c6270496f45d96b7970104466720e56d75f4b387137bdca13e60c5` (quark-10.kaspa.red, chain DAA 598,576,381)
+- C5b/post-deadline buy shard 10 `18bee1c23ea9d5ea64a5cd799531bdf79f21a9c989d39ac2be2d56cba1cee983` (quark-10.kaspa.red, chain DAA 598,576,379)
+- C5b/post-deadline buy shard 11 `d2e468b758ae7a796cf36b9b742de18606ae45213fa898df646ccc7bbf557367` (quark-10.kaspa.red, chain DAA 598,576,388)
+- C5b/post-deadline buy shard 12 `3f159095bdb0b1c4649bfad7b8485a36011debeb24b70d6c06939260a69e00a7` (quark-10.kaspa.red, chain DAA 598,576,384)
+- C5b/post-deadline buy shard 13 `24ad902f4f6c82d832ad1c90f12821aa5ea7a3e4bfee93aa58ef895744218beb` (quark-10.kaspa.red, chain DAA 598,576,384)
+- C5b/post-deadline buy shard 14 `04a6ee380919bbbaa2bb311acb399232ea8fe7aff7ae3f33e3c6cddb3cb6ca43` (quark-10.kaspa.red, chain DAA 598,576,380)
+- C5b/post-deadline buy shard 15 `efcf2b8066e5a894935c2211f6e2a6c945c43a29e9cfe98f5848a06ccacd1ef7` (quark-10.kaspa.red, chain DAA 598,576,390)
+
+**C5c** (5 transactions)
+
+- C5c/draw r3 (60 min late) `596ef4386a228b0601ffce5e2e775828c73ee79162ba973f604908b17ff1fbae` (proton-10.kaspa.stream, chain DAA 598,607,314)
+- C5c/carried r3/settle/b583d8cd9149c36570546777f20ab984c52deab0ab5fa28b1745718003a12d5a:1 `717ff462a5fe8e13b34fa2d83a9d09643f5c55f08cf8a4fff878ac64ebd5db69` (proton-10.kaspa.stream, chain DAA 598,607,330)
+- C5c/carried r3/settle/4587d7da9863a7312030467abab709ea1c4af5a06e935df68016ee06a3619190:0 `5c6a29814e455e2bb7fbbb3c39b4999dcbe0f02e72cf8754397e5b49b0d2c1f1` (proton-10.kaspa.stream, chain DAA 598,607,345)
+- C5c/close r4 `0c32113e6d3764ed999574453d90642ea49f451e5f785fd19b6a786f2e699733` (proton-10.kaspa.stream, chain DAA 598,607,424)
+- C5c/draw r4 (indexer store) `c8c4322239af15165ec94fb8803dc93f44548bdbcd4059a3ae5e8dd006f46977` (proton-10.kaspa.stream, chain DAA 598,608,150)
+
+**C6** (91 transactions)
+
+- C6/carried r4/settle/717ff462a5fe8e13b34fa2d83a9d09643f5c55f08cf8a4fff878ac64ebd5db69:1 `9740e64736ff5ff4da79bceab481e832e6cc4f7b877fbe226633446cfba73757` (proton-10.kaspa.stream, chain DAA 598,608,284)
+- C6/carried r4/settle/5c6a29814e455e2bb7fbbb3c39b4999dcbe0f02e72cf8754397e5b49b0d2c1f1:0 `8cdf454e76a063f44b6df2f775049bc04d63226f93108e926d16ec9df8d91e33` (proton-10.kaspa.stream, chain DAA 598,608,296)
+- C6/r5/buy/0 `7d608d09adfa6b8d46eb9ba7cf6cf32c97510f10523d052cdb54c16d736873eb` (proton-10.kaspa.stream, chain DAA 598,608,321)
+- C6/r5/buy/1 `5b4ab1dc424eec599eb35d4522fd98e059269d901ca0912b2c5e233216ae503e` (proton-10.kaspa.stream, chain DAA 598,608,321)
+- C6/r5/buy/2 `e3a050bee936f80c484d733aca83acaaaa119899027da32f36965c028e4e5561` (proton-10.kaspa.stream, chain DAA 598,608,321)
+- C6/r5/buy/3 `dd90c717a5201d782f78fede856d92153051dbe7aa54673bedcce8a3854b710e` (proton-10.kaspa.stream, chain DAA 598,608,324)
+- C6/r5/buy/4 `f97aeebd0747467a9cb19156fb188e6f618a02d59fddad8f852d6202b66d88ee` (proton-10.kaspa.stream, chain DAA 598,608,324)
+- C6/r5/buy/5 `d9f02bf4541e00d47466b4e61696b4f82eaf64aa806dba4d19522b10cf82d440` (proton-10.kaspa.stream, chain DAA 598,608,327)
+- C6/r5/buy/6 `32d35ca1129b49f3057290bf7ac213f4067ec3dcb1174488d44b057d4cc5d938` (proton-10.kaspa.stream, chain DAA 598,608,324)
+- C6/r5/buy/7 `fcc7e8ab266722c218f79f0f0031a257c6afd980b6b4b9ee67830f6bb348a54a` (proton-10.kaspa.stream, chain DAA 598,608,327)
+- C6/r5/buy/8 `41297b679835969a0509268ce536f4f49aaa634f225145ddb589774baee37b57` (proton-10.kaspa.stream, chain DAA 598,608,328)
+- C6/r5/buy/9 `6dbab9fdb85cad3a6b0924adeeac9578932c889fd83c9cfc26a80ebbeb88c165` (proton-10.kaspa.stream, chain DAA 598,608,328)
+- C6/r5/buy/10 `2a27b0aa0051d7f8a6f954c9933941f30a0492b6ddb1061a477075bf775c9dc1` (proton-10.kaspa.stream, chain DAA 598,608,327)
+- C6/r5/buy/11 `74c8ef9c27e27a54cac32b2c7b83112b39e7d2d571d67774a2f2ebba23b25352` (proton-10.kaspa.stream, chain DAA 598,608,327)
+- C6/r5/buy/12 `055132b183a57488311644558deebec6b151f43cb2320fbc6a295171860bb307` (proton-10.kaspa.stream, chain DAA 598,608,328)
+- C6/r5/buy/13 `94fbb0e69209592239ab3f1d350920e4be1ffebf40dab67df16a09a93558d4f3` (proton-10.kaspa.stream, chain DAA 598,608,324)
+- C6/r5/buy/14 `c08e1339e55e8ff98923b9446bd6f5d3e2255e82e40f0fd2de2eaf3eb294beb3` (proton-10.kaspa.stream, chain DAA 598,608,324)
+- C6/r5/buy/15 `5b8bed1d32b7dc3db0d768b63eb3be4976d1e5928478d8f6bc6c40dcecc2080b` (proton-10.kaspa.stream, chain DAA 598,608,331)
+- C6/r5/buy/16 `3bfabc79ad43d21c4de3d5894f685f83496513ebfddefd03649d15838aa25616` (proton-10.kaspa.stream, chain DAA 598,608,373)
+- C6/r5/buy/17 `4b286d56d05cd9741f591ceb16f839459517d83ae7ed35f6409082b882327c2d` (proton-10.kaspa.stream, chain DAA 598,608,373)
+- C6/r5/buy/18 `1a64df585abd589572973a068e560658504fb13bde4e5ec34e4f58d933f691ed` (proton-10.kaspa.stream, chain DAA 598,608,373)
+- C6/r5/buy/19 `209e4815c0507cc7170e04c5df1ba53ef2cdc1529daf24ce905439faf74e2323` (proton-10.kaspa.stream, chain DAA 598,608,382)
+- C6/r5/buy/20 `4c58d0621725e48309f0a6e1655630bf2efea078d17d9aeed88ae3f7b42cbb09` (proton-10.kaspa.stream, chain DAA 598,608,382)
+- C6/r5/buy/21 `e584454409c099af65340eba0f3dc55cd824d881e8bc668c238f3938c84d1a3a` (proton-10.kaspa.stream, chain DAA 598,608,382)
+- C6/r5/buy/22 `770706d1955d85eb4cbdd94d8bcc086406f318025b4ace20b14c56af51801241` (proton-10.kaspa.stream, chain DAA 598,608,382)
+- C6/r5/buy/23 `ae4d203c2c8ad299f71dbcec32658fd71c780c48266d6bdc4ebd8528562de370` (proton-10.kaspa.stream, chain DAA 598,608,382)
+- C6/r5/buy/24 `6fa51e34de7f72220745e317dff1cdeb4296fd4a14fc0944cba39e604ef78261` (proton-10.kaspa.stream, chain DAA 598,608,387)
+- C6/r5/buy/25 `b63ad49bf814346a0916dc505226c4dd99d40e2cbc672c5574550ca5fec66458` (proton-10.kaspa.stream, chain DAA 598,608,387)
+- C6/r5/buy/26 `a60516b9dab9e9bab0d74d098fb2c11ad847a9f927da89374597aece23429919` (proton-10.kaspa.stream, chain DAA 598,608,390)
+- C6/r5/buy/27 `dcafa561376bd030a9924cb6c439dce5b8372131fdeec7c0678354c31262b4aa` (proton-10.kaspa.stream, chain DAA 598,608,387)
+- C6/r5/buy/28 `4b8ba546d204350afdb1541265d51b599273d23aed4c325f496a1595228f61d2` (proton-10.kaspa.stream, chain DAA 598,608,390)
+- C6/r5/buy/29 `b779f8a3782b39bbdca014c4746719d4cc8d54030b49bc6aed901c93986b9087` (proton-10.kaspa.stream, chain DAA 598,608,387)
+- C6/r5/buy/30 `02486c323fc4bae9aa9ac0dd1f82fdd66c219e9a8fb4368a00ee3d980df22cb6` (proton-10.kaspa.stream, chain DAA 598,608,392)
+- C6/r5/buy/31 `8a41915738f2fc87bc6035fb2c749027fa977ce3c8a7300622c658b091ca8790` (proton-10.kaspa.stream, chain DAA 598,608,392)
+- C6/r5/buy/32 `b173e68ad0a4f01b946f4e7ec8d7d3eb041f1d7bb1e835627f11e0586941c84b` (proton-10.kaspa.stream, chain DAA 598,608,399)
+- C6/r5/buy/33 `bbbcd35718e90530304a8cfca510ca469cabd7eb395327c935527e17bc65360e` (proton-10.kaspa.stream, chain DAA 598,608,403)
+- C6/r5/buy/34 `a437934fdd45deaebb74659bb94a44a3f0d1ea44a42abef2a21b8e1a51a3489b` (proton-10.kaspa.stream, chain DAA 598,608,403)
+- C6/r5/buy/35 `faf005f212640ffeb93609d29ce04743fd8fd38bef76660e01ad303ce1472ca6` (proton-10.kaspa.stream, chain DAA 598,608,403)
+- C6/r5/buy/36 `f2d925eaa8bcb1faeb42c8f689a59ec1b55c643a0afb0958a66ab2f05ebd47ed` (proton-10.kaspa.stream, chain DAA 598,608,403)
+- C6/r5/buy/37 `8c85987667867e5e68a363c8ccfc2a52a8585920ad5bce8595e1d4f94191cd24` (proton-10.kaspa.stream, chain DAA 598,608,403)
+- C6/r5/buy/38 `8a8b9f35a0038997e522b34e47db9b587c6d9a8afa449183433bcbfed0a95807` (proton-10.kaspa.stream, chain DAA 598,608,410)
+- C6/r5/buy/39 `12fa3e66f231ff537d89ffee9cc810fd5cc2e3253c3bf7bded3365cb54675fdd` (proton-10.kaspa.stream, chain DAA 598,608,410)
+- C6/deposit 50.00000000 KAS (backs the carried withdrawals) `b2a052fcfc4a5c40dd7d053a07b9735be89f31b47c2109d1659d3e5b10f7ffbe` (proton-10.kaspa.stream, chain DAA 598,608,785)
+- C6/close r5 `9156a244f15c7d860a1074c5cddf5a0f3f9f85e00e0c9ae519f64ee22b82b1a0` (proton-10.kaspa.stream, chain DAA 598,613,775)
+- C6/draw r5 `afa2bff2524584baab122fc2cd20b7cc6f916aa33f4fbf275a1f1cf670c0c8c3` (proton-10.kaspa.stream, chain DAA 598,614,522)
+- C6/carried r5/settle/9740e64736ff5ff4da79bceab481e832e6cc4f7b877fbe226633446cfba73757:1 `28b0223cd3b54189ec3b2bec45e81c6fdea0e95ade7482048c8086483365c778` (proton-10.kaspa.stream, chain DAA 598,614,543)
+- C6/carried r5/settle/8cdf454e76a063f44b6df2f775049bc04d63226f93108e926d16ec9df8d91e33:0 `db3682ad4838aaeef20c5b6543be6999c250a49f37a66c5d562eec97e78e5446` (proton-10.kaspa.stream, chain DAA 598,614,559)
+- C6/deposit r5/settle/b2a052fcfc4a5c40dd7d053a07b9735be89f31b47c2109d1659d3e5b10f7ffbe:1 `4860057e47fc370fb96a510e89ea10c8a35aebb0b0d6fd52dea77c88b936ba2a` (proton-10.kaspa.stream, chain DAA 598,614,581)
+- C6/r5/claim/c08e1339e55e8ff98923b9446bd6f5d3e2255e82e40f0fd2de2eaf3eb294beb3:1/0 `adc7d97cf90bfcd75c76a6a06934d41492616d05206deca46327cf4659e1135c` (proton-10.kaspa.stream, chain DAA 598,614,609)
+- C6/r6/buy/0 `2ad38de186f397a0c4c331881603596ba4b9c1255c98794e8f611bbbc93e1089` (proton-10.kaspa.stream, chain DAA 598,614,740)
+- C6/r6/buy/1 `b8eed6505a4fa4b26490f7f4698aa679517579a1b2d1ef6c38613a01975c22bf` (proton-10.kaspa.stream, chain DAA 598,614,745)
+- C6/r6/buy/2 `51a7183836304305bec31ad373de463d9f5f474edc0f34e440430d3648741e66` (proton-10.kaspa.stream, chain DAA 598,614,745)
+- C6/r6/buy/3 `99505db4e8ce095eef5d6a29bbd6828983517c2341ca22130d5bfb2d92cf939e` (proton-10.kaspa.stream, chain DAA 598,614,745)
+- C6/r6/buy/4 `ab7487a5d5b52075ebdf6d70557e1914a887e2c185fb05c8f4baa3a8d78fbf62` (proton-10.kaspa.stream, chain DAA 598,614,745)
+- C6/r6/buy/5 `5dca32af17d601dcc5212efe16e7e06f015760126cbf93badc66be9de66be0c4` (proton-10.kaspa.stream, chain DAA 598,614,745)
+- C6/r6/buy/6 `c4c84fd63f6f6195083338d69b256c553b3c7032827aa31989f75da645555fe7` (proton-10.kaspa.stream, chain DAA 598,614,745)
+- C6/r6/buy/7 `6eda3bf2b9a7592448205a98554dcb483be6cc443b5e1c92b114d56d5b02d2b9` (proton-10.kaspa.stream, chain DAA 598,614,746)
+- C6/r6/buy/8 `1129de89ea6465ea9b0777db56cddbb709eff9b25e3cef80044c85c2693953cd` (proton-10.kaspa.stream, chain DAA 598,614,746)
+- C6/r6/buy/9 `37c4d9cfa844b92fb55f7dd3cb59b616ee014217ba7f624eaa39b72a06453d23` (proton-10.kaspa.stream, chain DAA 598,614,746)
+- C6/r6/buy/10 `8928c26cbab2da292dad461280b0b7644ba3d3ef685711392b6c9f16e64fdf96` (proton-10.kaspa.stream, chain DAA 598,614,748)
+- C6/r6/buy/11 `ba5f1f70326ff50674b1338a355ace7b601f105a3c45867a85adbe59170ccb52` (proton-10.kaspa.stream, chain DAA 598,614,746)
+- C6/r6/buy/12 `5ac0c1da2938c660bcfecb92d7a07024e85b375323a488944039809cda942993` (proton-10.kaspa.stream, chain DAA 598,614,746)
+- C6/r6/buy/13 `e6bd32e25627e22ccfcfac63842372d45db0ea6c22ec2138e07ba460bfb503f0` (proton-10.kaspa.stream, chain DAA 598,614,750)
+- C6/r6/buy/14 `4c4dabcdedb7168bfa361f7640df9b196ed9d43423b8712ec0f58f86ff77a07d` (proton-10.kaspa.stream, chain DAA 598,614,750)
+- C6/r6/buy/15 `c09373d10c795ec0d588ae71bda6e12dd247f0e96a08197636be015c450a7802` (proton-10.kaspa.stream, chain DAA 598,614,750)
+- C6/r6/buy/16 `4588b8f93fd316555614b628c2f37a3ee46fd7e93a2de627a299fe51f831278c` (proton-10.kaspa.stream, chain DAA 598,614,814)
+- C6/r6/buy/17 `2b471e1530006e4b1908945ac1e98f5b162692a7e65cf44f1d4bac3bcd56e69c` (proton-10.kaspa.stream, chain DAA 598,614,814)
+- C6/r6/buy/18 `13828e37eb38e96efb29e298218f43b15994bca0b8639cb1b7ed312ef13bafdc` (proton-10.kaspa.stream, chain DAA 598,614,814)
+- C6/r6/buy/19 `99f06c1ed6494e6775ff01697c3ea453c57633ab6a642566d8462813229e99bc` (proton-10.kaspa.stream, chain DAA 598,614,814)
+- C6/r6/buy/20 `cbe2bb41a1bdf4e5367fd572eaa2c720dde588e8b1e80e71c7f2c62f19fd6417` (proton-10.kaspa.stream, chain DAA 598,614,814)
+- C6/r6/buy/21 `0ddca392babe414e661645d3af68e3f817b6a8a3a1da8ae757667068dcae66c3` (proton-10.kaspa.stream, chain DAA 598,614,815)
+- C6/r6/buy/22 `d3555657e818539a74ae8e5a12960e19f0db0030081f718e49d63669d64fae4d` (proton-10.kaspa.stream, chain DAA 598,614,815)
+- C6/r6/buy/23 `f181e35905a341423ddd7b58bcdedee446844fa9cd40be9dd92a469547f60ddd` (proton-10.kaspa.stream, chain DAA 598,614,815)
+- C6/r6/buy/24 `269338ab59e2b3a7a27cf803c2b9245446952e46540e514565f285359ed97d39` (proton-10.kaspa.stream, chain DAA 598,614,817)
+- C6/r6/buy/25 `7833b2da7d89384195b925739fe1f136015a8e69f79655d60becb898cef6d0ee` (proton-10.kaspa.stream, chain DAA 598,614,815)
+- C6/r6/buy/26 `43bd0437b9917eaf6641dc521de5039b522a08e760ce35792c6b97ed7d4aeab3` (proton-10.kaspa.stream, chain DAA 598,614,815)
+- C6/r6/buy/27 `99d834fc84f4302117c61518703da6f4102a3bcd39f10b63a9d47e0f818bc494` (proton-10.kaspa.stream, chain DAA 598,614,815)
+- C6/r6/buy/28 `f5c7c334c4c99d195984a28d9e0595ad6b12da85fa2b13dc8588f9fcb176b6e8` (proton-10.kaspa.stream, chain DAA 598,614,826)
+- C6/r6/buy/29 `405c41cc257e5b7cdc1699408c54aba99e196166136b95f97f267bcb9bfd8058` (proton-10.kaspa.stream, chain DAA 598,614,826)
+- C6/r6/buy/30 `51d5a12fa77ab39e5062b675a9a29dabf24629a4b0d4375f69bbfa4e87871d4a` (proton-10.kaspa.stream, chain DAA 598,614,826)
+- C6/r6/buy/31 `0ccdbf68f5f776212a63e85d1fdc2f4e768fc7710d8c881623e63ac5e2af19cf` (proton-10.kaspa.stream, chain DAA 598,614,826)
+- C6/r6/buy/32 `5e0227b8c74905f318e03345296394f728a38803a7bdedfbe15f0ccebd96bc48` (proton-10.kaspa.stream, chain DAA 598,614,851)
+- C6/r6/buy/33 `1ec3878d466d8ac724500feb66eb51d96d9b5925a8ba2251c4515289e004b423` (proton-10.kaspa.stream, chain DAA 598,614,858)
+- C6/r6/buy/34 `b751f126750488f6492067e63615edbbdf1ed3e660f8de8a164f99e0de803dff` (proton-10.kaspa.stream, chain DAA 598,614,858)
+- C6/r6/buy/35 `e28938023bf5241e909508cb813b3340702a739b65c4e09a7f4de7db307dc70e` (proton-10.kaspa.stream, chain DAA 598,614,858)
+- C6/r6/buy/36 `fcbb11dc9c67f601223be94b8832ebb5ddf7f3bf4afd74e760ec654cbf1de2b0` (proton-10.kaspa.stream, chain DAA 598,614,858)
+- C6/r6/buy/37 `949aa8e966e88d7065b6332d5ea6b1438b7edc45b4df4b92492db5020b2fcc24` (proton-10.kaspa.stream, chain DAA 598,614,858)
+- C6/r6/buy/38 `9b5300d7842f5fb9329ca025373f9a65b7befb9e32a8f651dc8f4d6f7faadbb0` (proton-10.kaspa.stream, chain DAA 598,614,866)
+- C6/r6/buy/39 `caed2f7e3070c388a1ac4c30ef949047d275faf51934df9a629978824958b28f` (proton-10.kaspa.stream, chain DAA 598,614,866)
+- C6/close r6 `80e35d62fb42851c2982f8ef0e1e74402099add10b292f150e8a81c2d84997d0` (proton-10.kaspa.stream, chain DAA 598,619,963)
+- C6/draw r6 `98ce1ffe76f1ca4688227c20a6d3c76b95ab8e1b63ab6771eec3c1ea4a584a1d` (proton-10.kaspa.stream, chain DAA 598,620,662)

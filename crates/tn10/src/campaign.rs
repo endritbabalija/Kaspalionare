@@ -194,8 +194,9 @@ pub trait Net {
     async fn fee_rate(&mut self) -> R<fees::Rate>;
     /// Submit (orphans disallowed); `Err` is the node's rejection text.
     async fn submit(&mut self, f: &Final) -> Result<(), String>;
-    async fn sync(&mut self, x: &mut Indexer) -> R<Vec<(Accepted, Event)>>;
-    async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Vec<(Accepted, Event)>>;
+    /// The applied events and the number of transactions reverted by a chain reorg.
+    async fn sync(&mut self, x: &mut Indexer) -> R<Synced>;
+    async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Synced>;
     /// Our spendable P2PK UTXOs, each with its chain-accepted creation DAA.
     async fn funds(&mut self, x: &Indexer) -> R<Vec<Funding>>;
     async fn utxo(&mut self, op: TransactionOutpoint, spk: &ScriptPublicKey) -> R<Option<UtxoEntry>>;
@@ -256,20 +257,24 @@ impl Net for Node {
     async fn submit(&mut self, f: &Final) -> Result<(), String> {
         self.client.submit_transaction(RpcTransaction::from(&f.tx), false).await.map(|_| ()).map_err(|e| e.to_string())
     }
-    async fn sync(&mut self, x: &mut Indexer) -> R<Vec<(Accepted, Event)>> {
-        Ok(indexer::poll(&self.client, x).await?.events)
+    async fn sync(&mut self, x: &mut Indexer) -> R<Synced> {
+        let p = indexer::poll(&self.client, x).await?;
+        Ok((p.events, p.reverted))
     }
-    async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Vec<(Accepted, Event)>> {
+    async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Synced> {
         for id in ids {
             x.watch(*id);
         }
         let t0 = std::time::Instant::now();
         let mut evs = vec![];
+        let mut reverted = 0;
         loop {
-            evs.extend(indexer::poll(&self.client, x).await?.events);
+            let p = indexer::poll(&self.client, x).await?;
+            evs.extend(p.events);
+            reverted += p.reverted;
             let left: Vec<_> = ids.iter().filter(|i| x.accepted_at(i).is_none()).collect();
             if left.is_empty() {
-                return Ok(evs);
+                return Ok((evs, reverted));
             }
             if t0.elapsed() > std::time::Duration::from_secs(600) {
                 return Err(format!("not chain-accepted within 600 s: {left:?}"));
@@ -325,6 +330,9 @@ impl Net for Node {
     }
 }
 
+/// What a sync returns: the applied events, and the count of transactions a reorg reverted.
+pub type Synced = (Vec<(Accepted, Event)>, usize);
+
 /// The dry run: a ledger, the local engine and fabricated chain blocks (one per accepted
 /// transaction). Simulated time is DAA / 10 s; a block older than `retention` DAA is
 /// "deleted" (the soak's evidence).
@@ -341,6 +349,10 @@ pub struct Local {
     /// Every submission and its outcome (the dry-run report).
     pub submitted: usize,
     pub refused: usize,
+    /// Test hook (`TN10_DRY_REORG=1`): reorg the chain block of the first synced buy once
+    /// (removed, then its transactions re-added in a new block at the same DAA), as on
+    /// testnet-10 in S3b.
+    pub reorg_first_buy: bool,
 }
 
 impl Local {
@@ -358,6 +370,7 @@ impl Local {
             rate,
             submitted: 0,
             refused: 0,
+            reorg_first_buy: false,
         };
         for _ in 0..4 {
             let op = me.ledger.fund(budget / 4, spk.clone(), start - 10_000);
@@ -456,13 +469,24 @@ impl Net for Local {
         self.daa += 2;
         Ok(())
     }
-    async fn sync(&mut self, x: &mut Indexer) -> R<Vec<(Accepted, Event)>> {
+    async fn sync(&mut self, x: &mut Indexer) -> R<Synced> {
         let added = std::mem::take(&mut self.pending);
-        let g = x.ingest(ChainBatch { removed: vec![], added })?;
+        let g = x.ingest(ChainBatch { removed: vec![], added: added.clone() })?;
+        let (mut events, mut reverted) = (g.events, g.reverted);
+        if self.reorg_first_buy && events.iter().any(|(_, e)| matches!(e, Event::Buy(_))) {
+            self.reorg_first_buy = false;
+            let old = added.last().cloned().ok_or("dry-run reorg: no block")?;
+            let h = self.next_hash(b"tn10 dry-run reorg");
+            self.blocks.insert(h, old.daa);
+            let g2 = x.ingest(ChainBatch { removed: vec![old.hash], added: vec![ChainBlock { hash: h, daa: old.daa, txs: old.txs }] })?;
+            println!("  dry run: reorg of chain block {} ({} reverted, {} re-added)", old.hash, g2.reverted, g2.events.len());
+            reverted += g2.reverted;
+            events.extend(g2.events);
+        }
         x.persist()?;
-        Ok(g.events)
+        Ok((events, reverted))
     }
-    async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Vec<(Accepted, Event)>> {
+    async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Synced> {
         for id in ids {
             x.watch(*id);
         }
@@ -721,14 +745,27 @@ impl<N: Net> Runner<N> {
 
     async fn sync(&mut self) -> R<()> {
         let x = self.x.as_mut().ok_or("no indexer")?;
-        let evs = self.net.sync(x).await?;
-        self.feed(&evs)
+        let s = self.net.sync(x).await?;
+        self.apply_synced(s)
     }
 
     async fn wait_txs(&mut self, ids: &[TransactionId]) -> R<()> {
         let x = self.x.as_mut().ok_or("no indexer")?;
-        let evs = self.net.wait_accepted(x, ids).await?;
-        self.feed(&evs)
+        let s = self.net.wait_accepted(x, ids).await?;
+        self.apply_synced(s)
+    }
+
+    /// Feed new events to the wallets; after a chain reorg (the index reverted transactions,
+    /// which may come back in other chain blocks) rebuild them from the index log instead,
+    /// since `feed` only adds (S3b: a reorg re-added a round-4 buy and the wallet refused
+    /// the second ingestion, "spent root is not the wallet's tree root").
+    fn apply_synced(&mut self, (evs, reverted): Synced) -> R<()> {
+        if reverted > 0 {
+            println!("  chain reorg: {reverted} instance transaction(s) reverted; wallets rebuilt from the index log");
+            self.rebuild_wallets()
+        } else {
+            self.feed(&evs)
+        }
     }
 
     // ---- submission
@@ -832,6 +869,26 @@ impl<N: Net> Runner<N> {
         }
         self.net.submit(&f).await.map_err(|e| format!("fan-out REJECTED: {e}"))?;
         self.wait_txs(&[id]).await
+    }
+
+    /// A funding UTXO of `min` sompi created and chain-accepted just before use. close()'s
+    /// next deadline is T' = max(T + round_len, own + d_min) with `own` = the newest input's
+    /// creation DAA (`controller.sil:473-484`), not the close's own DAA: a close spending only
+    /// old inputs, sent more than d_min after the newest, opens a round whose deadline has
+    /// already passed, so no shard can sell (`shard.sil` check 6; testnet-10 round 3, S3b).
+    async fn fresh_fund(&mut self, min: u64) -> R<Funding> {
+        self.ensure_funding(1, min + KAS).await?;
+        let src = self.funds().await?.into_iter().next().ok_or("fresh funding: no funds")?;
+        let f = self.plain(&[src], &[min])?;
+        let id = f.tx.id();
+        if let Some(x) = self.x.as_mut() {
+            x.watch(id);
+        }
+        self.net.submit(&f).await.map_err(|e| format!("fresh funding REJECTED: {e}"))?;
+        println!("  fresh funding {id}: {}", kas(min));
+        self.wait_txs(&[id]).await?;
+        let op = TransactionOutpoint::new(id, 0);
+        self.funds().await?.into_iter().find(|f| f.outpoint == op).ok_or_else(|| format!("fresh funding {op}: not among our UTXOs after acceptance"))
     }
 
     /// A P2PK -> P2PK transaction from `ins` to outputs of `outs` sompi plus change.
@@ -1223,10 +1280,20 @@ impl<N: Net> Runner<N> {
         if !self.done(action) {
             self.wait_deadline().await?;
             self.refresh_rate().await?;
-            let fund = self.one_fund(10 * KAS).await?;
+            // Fresh input (S3b fix): T' takes `own` from the newest input, so the close
+            // spends a funding UTXO accepted just before it.
+            let fund = self.fresh_fund(10 * KAS).await?;
             let (s, _) = self.net.sink().await?;
             self.set_var(&format!("close_start.r{r}"), hex(&s.as_bytes()));
             let (f, _, ops) = self.build_close(&fund)?;
+            let t_next = close_deadline(ctrl.deadline as u64, ctrl.round_len as u64, f.entries.iter().map(|e| e.block_daa_score), ctrl.d_min as u64);
+            let now = self.net.daa().await?;
+            if t_next < now + ctrl.d_min as u64 / 2 {
+                return Err(format!(
+                    "{action}: not submitted: round {}'s deadline would be {t_next} (virtual DAA {now}), less than d_min / 2 of sales (stale inputs, controller.sil:473-484)",
+                    r + 1
+                ));
+            }
             self.net.verify_inputs(&f, &ops).await?;
             self.send_wait(step, action, &f).await?;
         }
@@ -1663,11 +1730,53 @@ impl<N: Net> Runner<N> {
         Ok(())
     }
 
-    /// C5b: round 3 while round 2's draw is held back: sales pause and strict order.
+    /// C5b (A5 amendment, owner 2026-10-17: the sales-pause test shifted by one round).
+    /// Round 3 opened past its deadline on testnet-10 (a late close with stale inputs), so:
+    /// draw round 2 now (late) with the liability-lock check, settle both withdrawals (PAY,
+    /// carried), close round 3 with no sales (fresh input), then round 4 sells while draw 3
+    /// is held back: 20 buys before its deadline, one per shard after it where allowed, a
+    /// further buy refused (sales pause), close() of round 4 before draw 3 refused.
     pub async fn c5b(&mut self) -> R<()> {
         let s = "C5b";
         self.sync().await?;
-        let r = self.open_round()?;
+        let r2: i64 = self.var("c5_round")?.parse().map_err(|e| format!("{e}"))?;
+        let draw = format!("C5b/draw r{r2} (late)");
+        if !self.done(&draw) {
+            let x = self.draw(s, &draw, 0).await?;
+            let c = x.conv;
+            let total = c.v_prime + c.d_c - c.out_c;
+            let ok = c.wc < c.w && total >= c.l_next && wc_witness_ok(c.v_prime, c.s, c.w, c.slack, c.wc);
+            self.check(s, "draw 2 converts only wc < W shares and leaves exactly L' (liability lock, D124)", ok, format!("W {} wc {}; vault after {} vs L' {} (slack left {})", c.w, c.wc, total, c.l_next, total - c.l_next)).await?;
+        }
+        self.settle_all(s, "C5b/withdrawals", lottery::state::KIND_WITHDRAW, r2, &[SettleMode::Pay]).await?;
+        // Round 3: no sales (on testnet-10 its deadline had passed before it opened).
+        let r3 = match self.var("c5b_empty_round") {
+            Ok(v) => v.parse().map_err(|e| format!("{e}"))?,
+            Err(_) => {
+                let r = self.open_round()?;
+                self.set_var("c5b_empty_round", r);
+                r
+            }
+        };
+        if self.open_round()? == r3 {
+            let name = format!("round {r3} closed with no sales (A5 amendment: one-round shift)");
+            if !check_done(&self.c, &name) {
+                let (_, ctrl) = self.controller()?;
+                let created = self.shards(r3)?.iter().map(|(l, _)| l.daa).min().unwrap_or(0);
+                let dead = created >= ctrl.deadline as u64;
+                self.check(s, &name, true, format!("deadline {}, shards created at DAA {created}: {}", ctrl.deadline, if dead { "opened past its deadline (stale close inputs, controller.sil:473-484), no buy possible" } else { "sales were possible; none made by plan" })).await?;
+            }
+            self.close(s, &format!("C5b/close r{r3} (no sales)")).await?;
+        }
+        // Round 4: the sales pause while draw 3 is held back.
+        let r = match self.var("c5b_round") {
+            Ok(v) => v.parse().map_err(|e| format!("{e}"))?,
+            Err(_) => {
+                let r = self.open_round()?;
+                self.set_var("c5b_round", r);
+                r
+            }
+        };
         let specs: Vec<BuySpec> = self.round_specs("C5b", r, self.opts.c5b_buys, 1, false);
         self.buys(s, specs).await?;
         self.wait_deadline().await?;
@@ -1680,7 +1789,7 @@ impl<N: Net> Runner<N> {
             .map(|&i| BuySpec { action: format!("C5b/post-deadline buy shard {i}"), round: r, shard: i, n: n0 + i as u64, b: 1, with_ref: false })
             .collect();
         self.buys(s, specs).await?;
-        self.check(s, "one buy per shard whose UTXO predates the deadline accepted after it", !allowed.is_empty(), format!("{} shards", allowed.len())).await?;
+        self.post_deadline_check().await?;
         let name = "C5b: a further buy on a post-deadline shard refused (sales pause)";
         if !check_done(&self.c, name) {
             let i = self.shards(r)?.iter().find(|(l, _)| l.daa >= t3).map(|(_, st)| st.shard_index as usize).ok_or("no post-deadline shard")?;
@@ -1698,33 +1807,47 @@ impl<N: Net> Runner<N> {
         Ok(())
     }
 
-    /// C5c: the late draw of round 2, the capped withdrawals, round 3 closed and drawn
-    /// from the index, one round-3 claim from the index.
+    /// The C5b check from the accepted post-deadline buy actions (one per shard whose UTXO
+    /// predated the deadline). Computed from what was accepted, not from the shards still
+    /// predating it: after a resume those were already bought (S3b: a resume recorded
+    /// "0 shards" although all 16 had been accepted).
+    async fn post_deadline_check(&mut self) -> R<()> {
+        let shards: Vec<usize> = (0..K).filter(|i| self.done(&format!("C5b/post-deadline buy shard {i}"))).collect();
+        self.check("C5b", "one buy per shard whose UTXO predates the deadline accepted after it", !shards.is_empty(), format!("{} shards accepted ({shards:?})", shards.len())).await
+    }
+
+    /// C5c (shifted by one round): draw 3 held back 60 min (inside 12 h), the carried
+    /// withdrawals settled after it, round 4 closed and drawn from the index offline, one
+    /// round-4 claim from the index.
     pub async fn c5c(&mut self) -> R<()> {
         let s = "C5c";
         self.sync().await?;
-        let r2: i64 = self.var("c5_round")?.parse().map_err(|e| format!("{e}"))?;
-        let draw = format!("C5c/draw r{r2} (60 min late)");
+        // Re-evaluate a C5b check a resume recorded wrongly (from the accepted actions).
+        if self.c.steps.iter().flat_map(|x| &x.checks).any(|k| k.name == "one buy per shard whose UTXO predates the deadline accepted after it" && !k.ok) {
+            self.post_deadline_check().await?;
+        }
+        let r3: i64 = self.var("c5b_empty_round")?.parse().map_err(|e| format!("{e}"))?;
+        let draw = format!("C5c/draw r{r3} (60 min late)");
         if !self.done(&draw) {
-            let x = self.draw(s, &draw, LATE_DAA).await?;
-            let c = x.conv;
-            let total = c.v_prime + c.d_c - c.out_c;
-            let ok = c.wc < c.w && total >= c.l_next && wc_witness_ok(c.v_prime, c.s, c.w, c.slack, c.wc);
-            self.check(s, "draw 2 converts only wc < W shares and leaves exactly L' (liability lock, D124)", ok, format!("W {} wc {}; vault after {} vs L' {} (slack left {})", c.w, c.wc, total, c.l_next, total - c.l_next)).await?;
+            self.draw(s, &draw, LATE_DAA).await?;
         }
-        self.settle_all(s, "C5c/withdrawals", lottery::state::KIND_WITHDRAW, r2, &[SettleMode::Pay]).await?;
-        let r3 = self.open_round()?;
-        self.close(s, &format!("C5c/close r{r3}")).await?;
-        let draw3 = format!("C5c/draw r{r3} (indexer store)");
-        if !self.done(&draw3) {
-            self.draw(s, &draw3, 0).await?;
+        let carried = [SettleMode::Final, SettleMode::Pay, SettleMode::Accrue];
+        self.settle_all(s, &format!("C5c/carried r{r3}"), lottery::state::KIND_WITHDRAW, r3, &carried).await?;
+        let r4: i64 = self.var("c5b_round")?.parse().map_err(|e| format!("{e}"))?;
+        if self.open_round()? == r4 {
+            self.close(s, &format!("C5c/close r{r4}")).await?;
         }
-        self.set_var("c5c_round", r3);
-        let n = self.claims(s, &format!("C5c/r{r3} index"), r3, true, false, 1).await?;
-        self.check(s, &format!("one round-{r3} claim from the indexer store"), true, if n > 0 { "exercised".to_string() } else { format!("not exercised: no winning round-{r3} holding of ours (luck)") }).await
+        let draw4 = format!("C5c/draw r{r4} (indexer store)");
+        if !self.done(&draw4) {
+            self.draw(s, &draw4, 0).await?;
+        }
+        self.set_var("c5c_round", r4);
+        let n = self.claims(s, &format!("C5c/r{r4} index"), r4, true, false, 1).await?;
+        self.check(s, &format!("one round-{r4} claim from the indexer store"), true, if n > 0 { "exercised".to_string() } else { format!("not exercised: no winning round-{r4} holding of ours (luck)") }).await
     }
 
-    /// C6: settle the carried requests; rounds 4 and 5, plain.
+    /// C6: settle the carried requests; the next two rounds, plain (rounds 5 and 6 after
+    /// the one-round shift of C5b/C5c).
     pub async fn c6(&mut self) -> R<()> {
         let s = "C6";
         self.sync().await?;
@@ -1939,6 +2062,14 @@ impl<N: Net> Runner<N> {
     }
 }
 
+/// The next round's deadline a close() with inputs created at `input_daas` writes:
+/// T' = max(T + round_len, own + d_min), own = the newest input's creation DAA
+/// (`controller.sil:473-484`, check 20).
+pub fn close_deadline(deadline: u64, round_len: u64, input_daas: impl IntoIterator<Item = u64>, d_min: u64) -> u64 {
+    let own = input_daas.into_iter().max().unwrap_or(0);
+    (deadline + round_len).max(own + d_min)
+}
+
 /// `campaign status`: the step, the checks and the next soak sitting.
 pub fn status(root: &Path, cov: Option<Hash>, mode: SoakMode) -> R<()> {
     let cov_hex = match cov {
@@ -2026,6 +2157,23 @@ mod tests {
         // A campaign/1 file written before the S3 fields still reads (serde defaults).
         let old = j.replace(",\n      \"action\": \"C2/buy/0\"", "");
         assert!(store::read::<Campaign>(&old, store::CAMPAIGN).is_ok());
+    }
+
+    /// S3b reproduction (testnet-10, 2026-10-17): round 2's deadline T = 598,556,019, its
+    /// newest close input about 598,556,019, the close accepted at 598,564,744. Without a
+    /// fresh input T' = 598,562,019 < the close: round 3 could not sell. A funding input
+    /// accepted just before the close moves T' to d_min after it.
+    #[test]
+    fn stale_close_inputs_give_a_past_deadline_fresh_input_fixes_it() {
+        let (t, len, d_min, close_at) = (598_556_019u64, 6_000, 6_000, 598_564_744u64);
+        let stale = close_deadline(t, len, [598_556_019, 598_552_725, 598_543_977], d_min);
+        assert_eq!(stale, 598_562_019);
+        assert!(stale < close_at, "the next round opens past its deadline");
+        let fresh = close_deadline(t, len, [598_556_019, close_at - 10], d_min);
+        assert_eq!(fresh, close_at - 10 + d_min);
+        assert!(fresh >= close_at + d_min / 2, "the guard in close() lets it through");
+        // A timely close is unchanged in kind: T + round_len still wins when inputs are older.
+        assert_eq!(close_deadline(t, len, [t - 100], d_min), t + len);
     }
 
     #[test]

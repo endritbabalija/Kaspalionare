@@ -9,19 +9,25 @@
 //! `consensus/core/src/hashing/covenant_id.rs:16-31`), every genesis state hashes to its
 //! output script, the output values follow from the states, the parameters equal the
 //! states', the full genesis `validate()` passes (including the M8 SF1 round-1 game-size
-//! rule), and every live UTXO's state hashes to its script. Comparing the live UTXOs with a
+//! rule), and every live UTXO's state hashes to its script.
+//!
+//! States are stored as their encoded state bytes only (S3b fix): the redeem script of a
+//! state is its role's template `prefix || state || suffix`, and `templates[]` already
+//! carries every prefix and suffix. `verify` rebuilds each redeem script and compares its
+//! P2SH with the output script; a full redeem script where the state belongs (the shape
+//! before the fix) is refused. Comparing the live UTXOs with a
 //! node is `tn10 bundle-verify`'s job (S3).
 
 use std::sync::Arc;
 
-use harness::{ArtifactValue, Hash, Transaction, TransactionOutpoint, TransactionOutput, pay_to_script_hash_script};
+use harness::{ArtifactValue, Hash, ScriptPublicKey, Transaction, TransactionOutpoint, TransactionOutput, pay_to_script_hash_script};
 use crate::genesis::NetworkType;
 use serde::{Deserialize, Serialize};
 
 use crate::buy::{Final, Templates};
 use crate::genesis::GenesisCase;
 use crate::index::{ROLES, Role, State, template_of};
-use crate::store::{BUNDLE, LiveJson, OutpointJson, Params, hex, hex_vec};
+use crate::store::{BUNDLE, LiveJson, OutpointJson, Params, hex, hex_opt, hex_vec, to_hex};
 
 /// The pinned rusty-kaspa release v2.1.0 (CLAUDE.md, `crates/Cargo.toml`).
 pub const RUSTY_KASPA_REV: &str = "01b532e8b553523216471682649693af92f0fd16";
@@ -67,10 +73,64 @@ pub struct Snapshot {
     pub chain_block: [u8; 32],
 }
 
+/// A live UTXO in `bundle/1` (A3 `live_utxos[]`): as `store::LiveJson`, but `state` holds
+/// the encoded state bytes only (the role's template gives the prefix and suffix).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleLive {
+    pub outpoint: OutpointJson,
+    pub role: Role,
+    pub round: Option<i64>,
+    pub value: u64,
+    pub daa: u64,
+    #[serde(with = "hex")]
+    pub covenant_id: [u8; 32],
+    pub spk_version: u16,
+    #[serde(with = "hex")]
+    pub spk: Vec<u8>,
+    #[serde(with = "hex_opt")]
+    pub state: Option<Vec<u8>>,
+}
+
+impl BundleLive {
+    /// An index live UTXO (`state` = its redeem script, checked against its role and script)
+    /// with its state reduced to the state bytes.
+    pub fn of(l: &LiveJson, t: &Templates) -> Result<Self, String> {
+        let s = l.decode(t)?;
+        Ok(Self {
+            outpoint: l.outpoint.clone(),
+            role: l.role,
+            round: l.round,
+            value: l.value,
+            daa: l.daa,
+            covenant_id: l.covenant_id,
+            spk_version: l.spk_version,
+            spk: l.spk.clone(),
+            state: s.map(|s| s.state_bytes(t)),
+        })
+    }
+
+    /// The state, rebuilt from the state bytes under its role's template and checked: the
+    /// P2SH of prefix || state || suffix must be the stored script and its round the stored
+    /// round.
+    pub fn decode(&self, t: &Templates) -> Result<Option<State>, String> {
+        let at = || format!("live UTXO {}:{}", to_hex(&self.outpoint.txid), self.outpoint.index);
+        let Some(bytes) = &self.state else { return Ok(None) };
+        let (s, redeem) = State::from_state_bytes(t, self.role, bytes).map_err(|e| format!("{}: {e}", at()))?;
+        if pay_to_script_hash_script(&redeem) != ScriptPublicKey::from_vec(self.spk_version, self.spk.clone()) {
+            return Err(format!("{}: the state does not hash to its script", at()));
+        }
+        if self.round != Some(s.round()) {
+            return Err(format!("{}: round {:?}, the state's is {}", at(), self.round, s.round()));
+        }
+        Ok(Some(s))
+    }
+}
+
 /// `docs/launch/<name>.json` (A3 `bundle/1`). M8 S2 additions to A3: `genesis_tx` (so the
 /// txid, the genesis outpoint and the authorized outputs are checked against the
-/// transaction itself) and `genesis_states` (the authorized outputs' states as redeem
-/// scripts: outputs are P2SH, so the states are in no transaction).
+/// transaction itself) and `genesis_states` (the authorized outputs' states: outputs are
+/// P2SH, so the states are in no transaction). S3b fix: `genesis_states` and
+/// `live_utxos[].state` hold the encoded state bytes only, not the redeem scripts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bundle {
     pub format: String,
@@ -88,7 +148,7 @@ pub struct Bundle {
     pub templates: Vec<TemplateJson>,
     pub params: Params,
     pub snapshot: Option<Snapshot>,
-    pub live_utxos: Vec<LiveJson>,
+    pub live_utxos: Vec<BundleLive>,
 }
 
 /// The genesis states in output order (controller, params, k shards, vault, drawer,
@@ -145,7 +205,7 @@ fn network_of(s: &str) -> Result<NetworkType, String> {
 impl Bundle {
     /// The bundle of a finished genesis `f` of `g` (its states and templates), with the live
     /// UTXOs `live` at the snapshot. It records; it does not validate (`verify` does).
-    pub fn new(g: &GenesisCase, f: &Final, live: Vec<LiveJson>, snapshot: Option<Snapshot>) -> Result<Self, String> {
+    pub fn new(g: &GenesisCase, f: &Final, live: Vec<BundleLive>, snapshot: Option<Snapshot>) -> Result<Self, String> {
         let t = g.templates();
         let n = g.k() + 5;
         let tx = f.tx.clone();
@@ -172,7 +232,7 @@ impl Bundle {
             genesis_txid: tx.id().as_bytes(),
             genesis_outpoint: op.into(),
             authorized_outputs,
-            genesis_states: genesis_states(g).iter().map(|s| s.redeem(&t)).collect(),
+            genesis_states: genesis_states(g).iter().map(|s| s.state_bytes(&t)).collect(),
             covenant_id: recompute_cov(op, &tx.outputs[..n]).as_bytes(),
             templates: ROLES
                 .iter()
@@ -281,8 +341,9 @@ pub fn verify(b: &Bundle) -> Result<Verified, String> {
     if id != cov {
         return Err(format!("covenant_id {cov} is not the recomputed {id}"));
     }
-    // The genesis states: each decodes under the templates, has its role (D50 order) and
-    // hashes to its authorized output's script.
+    // The genesis states: each is the state bytes of its role (D50 order) under the
+    // templates, and its redeem script prefix || state || suffix hashes to its authorized
+    // output's script.
     if b.genesis_states.len() != n {
         return Err(format!("{} genesis states for {n} authorized outputs", b.genesis_states.len()));
     }
@@ -290,12 +351,9 @@ pub fn verify(b: &Bundle) -> Result<Verified, String> {
     roles.extend(std::iter::repeat_n(Role::Shard, k));
     roles.extend([Role::Vault, Role::Drawer, Role::Position]);
     let mut states = vec![];
-    for (i, (r, role)) in b.genesis_states.iter().zip(&roles).enumerate() {
-        let s = State::decode(&t, r).map_err(|e| format!("genesis state {i}: {e}"))?;
-        if s.role() != *role {
-            return Err(format!("genesis state {i} is a {:?}, expected {role:?}", s.role()));
-        }
-        if pay_to_script_hash_script(r) != tx.outputs[i].script_public_key {
+    for (i, (bytes, role)) in b.genesis_states.iter().zip(&roles).enumerate() {
+        let (s, redeem) = State::from_state_bytes(&t, *role, bytes).map_err(|e| format!("genesis state {i}: {e}"))?;
+        if pay_to_script_hash_script(&redeem) != tx.outputs[i].script_public_key {
             return Err(format!("genesis state {i} does not hash to its output script"));
         }
         states.push(s);
@@ -334,10 +392,11 @@ pub fn verify(b: &Bundle) -> Result<Verified, String> {
     if b.params != genesis_params(&g) {
         return Err("params differ from the genesis states' values".into());
     }
-    // Live UTXOs at publication: bound to the instance, each state hashing to its script.
+    // Live UTXOs at publication: bound to the instance, each state (rebuilt from its state
+    // bytes) hashing to its script and carrying its round.
     for l in &b.live_utxos {
         if l.covenant_id != b.covenant_id {
-            return Err(format!("live UTXO {}:{}: another covenant ID", crate::store::to_hex(&l.outpoint.txid), l.outpoint.index));
+            return Err(format!("live UTXO {}:{}: another covenant ID", to_hex(&l.outpoint.txid), l.outpoint.index));
         }
         l.decode(&t)?;
     }
@@ -346,7 +405,7 @@ pub fn verify(b: &Bundle) -> Result<Verified, String> {
 
 /// The live UTXOs of a genesis (its authorized outputs, every state known), for a bundle
 /// published right after genesis.
-pub fn genesis_live(g: &GenesisCase, f: &Final, daa: u64) -> Vec<LiveJson> {
+pub fn genesis_live(g: &GenesisCase, f: &Final, daa: u64) -> Vec<BundleLive> {
     let t = g.templates();
     let txid = f.tx.id();
     genesis_states(g)
@@ -354,7 +413,7 @@ pub fn genesis_live(g: &GenesisCase, f: &Final, daa: u64) -> Vec<LiveJson> {
         .enumerate()
         .map(|(i, s)| {
             let o = &f.tx.outputs[i];
-            LiveJson {
+            BundleLive {
                 outpoint: TransactionOutpoint::new(txid, i as u32).into(),
                 role: s.role(),
                 round: Some(s.round()),
@@ -363,7 +422,7 @@ pub fn genesis_live(g: &GenesisCase, f: &Final, daa: u64) -> Vec<LiveJson> {
                 covenant_id: o.covenant.map(|c| c.covenant_id.as_bytes()).unwrap_or([0; 32]),
                 spk_version: o.script_public_key.version(),
                 spk: o.script_public_key.script().to_vec(),
-                state: Some(s.redeem(&t)),
+                state: Some(s.state_bytes(&t)),
             }
         })
         .collect()

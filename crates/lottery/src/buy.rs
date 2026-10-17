@@ -65,11 +65,15 @@ impl Template {
         self.art.contracts.keys().next().unwrap()
     }
 
+    /// The encoded state alone (the bytes between prefix and suffix; M8 `bundle/1`).
+    pub fn state_bytes(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Vec<u8> {
+        let c = self.art.contracts.values().next().unwrap();
+        encode_runtime_state_script(&self.art, &c.runtime_state, values).unwrap_or_else(|e| panic!("encode state: {e}"))
+    }
+
     /// Redeem script for a state: prefix || encoded state || suffix.
     pub fn redeem(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Vec<u8> {
-        let c = self.art.contracts.values().next().unwrap();
-        let state = encode_runtime_state_script(&self.art, &c.runtime_state, values).unwrap_or_else(|e| panic!("encode state: {e}"));
-        [self.prefix.as_slice(), &state, &self.suffix].concat()
+        [self.prefix.as_slice(), &self.state_bytes(values), &self.suffix].concat()
     }
 }
 

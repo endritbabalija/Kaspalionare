@@ -203,7 +203,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | bundle [--out <file>] | bundle-verify <file>>
+const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | bundle [--out <file>] | bundle-verify <file> | masses>
 probe cases: all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62 (conflict-m6 is not part of all)";
 
 /// The value after `--name` in `args`.
@@ -284,7 +284,8 @@ async fn campaign_cmd(args: &[String]) -> Result<(), String> {
             println!("dry run: fee rate {} sompi/gram (normal bucket {})", rate.sompi_per_gram, rate.raw);
             let o = opts(args)?;
             let spk = kaspa_txscript::pay_to_address_script(&address(&kp));
-            let local = campaign::Local::new(spk, o.budget, 1_000_000, rate);
+            let mut local = campaign::Local::new(spk, o.budget, 1_000_000, rate);
+            local.reorg_first_buy = std::env::var("TN10_DRY_REORG").is_ok_and(|v| v == "1");
             let dry_root = root.join("dry-run");
             let _ = std::fs::remove_dir_all(&dry_root);
             let mut r = campaign::Runner::new(local, dry_root, kp.secret_bytes(), o);
@@ -464,6 +465,57 @@ async fn bundle_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `masses`: per instance transaction of the current campaign (from `index-log.jsonl`),
+/// its runner action, masses (harness::masses, mainnet parameters) and fee. Read-only and
+/// offline. Input entries carry the logged spent amount and DAA (storage mass depends on
+/// amounts only); the computed storage mass is checked against the committed one.
+fn masses_cmd() -> Result<(), String> {
+    use kaspa_consensus_core::tx::{ScriptPublicKey, UtxoEntry};
+    let root = indexer::data_root();
+    let cov = hash_arg(std::fs::read_to_string(root.join("current")).map_err(|_| "no current campaign".to_string())?.trim())?;
+    let dir = indexer::instance_dir(cov);
+    let log = lottery::store::IndexLog::from_jsonl(&std::fs::read_to_string(dir.join("index-log.jsonl")).map_err(|e| e.to_string())?)?;
+    let c: lottery::store::Campaign = lottery::store::read(&std::fs::read_to_string(dir.join("campaign.json")).map_err(|e| e.to_string())?, lottery::store::CAMPAIGN)?;
+    let mut action = std::collections::HashMap::new();
+    for st in &c.steps {
+        for t in &st.txids {
+            action.insert(t.txid, (st.id.clone(), t.action.clone(), t.node.clone()));
+        }
+    }
+    let mut outs: std::collections::HashMap<kaspa_consensus_core::tx::TransactionOutpoint, kaspa_consensus_core::tx::TransactionOutput> = std::collections::HashMap::new();
+    println!("step	action	txid	inputs	outputs	compute	transient	storage	priority	fee_sompi	node");
+    for l in &log.lines {
+        if l.kind != lottery::store::LogKind::Add {
+            continue;
+        }
+        let a = l.accepted()?;
+        // Instance inputs: the logged output they spend; our funding inputs: a P2PK script
+        // of the right size (the runner's own key, `tn10 info`).
+        let p2pk = ScriptPublicKey::from_vec(0, [vec![0x20], vec![0u8; 32], vec![0xac]].concat());
+        let entries: Vec<UtxoEntry> = a
+            .tx
+            .inputs
+            .iter()
+            .zip(&a.spent)
+            .map(|(i, s)| match outs.get(&i.previous_outpoint) {
+                Some(o) => UtxoEntry::new(s.amount, o.script_public_key.clone(), s.daa, false, o.covenant.as_ref().map(|c| c.covenant_id)),
+                None => UtxoEntry::new(s.amount, p2pk.clone(), s.daa, false, None),
+            })
+            .collect();
+        for (k, o) in a.tx.outputs.iter().enumerate() {
+            outs.insert(kaspa_consensus_core::tx::TransactionOutpoint::new(a.tx.id(), k as u32), o.clone());
+        }
+        let m = harness::masses(&a.tx, &entries);
+        if m.storage != a.tx.storage_mass() {
+            return Err(format!("{}: computed storage mass {} != committed {}", a.tx.id(), m.storage, a.tx.storage_mass()));
+        }
+        let fee = a.spent.iter().map(|s| s.amount).sum::<u64>() - a.tx.outputs.iter().map(|o| o.value).sum::<u64>();
+        let (st, act, node) = action.get(&l.txid).cloned().unwrap_or(("-".into(), "(not the runner's)".into(), "-".into()));
+        println!("{st}	{act}	{}	{}	{}	{}	{}	{}	{}	{fee}	{node}", a.tx.id(), a.tx.inputs.len(), a.tx.outputs.len(), m.compute, m.transient, m.storage, m.priority);
+    }
+    Ok(())
+}
+
 async fn bundle_verify_cmd(args: &[String]) -> Result<(), String> {
     let env = load_env();
     let path = PathBuf::from(args.first().ok_or("bundle-verify <file>")?);
@@ -489,6 +541,7 @@ async fn run() -> ExitCode {
         Some("campaign") => campaign_cmd(rest).await,
         Some("bundle") => bundle_cmd(rest).await,
         Some("bundle-verify") => bundle_verify_cmd(rest).await,
+        Some("masses") => masses_cmd(),
         _ => Err(USAGE.into()),
     };
     match res {

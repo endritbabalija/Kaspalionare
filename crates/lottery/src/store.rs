@@ -573,7 +573,8 @@ pub struct RoundJson {
     pub gaps: Vec<String>,
 }
 
-/// A live UTXO (A3 `live_utxos[]`): the state is its redeem script, when known.
+/// A live UTXO of `index/1` (A3 `live_utxos[]`): the state is its redeem script, when known.
+/// (`bundle/1` stores the state bytes only: `bundle::BundleLive`.)
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveJson {
     pub outpoint: OutpointJson,

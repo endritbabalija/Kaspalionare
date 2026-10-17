@@ -997,6 +997,17 @@ fn ix8_bundle_verify() {
         ),
         ("parameter", Box::new(|b| *b.params.get_mut("controller.margin").unwrap() += 1), "params"),
         ("live UTXO script", Box::new(|b| flip(&mut b.live_utxos[3].spk, 4)), "live UTXO"),
+        (
+            "live UTXO state byte",
+            Box::new(|b| {
+                let s = b.live_utxos[3].state.as_mut().unwrap();
+                let n = s.len();
+                flip(s, n / 2)
+            }),
+            "live UTXO",
+        ),
+        ("live UTXO role", Box::new(|b| b.live_utxos[3].role = Role::Marker), "live UTXO"),
+        ("live UTXO round", Box::new(|b| b.live_utxos[3].round = Some(9)), "live UTXO"),
         ("genesis outpoint", Box::new(|b| b.genesis_outpoint.index += 1), "genesis_outpoint"),
         ("network", Box::new(|b| b.network = "mainnet".into()), "mainnet"),
         ("toolchain", Box::new(|b| b.toolchain.silverscript_rev = "0".repeat(40)), "toolchain"),
@@ -1060,6 +1071,47 @@ fn ix8_bundle_verify() {
         }
     }
     assert!(passed.is_empty(), "MF-A: verify accepts a wrong template hash in {passed:?}");
+}
+
+/// S3b fix (A3 amendment): `bundle/1` stores each UTXO's state bytes only, not its redeem
+/// script; the templates carry the prefix and suffix. `verify` rebuilds every redeem as
+/// prefix || state || suffix and compares its P2SH with the output script. The old shape (a
+/// full redeem script in `genesis_states` or `live_utxos[].state`) is refused.
+#[test]
+fn s3b_bundle_state_bytes_only() {
+    let (b, g, f) = local_bundle(|_| {});
+    let t = g.templates();
+    let states = bundle::genesis_states(&g);
+    assert_eq!(b.genesis_states.len(), states.len());
+    for (i, (bytes, s)) in b.genesis_states.iter().zip(&states).enumerate() {
+        let tp = lottery::index::template_of(&t, s.role());
+        let redeem = s.redeem(&t);
+        assert_eq!(redeem, [tp.prefix.as_slice(), bytes, &tp.suffix].concat(), "genesis state {i}: prefix || state || suffix is the redeem");
+        assert_eq!(harness::pay_to_script_hash_script(&redeem), f.tx.outputs[i].script_public_key);
+    }
+    for l in &b.live_utxos {
+        let tp = lottery::index::template_of(&t, l.role);
+        let bytes = l.state.as_ref().unwrap();
+        let redeem = [tp.prefix.as_slice(), bytes, &tp.suffix].concat();
+        assert_eq!(harness::pay_to_script_hash_script(&redeem).script(), l.spk.as_slice());
+    }
+    // The old shape: a full redeem script where the state bytes belong.
+    let mut old = b.clone();
+    old.genesis_states = states.iter().map(|s| s.redeem(&t)).collect();
+    let e = bundle::verify(&old).unwrap_err();
+    assert!(e.contains("genesis state 0") && e.contains("redeem"), "{e}");
+    println!("S3b old-shape genesis states: {e}");
+    let mut old = b.clone();
+    for (l, s) in old.live_utxos.iter_mut().zip(&states) {
+        l.state = Some(s.redeem(&t));
+    }
+    let e = bundle::verify(&old).unwrap_err();
+    assert!(e.contains("live UTXO") && e.contains("redeem"), "{e}");
+    println!("S3b old-shape live UTXOs: {e}");
+    // A round trip through the file keeps the state bytes.
+    let back: Bundle = store::read(&store::write(&b, store::BUNDLE).unwrap(), store::BUNDLE).unwrap();
+    assert_eq!(back, b);
+    bundle::verify(&back).unwrap();
 }
 
 // ---------------------------------------------------------------- IX9
