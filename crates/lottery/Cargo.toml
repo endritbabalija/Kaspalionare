@@ -10,7 +10,8 @@ license.workspace = true
 
 # Spec M7 D101: the `test-seed` feature and its compile_error! gate are deleted (the drawer
 # has one entry, `draw()`, with the anchor proof). `mainnet` keeps the genesis network
-# refusal (the drawer is deployed on testnet or devnet only until the release gate).
+# refusal (the drawer is deployed on testnet, devnet or the private simnet only until the
+# release gate; mainnet is refused).
 [features]
 default = []
 mainnet = []

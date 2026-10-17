@@ -14,8 +14,9 @@
 //!
 //! Spec M7 (D100, D101): the drawer's seed is the anchor block's hash; its miner-withholding
 //! bias is OPEN on the release gate, so the builder still refuses any network other than
-//! testnet or devnet ("the drawer is deployed on testnet or devnet only until the release
-//! gate"). draw_window must be at least VOID_MIN = 2F (D97; the drawer's check 1 enforces it
+//! testnet, devnet or the private simnet of M8 (spec A5b, D114, D125; "the drawer is
+//! deployed on testnet, devnet or the private simnet only until the release gate"); mainnet
+//! is refused. draw_window must be at least VOID_MIN = 2F (D97; the drawer's check 1 enforces it
 //! too since M7 Stage 5 fix A), except with the TEST-ONLY `allow_short_void_window` flag,
 //! itself refused unless the network is testnet or devnet, which also selects the TEST-ONLY
 //! short-void drawer variant (`Templates::test_only_short_void`; `probe void-m7`, D103).
@@ -79,8 +80,9 @@ pub struct GenesisCase {
     /// The deployer's share position (D66, spec M5 A9): round 0, S0 shares, owned by a D11
     /// payout script (the funding key's Schnorr P2PK by default). Value R.
     pub position: PositionState,
-    /// Target network; only testnet and devnet are accepted until the release gate (spec M7
-    /// D100: the seed's miner-withholding bias is OPEN).
+    /// Target network; only testnet, devnet and the private simnet (M8 S4, D114, D125) are
+    /// accepted until the release gate (spec M7 D100: the seed's miner-withholding bias is
+    /// OPEN); mainnet is refused.
     pub network: NetworkType,
     /// TEST-ONLY (spec M7 D103, `probe void-m7`): accept draw_window < VOID_MIN, so a void
     /// can be shown on testnet without waiting 24 h. Refused unless the network is testnet
@@ -515,9 +517,12 @@ impl GenesisCase {
             return Err("controller shard_tpl / marker_tpl / params_tpl do not match the compiled templates (route table, review MF-A)".into());
         }
         // Spec M7 D100: the seed's miner-withholding bias is OPEN on the release gate.
-        if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet) {
+        // M8 S4 (spec A5b, D114, D125): the private simnet node (no peers, the project the
+        // only miner) is allowed with the production templates; the TEST-ONLY short-void
+        // flag above stays testnet/devnet only (no test-only variant on simnet, spec 8 "Out").
+        if !matches!(self.network, NetworkType::Testnet | NetworkType::Devnet | NetworkType::Simnet) {
             return Err(format!(
-                "network {:?}: the drawer is deployed on testnet or devnet only until the release gate (D100: the seed's miner-withholding bias is OPEN)",
+                "network {:?}: the drawer is deployed on testnet, devnet or the private simnet only until the release gate (D100: the seed's miner-withholding bias is OPEN)",
                 self.network
             ));
         }
@@ -720,7 +725,6 @@ mod tests {
             // Spec M7 D97: draw_window >= VOID_MIN = 2F.
             ("draw_window = VOID_MIN - 1", |g| g.drawer.draw_window = VOID_MIN - 1),
             ("mainnet", |g| g.network = NetworkType::Mainnet),
-            ("simnet", |g| g.network = NetworkType::Simnet),
         ];
         for (name, f) in cases {
             let mut g = good.clone();
@@ -735,6 +739,10 @@ mod tests {
         let mut dev = good.clone();
         dev.network = NetworkType::Devnet;
         assert_eq!(dev.validate(), Ok(()));
+        // M8 S4 (D114, D125): the private simnet is accepted with the production templates.
+        let mut sim = good.clone();
+        sim.network = NetworkType::Simnet;
+        assert_eq!(sim.validate(), Ok(()));
         // A mainnet genesis is refused by the builder (D100).
         let mut main = good.clone();
         main.network = NetworkType::Mainnet;
@@ -952,7 +960,7 @@ mod tests {
         let mut main = good.clone();
         main.network = NetworkType::Mainnet;
         let e = main.validate().unwrap_err();
-        assert!(e.contains("testnet or devnet only until the release gate"), "{e}");
+        assert!(e.contains("the private simnet only until the release gate"), "{e}");
     }
 
     /// M7 Stage 5 fix A: the production drawer source carries the void floor VOID_MIN =

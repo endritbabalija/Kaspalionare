@@ -137,7 +137,7 @@ pub enum SoakMode {
 /// The next soak sitting (owner note, spec C8 amended for mode B) given the campaign's
 /// step, the soak's t0 (unix seconds, set by C8a) and now. Times are unix seconds.
 pub fn next_sitting(step: &str, t0: Option<u64>, now: u64, mode: SoakMode) -> String {
-    let at = |s: u64| format!("t0 + {:.1} h (unix {s}, in {:.1} h)", (s - t0.unwrap_or(0)) as f64 / H as f64, s.saturating_sub(now) as f64 / H as f64);
+    let at = |s: u64| format!("t0 + {:.1} h ({}, unix {s}, in {:.1} h)", (s - t0.unwrap_or(0)) as f64 / H as f64, utc(s), s.saturating_sub(now) as f64 / H as f64);
     match (step, t0) {
         ("C8b", Some(t0)) => {
             let (lo, hi) = (t0 + 8 * H, t0 + 24 * H);
@@ -156,9 +156,31 @@ pub fn next_sitting(step: &str, t0: Option<u64>, now: u64, mode: SoakMode) -> St
                 at(t0 + 30 * H)
             )
         }
-        ("C8a", _) => "next sitting: C8a, the soak start (round-6 buys with the indexer running, about 15 min); any time".to_string(),
+        ("C8a", _) => "next sitting: C8a, the soak start (a round past its deadline is closed and drawn empty first, then the soak round's buys with the indexer running, about 30 min); any time".to_string(),
         (s, _) => format!("next step: {s}"),
     }
+}
+
+/// Unix seconds as a UTC wall-clock string, `YYYY-MM-DD HH:MM UTC` (civil-from-days,
+/// H. Hinnant's algorithm; no time-zone crate in tn10).
+pub fn utc(t: u64) -> String {
+    let (days, secs) = ((t / 86_400) as i64, t % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", secs / 3_600, secs % 3_600 / 60)
+}
+
+/// S4: the open round cannot host the soak's buys (its deadline has passed or leaves
+/// under d_min / 2 of sales), so C8a closes and draws it empty first.
+pub fn needs_pre_soak_close(deadline: u64, d_min: u64, virtual_daa: u64) -> bool {
+    virtual_daa + d_min / 2 > deadline
 }
 
 /// A panic in a builder (a reference that rejects) becomes an error.
@@ -1913,6 +1935,48 @@ impl<N: Net> Runner<N> {
     pub async fn c8a(&mut self) -> R<()> {
         let s = "C8a";
         self.sync().await?;
+        // S4: the round left open by C6 (round 7 on testnet-10) may be past its deadline
+        // when the soak starts (no buy possible, shard check 6). Close it (fresh input)
+        // and draw it with no sales first; the fresh close opens the soak round with
+        // d_min of sales.
+        if self.var("soak_round").is_err() {
+            // Test hook (`TN10_DRY_SOAK_LATE=1`, dry run only): let the open round's
+            // deadline pass before the soak, as on testnet-10 after S3b.
+            if self.net.dry() && std::env::var("TN10_DRY_SOAK_LATE").is_ok_and(|v| v == "1") && self.var("c8_empty_round").is_err() {
+                let (_, ctrl) = self.controller()?;
+                self.net.wait_daa(ctrl.deadline as u64 + 3_600, "open round's deadline passed (dry-run hook)").await?;
+                self.sync().await?;
+            }
+            let pre = match self.var("c8_empty_round") {
+                Ok(v) => Some(v.parse::<i64>().map_err(|e| format!("{e}"))?),
+                Err(_) => {
+                    let (_, ctrl) = self.controller()?;
+                    let now = self.net.daa().await?;
+                    if needs_pre_soak_close(ctrl.deadline as u64, ctrl.d_min as u64, now) {
+                        self.set_var("c8_empty_round", ctrl.round);
+                        Some(ctrl.round)
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(r0) = pre {
+                if self.open_round()? == r0 {
+                    let name = format!("round {r0} past its deadline before the soak: closed and drawn with no sales");
+                    if !check_done(&self.c, &name) {
+                        let (_, ctrl) = self.controller()?;
+                        let sales: i64 = self.shards(r0)?.iter().map(|(_, st)| st.sales).sum();
+                        let now = self.net.daa().await?;
+                        self.check(s, &name, sales == 0, format!("deadline {}, virtual DAA {now}, sales {sales}", ctrl.deadline)).await?;
+                    }
+                    self.close(s, &format!("C8a/close r{r0} (no sales, before the soak)")).await?;
+                }
+                let draw = format!("C8a/draw r{r0} (no sales, before the soak)");
+                if !self.done(&draw) {
+                    self.draw(s, &draw, 0).await?;
+                }
+            }
+        }
         let r = match self.var("soak_round") {
             Ok(v) => v.parse().map_err(|e| format!("{e}"))?,
             Err(_) => {
@@ -1924,6 +1988,12 @@ impl<N: Net> Runner<N> {
             }
         };
         self.balance_check(s, &format!("soak round {r}")).await?;
+        let (_, ctrl) = self.controller()?;
+        let now = self.net.daa().await?;
+        if ctrl.round == r && !self.done(&format!("C8/buy/{}", self.opts.buys - 1)) && now + ctrl.d_min as u64 / 2 > ctrl.deadline as u64 {
+            return Err(format!("{s}: soak round {r}'s deadline {} is too close (virtual DAA {now}) for the soak buys", ctrl.deadline));
+        }
+        println!("  soak round {r}: deadline {} (virtual DAA {now}, {} DAA of sales left)", ctrl.deadline, (ctrl.deadline as u64).saturating_sub(now));
         let specs = self.round_specs("C8", r, self.opts.buys, 4, false);
         self.buys(s, specs).await
     }
@@ -2187,5 +2257,24 @@ mod tests {
         assert!(c.contains("t0 + 29.5 h") && c.contains("t0 + 30.0 h"), "{c}");
         assert!(next_sitting("C8c", Some(t0), t0, SoakMode::A).contains("t0 + 20.0 h"));
         assert_eq!(next_sitting("C5", Some(t0), t0, SoakMode::B), "next step: C5");
+        // S4: the windows carry a wall-clock date (UTC).
+        assert!(b.contains(&utc(t0 + 8 * H)) && b.contains(&utc(t0 + 24 * H)), "{b}");
+        assert!(c.contains(&utc(t0 + 29 * H + H / 2)), "{c}");
+    }
+
+    #[test]
+    fn utc_wall_clock() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(951_782_400), "2000-02-29 00:00 UTC");
+        // S3b's C7 step wall time (2026-10-17 02:21:47 local, UTC+2).
+        assert_eq!(utc(1_792_196_507), "2026-10-17 00:21 UTC");
+    }
+
+    #[test]
+    fn pre_soak_close_when_the_open_round_cannot_sell() {
+        // S3b left round 7 open with its deadline at about DAA 598,625,800.
+        assert!(needs_pre_soak_close(598_625_800, 6_000, 598_700_000));
+        assert!(needs_pre_soak_close(598_625_800, 6_000, 598_623_000));
+        assert!(!needs_pre_soak_close(598_625_800, 6_000, 598_622_000));
     }
 }

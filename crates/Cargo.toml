@@ -1,5 +1,5 @@
 [workspace]
-members = ["harness", "lottery", "tn10"]
+members = ["harness", "lottery", "tn10", "simnet"]
 default-members = ["harness", "lottery"]
 resolver = "2"
 
