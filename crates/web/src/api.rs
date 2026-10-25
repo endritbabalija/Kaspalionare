@@ -306,6 +306,87 @@ pub fn build_buy(net: Net, i: &BuyInput) -> Result<BuiltTx> {
     built(net, &i.funds, |f| cases::buy(&cov, &shard, &purchases, &choice, f))
 }
 
+/// Spec S1, 7 (front end F3 part B): the cost panel of a built `buy()`, every figure computed
+/// here and checked against the transaction (`BuyFigures`). `built` must pass `unsigned_of`
+/// first (each of its own figures bound to its transaction), and the shard must be a live
+/// object of the instance (`cases::live`; its entry from a public node by outpoint). A figure
+/// the transaction does not bear out is `built_mismatch`.
+pub fn buy_figures(net: Net, i: &BuyFiguresInput) -> Result<BuyFigures> {
+    use lottery::state::TicketState;
+    let cov = cov_of(&i.covenant_id)?;
+    let u = unsigned_of(net, &i.built)?;
+    let so = obj("shard", &i.shard)?;
+    let s = cases::shard(&so, &cov)?;
+    verify::check_shard(&s)?;
+    let bad = |what: &str| Error::new(Code::BuiltMismatch, format!("buy figures: {what}"));
+    if u.tx.inputs.first().map(|x| x.previous_outpoint) != Some(so.outpoint) || u.entries.first() != Some(&so.entry) {
+        return Err(bad("input 0 does not spend the given shard"));
+    }
+    let bundle = combos(&i.bundle)?;
+    let payout = net.payout_of("payout", &i.payout)?;
+    let referrer = i.referrer.as_deref().map(|r| net.payout_of("referrer", r)).transpose()?;
+    let b = bundle.len() as u64;
+    let of = |what: &str| Error::new(Code::Overflow, what.to_string());
+    let price = b.checked_mul(s.price as u64).ok_or_else(|| of("b x price"))?;
+    let deposit = b.checked_mul(s.d as u64).ok_or_else(|| of("b x d"))?;
+    let ticket = State::Ticket(TicketState::new(&s, &bundle, &payout, b_max()));
+    let tspk = verify::state_spk(&ticket)?;
+    let out = |n: usize| u.tx.outputs.get(n).ok_or_else(|| bad(&format!("no output {n}")));
+    let t = out(1)?;
+    if t.script_public_key != tspk || t.value != deposit || t.covenant.is_none() {
+        return Err(bad("output 1 is not this bundle's ticket holding b x d"));
+    }
+    let (r, enough) = cases::referral(&s, bundle.len())?;
+    let paid = enough && referrer.is_some();
+    let r_out = if paid { r } else { 0 };
+    let succ = so.entry.amount.checked_add(price).and_then(|x| x.checked_sub(r_out)).ok_or_else(|| of("shard successor"))?;
+    let s0 = out(0)?;
+    if s0.value != succ || s0.covenant.is_none() {
+        return Err(bad("output 0 is not the shard's successor value"));
+    }
+    let mut rest = 2;
+    if paid {
+        let ro = out(2)?;
+        let want = referrer.as_ref().map(|p| p.spk());
+        if ro.value != r || ro.covenant.is_some() || Some(&ro.script_public_key) != want.as_ref() {
+            return Err(bad("output 2 is not the referral"));
+        }
+        rest = 3;
+    }
+    for (n, o) in i.built.summary.outputs.iter().enumerate().skip(rest) {
+        if !o.to_wallet {
+            return Err(bad(&format!("output {n} is neither the referral nor back to the wallet")));
+        }
+    }
+    let fee = u.fee;
+    let wallet_in = dec("summary.walletIn", &i.built.summary.wallet_in)?;
+    let wallet_back = dec("summary.walletBack", &i.built.summary.wallet_back)?;
+    let total = wallet_in.checked_sub(wallet_back).ok_or_else(|| of("wallet total"))?;
+    if Some(total) != price.checked_add(deposit).and_then(|x| x.checked_add(fee)) {
+        return Err(bad("what the wallet loses is not price + deposit + fee"));
+    }
+    let back = s.deadline.checked_add(lottery::game::D_RET).ok_or_else(|| of("T + D_RET"))?;
+    let tbytes = verify::state_bytes(&ticket)?;
+    let referral_address = if paid { referrer.as_ref().and_then(|p| net.address(&p.spk())) } else { None };
+    Ok(BuyFigures {
+        round: s.round.to_string(),
+        shard_index: s.shard_index as u32,
+        b: b as u32,
+        price: price.to_string(),
+        deposit: deposit.to_string(),
+        deposit_back: back.to_string(),
+        referral: ReferralFigure { amount: r.to_string(), paid, address: referral_address },
+        fee: fee.to_string(),
+        total: total.to_string(),
+        ticket: TicketOut {
+            index: 1,
+            state: hex(&tbytes),
+            script_public_key: convert::spk_hex(&tspk),
+            address: net.address(&tspk).ok_or_else(|| bad("the ticket has no address"))?,
+        },
+    })
+}
+
 pub fn build_claim(net: Net, i: &ClaimInput) -> Result<BuiltTx> {
     let cov = cov_of(&i.covenant_id)?;
     let ticket = obj("ticket", &i.ticket)?;

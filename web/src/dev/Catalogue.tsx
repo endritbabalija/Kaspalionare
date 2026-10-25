@@ -11,6 +11,7 @@ import { JackpotCountdown } from '@/components/JackpotCountdown';
 import { NumberBall, type NumberBallState } from '@/components/NumberBall';
 import { RoundStatusPill } from '@/components/RoundStatusPill';
 import { Time } from '@/components/Time';
+import { TicketRow } from '@/components/TicketRow';
 import { TxProgress } from '@/components/TxProgress';
 import { RoundCardView } from '@/screens/play/RoundCard';
 
@@ -98,13 +99,19 @@ function Sheet() {
         <TxProgress step="signed" failed="The network node refused the request." />
         <TxProgress step="built" rebuilt={{ tries: 1, max: 3 }} />
       </Row>
+      <Row name="Ticket builder row: combination · remove">
+        <ul className="m-0 w-full list-none p-0">
+          <TicketRow index={0} main={[3, 7, 12, 19, 28]} bonus={2} onRemove={() => undefined} />
+          <TicketRow index={1} main={[3, 7, 12, 19, 28]} bonus={2} />
+        </ul>
+      </Row>
       <Row name="Cost panel: empty · estimating · ready · fee too high">
         {(['empty', 'estimating', 'ready', 'fee-too-high'] as const).map((s) => (
           <div key={s} className="w-full">
             <CostPanel
               state={s}
               rows={[
-                { id: 'price', name: 'Tickets', sompi: '200000000' },
+                { id: 'price', name: 'Price', sompi: '200000000' },
                 { id: 'deposit', name: 'Deposit', sompi: '26000000', note: 'back 2 Nov' },
                 { id: 'fee', name: 'Network fee', sompi: '32254200' },
                 { id: 'referral', name: 'Referral', sompi: '20000000', note: 'qqdasd…phyfvu' },

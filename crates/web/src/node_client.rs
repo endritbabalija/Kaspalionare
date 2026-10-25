@@ -175,7 +175,8 @@ async fn submit(n: Net, s: Signed) -> Result<String> {
         return Err(Error::new(Code::InputFormat, "the signed transaction's id is not its stated id"));
     }
     let _ = n;
-    let id = c.submit_transaction((&tx).into(), false).await.map_err(|e| rpc_err("submitTransaction", e))?;
+    // An input already spent (shard contention, spec S1) is `node_conflict`: the page rebuilds.
+    let id = c.submit_transaction((&tx).into(), false).await.map_err(|e| node::submit_refusal(rpc_err("submitTransaction", e)))?;
     Ok(convert::hex(&id.as_bytes()))
 }
 
@@ -224,6 +225,14 @@ pub async fn node_entries(#[wasm_bindgen(unchecked_param_type = "ApiObject[]")] 
 #[wasm_bindgen(js_name = nodeCoins, unchecked_return_type = "Outcome<Utxo[]>")]
 pub async fn node_coins(address: String) -> JsValue {
     let r = async { coins(net()?, address).await };
+    out(r.await)
+}
+
+/// A wallet address's balance (sompi): the total of its plain coins as the node reports them
+/// (spec S7; never the wallet's own word).
+#[wasm_bindgen(js_name = nodeBalance, unchecked_return_type = "Outcome<Dec>")]
+pub async fn node_balance(address: String) -> JsValue {
+    let r = async { node::coins_total(&coins(net()?, address).await?) };
     out(r.await)
 }
 

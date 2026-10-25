@@ -340,6 +340,75 @@ pub struct BuiltTx {
     pub summary: Summary,
 }
 
+// ------------------------------------------------------------------------------ buy figures
+
+/// `buyFigures` (spec S1, 7; front end F3 part B): the cost panel's rows of a built `buy()`,
+/// computed in Rust and bound to the transaction: the `BuyInput` fields that fix the ticket
+/// (the shard, the bundle, the payout and the referrer) and the `BuiltTx` that `buildBuy`
+/// returned for them.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuyFiguresInput {
+    pub covenant_id: Hex,
+    pub shard: CovUtxo,
+    pub bundle: Vec<Combination>,
+    pub payout: Address,
+    #[serde(default)]
+    pub referrer: Option<Address>,
+    pub built: BuiltTx,
+}
+
+/// The referral of a purchase (spec 7): r = floor(b x p x s_R / 10^4), paid to `address` only
+/// if a referrer is named and r >= M_REF; otherwise there is no referral output and the share
+/// stays in the round (`paid` false, `address` absent).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferralFigure {
+    pub amount: Dec,
+    pub paid: bool,
+    pub address: Option<Address>,
+}
+
+/// The ticket a built `buy()` creates (output 1): its full state bytes (R1), its script and
+/// address, for the local copy (spec 6.3) and to read its entry from a node once accepted.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TicketOut {
+    pub index: u32,
+    pub state: Hex,
+    pub script_public_key: Hex,
+    pub address: Address,
+}
+
+/// The cost panel of a built `buy()` (spec S1, 7: figure rows from the built transaction).
+/// Each figure is checked against the transaction: input 0 spends the given shard, output 0
+/// is its successor's value, output 1 is the ticket of this bundle and payout holding the
+/// deposits, the referral output is there exactly when paid, every other plain output comes
+/// back to the wallet, and `total` (what the wallet's coins lose) = price + deposit + fee
+/// (`built_mismatch` otherwise).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuyFigures {
+    pub round: Dec,
+    pub shard_index: u32,
+    /// Combinations on the ticket.
+    pub b: u32,
+    /// b x p (sompi): into the round (the referral, when paid, comes out of it).
+    pub price: Dec,
+    /// b x d (sompi): held in the ticket, returned with its last claim or by
+    /// `return_deposit()`.
+    pub deposit: Dec,
+    /// T + D_RET (DAA score): from then on `return_deposit()` is valid on the ticket alone
+    /// (`ticket.sil` A5b.3), whatever happens to the round.
+    pub deposit_back: Dec,
+    pub referral: ReferralFigure,
+    /// The network fee (sompi), at the node's fee rate.
+    pub fee: Dec,
+    /// What leaves the wallet: price + deposit + fee.
+    pub total: Dec,
+    pub ticket: TicketOut,
+}
+
 /// `assemble`: the built transaction and the wallet's returned Safe JSON.
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -1,8 +1,12 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import type { Ctx } from '@/net/round';
+import { captureReferral } from '@/referral/referral';
 import { Play } from '@/screens/Play';
 import { Placeholder } from '@/screens/Placeholder';
+import { Wallet } from '@/screens/Wallet';
 import { useTheme } from '@/theme/useTheme';
+import { useWallet } from '@/wallet/context';
+import { WalletProvider } from '@/wallet/session';
 import { SessionContext } from './context';
 import { Shell } from './Shell';
 import { useRoute } from './useRoute';
@@ -12,7 +16,24 @@ import { useRoute } from './useRoute';
 const Catalogue = import.meta.env.DEV ? lazy(() => import('@/dev/Catalogue')) : null;
 
 export function App({ ctx }: { ctx: Ctx }) {
+  // Spec 7: a ?ref= link is validated by the wasm and remembered (once per page load).
+  useEffect(() => {
+    void captureReferral(ctx.lottery, window.location.search).then((r) => {
+      if (r.kind === 'refused') console.info(`referral link refused: ${r.reason}`);
+    });
+  }, [ctx]);
+  return (
+    <SessionContext.Provider value={ctx}>
+      <WalletProvider ctx={ctx}>
+        <Screens ctx={ctx} />
+      </WalletProvider>
+    </SessionContext.Provider>
+  );
+}
+
+function Screens({ ctx }: { ctx: Ctx }) {
   const config = ctx.config;
+  const wallet = useWallet();
   const route = useRoute();
   const { choice, setChoice } = useTheme();
 
@@ -37,7 +58,7 @@ export function App({ ctx }: { ctx: Ctx }) {
       screen = <Placeholder title="Backup" testId="backup" />;
       break;
     case 'wallet':
-      screen = <Placeholder title="Wallet" testId="wallet" />;
+      screen = <Wallet />;
       break;
     case 'catalogue':
       screen = Catalogue ? (
@@ -51,11 +72,16 @@ export function App({ ctx }: { ctx: Ctx }) {
   }
 
   return (
-    <SessionContext.Provider value={ctx}>
-      <Shell route={route} network={config.network} theme={choice} onTheme={setChoice} wide={route === 'catalogue'}>
-        {screen}
-      </Shell>
-    </SessionContext.Provider>
+    <Shell
+      route={route}
+      network={config.network}
+      theme={choice}
+      onTheme={setChoice}
+      wide={route === 'catalogue'}
+      referralAddress={wallet.address}
+    >
+      {screen}
+    </Shell>
   );
 }
 

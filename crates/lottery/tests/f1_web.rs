@@ -205,9 +205,19 @@ fn small_change_and_short_draws_have_their_codes() {
             Err(e) => format!("{e}"),
         };
         println!("coin = cost + need0 ({need0}) + {extra}: {what}");
+        // Owner decision (DECISIONS 2026-10-26 (2)): a leftover of exactly zero builds without a
+        // change output and with no extra fee; any other leftover below dust stays `change_dust`.
         match r {
-            Ok(u) => assert_eq!(u.tx.outputs.len(), 3, "accepted only with its change output"),
-            Err(e) => assert_eq!(e.code, Code::ChangeDust, "extra {extra}: {e}"),
+            Ok(u) if extra == 0 => {
+                assert_eq!(u.tx.outputs.len(), 2, "the exact-coin buy has no change output");
+                assert_eq!(u.fee, build::fee_of(&u.masses, rate).unwrap(), "the exact-coin buy pays no extra fee");
+                assert_eq!(u.fee, need0, "the exact-coin buy pays the no-change fee");
+            }
+            Ok(u) => assert_eq!(u.tx.outputs.len(), 3, "extra {extra}: accepted only with its change output"),
+            Err(e) => {
+                assert_ne!(extra, 0, "a leftover of exactly zero builds without change: {e}");
+                assert_eq!(e.code, Code::ChangeDust, "extra {extra}: {e}")
+            }
         }
         seen.push(extra);
     }
@@ -448,7 +458,8 @@ fn error_codes_are_stable() {
          9 store_incomplete,10 anchor_invalid,11 input_range,12 funding_short,13 wallet_script,14 coin_unconfirmed,15 overflow,16 refused,\
          17 policy,18 encode,19 mass,20 engine,21 templates,22 fee_rate,23 signed_changed,24 signed_missing,25 signature_form,26 signature_invalid,\
          27 address_network,28 input_format,29 not_started,30 mainnet_refused,31 built_mismatch,32 owner_type,33 change_dust,34 mixed_signers,\
-         35 node_unavailable,36 node_network,37 node_refused,38 indexer_unavailable,39 worker_stopped"
+         35 node_unavailable,36 node_network,37 node_refused,38 indexer_unavailable,39 worker_stopped,40 node_conflict,\
+         41 wallet_missing,42 wallet_rejected,43 wallet_network,44 storage_unavailable"
     );
     let msgs: std::collections::HashSet<&str> = Code::ALL.iter().map(|c| c.message()).collect();
     assert_eq!(msgs.len(), Code::ALL.len(), "one distinct message per code");

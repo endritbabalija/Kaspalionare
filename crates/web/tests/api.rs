@@ -966,3 +966,103 @@ fn old_to_wallet_rule_reproduces_the_pre_review_golden_file() {
     }
     assert_eq!(same, old.len());
 }
+
+// ------------------------------------------------------------------------------ F3 part B
+
+fn figures_input(b: &BuyInput, built: &BuiltTx) -> BuyFiguresInput {
+    BuyFiguresInput { covenant_id: b.covenant_id.clone(), shard: b.shard.clone(), bundle: b.bundle.clone(), payout: b.payout.clone(), referrer: b.referrer.clone(), built: built.clone() }
+}
+
+/// Spec S1, 7: the cost panel's rows come from Rust and are bound to the built transaction.
+/// Every figure is checked against it; an input that does not fix this transaction's ticket
+/// (another bundle, payout or referrer) or a tampered `BuiltTx` is `built_mismatch`.
+#[test]
+fn buy_figures_are_bound_to_the_transaction() {
+    for name in ["buy b=1 ref", "buy b=4"] {
+        let (_, inp) = find(name);
+        let Input::Buy(b) = inp else { unreachable!() };
+        let built = api::build_buy(Net::Testnet10, &b).unwrap();
+        let f = api::buy_figures(Net::Testnet10, &figures_input(&b, &built)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let shard = match api::decode_state(Net::Testnet10, web::views::RoleName::Shard, &b.shard.state).unwrap() {
+            web::views::StateView::Shard(s) => s,
+            _ => unreachable!(),
+        };
+        let n = b.bundle.len() as u64;
+        let p: u64 = shard.price.parse().unwrap();
+        let d: u64 = shard.d.parse().unwrap();
+        let s_r: u64 = shard.s_r.parse().unwrap();
+        assert_eq!(f.b as u64, n);
+        assert_eq!(f.price, (n * p).to_string(), "{name}: price = b x p");
+        assert_eq!(f.deposit, (n * d).to_string(), "{name}: deposit = b x d");
+        assert_eq!(f.deposit_back, (shard.deadline.parse::<i64>().unwrap() + lottery::game::D_RET).to_string(), "{name}: T + D_RET");
+        assert_eq!(f.referral.amount, (n * p * s_r / 10_000).to_string(), "{name}: r");
+        assert_eq!(f.referral.paid, b.referrer.is_some() && n * p * s_r / 10_000 >= lottery::buy::M_REF, "{name}: paid");
+        assert_eq!(f.referral.address, if f.referral.paid { b.referrer.clone() } else { None });
+        assert_eq!(f.fee, built.fee);
+        let (win, back): (u64, u64) = (built.summary.wallet_in.parse().unwrap(), built.summary.wallet_back.parse().unwrap());
+        assert_eq!(f.total, (win - back).to_string(), "{name}: total = what the wallet loses");
+        assert_eq!(f.total, (n * p + n * d + built.fee.parse::<u64>().unwrap()).to_string(), "{name}: total = price + deposit + fee");
+        assert_eq!(built.summary.outputs[1].address.as_deref(), Some(f.ticket.address.as_str()), "{name}: the ticket is output 1");
+        match api::decode_state(Net::Testnet10, web::views::RoleName::Ticket, &f.ticket.state).unwrap() {
+            web::views::StateView::Ticket(t) => assert_eq!(t.b, n.to_string(), "{name}: the ticket's state"),
+            _ => unreachable!(),
+        }
+        println!("{name}: price {} deposit {} (back at DAA {}) referral {} paid {} fee {} total {}", f.price, f.deposit, f.deposit_back, f.referral.amount, f.referral.paid, f.fee, f.total);
+
+        // Inputs that do not fix this transaction's ticket.
+        let mut other = figures_input(&b, &built);
+        other.bundle[0].bonus = if other.bundle[0].bonus == 1 { 2 } else { 1 };
+        let mut payout = figures_input(&b, &built);
+        payout.payout = addr(&lottery::state::Payout::Schnorr([0x44; 32]));
+        let mut referrer = figures_input(&b, &built);
+        referrer.referrer = if b.referrer.is_some() { None } else { Some(addr(&lottery::state::Payout::Schnorr([0x45; 32]))) };
+        let mut fee = figures_input(&b, &built);
+        fee.built.fee = (built.fee.parse::<u64>().unwrap() + 1).to_string();
+        let mut shard_lie = figures_input(&b, &built);
+        shard_lie.shard.utxo.index ^= 1;
+        let mut cases = vec![("another bundle", other), ("another payout", payout), ("a fee changed in BuiltTx", fee), ("another shard outpoint", shard_lie)];
+        if b.referrer.is_some() || n * p * s_r / 10_000 >= lottery::buy::M_REF {
+            cases.push(("the referrer changed", referrer));
+        }
+        for (what, x) in cases {
+            let e = api::buy_figures(Net::Testnet10, &x).expect_err(what);
+            assert_eq!(e.code, Code::BuiltMismatch, "{name}: {what}: {e}");
+        }
+        // A shard state that is not the UTXO's: the shard check refuses first.
+        let mut wrong = figures_input(&b, &built);
+        let (_, claim) = find("claim k=4");
+        let Input::Claim(c) = claim else { unreachable!() };
+        wrong.shard.state = c.ticket.state.clone();
+        assert!(api::buy_figures(Net::Testnet10, &wrong).is_err(), "{name}: a ticket's bytes as the shard");
+    }
+}
+
+/// The page's Vitest suite (`web/src/wallet/postsign.test.ts`) builds from these fixture
+/// inputs in the real wasm (with its own fresh quick-wallet key put in place of the fixture
+/// wallet's coins), so the file must be the fixtures' current page JSON. It holds no key.
+const PAGE_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/src/test/fixtures/page-inputs.json");
+
+fn page_fixtures() -> String {
+    let mut m = serde_json::Map::new();
+    for name in ["buy b=1 ref", "buy b=4", "close k=16"] {
+        let (_, inp) = find(name);
+        m.insert(name.into(), inp.json());
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(m)).unwrap() + "\n"
+}
+
+#[test]
+fn page_fixtures_are_current() {
+    let want = page_fixtures();
+    let have = std::fs::read_to_string(PAGE_FIXTURES).unwrap_or_default().replace("\r\n", "\n");
+    assert!(have == want, "{PAGE_FIXTURES} is stale: run `cargo test -p web --release --test api -- --ignored write_page_fixtures`");
+    assert!(!want.contains(&hex(&WALLET_SK)), "the fixture wallet's secret key is not in the page fixtures");
+}
+
+#[test]
+#[ignore]
+fn write_page_fixtures() {
+    std::fs::create_dir_all(std::path::Path::new(PAGE_FIXTURES).parent().unwrap()).unwrap();
+    std::fs::write(PAGE_FIXTURES, page_fixtures()).unwrap();
+    println!("wrote {PAGE_FIXTURES}");
+}

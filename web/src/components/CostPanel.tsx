@@ -38,11 +38,11 @@ export function CostPanel({ state, rows, total, warning }: CostPanelProps) {
       </h2>
       {rows.map((r) => (
         <div key={r.id} data-testid={`cost-row-${r.id}`} className="flex min-h-11 items-center justify-between gap-3">
-          <span>{r.name}</span>
-          <span className="flex items-center gap-2">
-            {r.note && <span className="font-mono text-[13px] text-graphite">{r.note}</span>}
-            <Value state={state} sompi={r.sompi} testId={`cost-${r.id}`} />
+          <span className="flex min-w-0 flex-col">
+            <span>{r.name}</span>
+            {r.note && <span className="font-mono text-[12px] break-all text-graphite">{r.note}</span>}
           </span>
+          <Value state={state} sompi={r.sompi} testId={`cost-${r.id}`} />
         </div>
       ))}
       <div className="flex min-h-11 items-center justify-between border-t border-rule pt-1 font-semibold">

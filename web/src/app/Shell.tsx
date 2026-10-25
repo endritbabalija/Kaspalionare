@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/cn';
+import { referralLink } from '@/referral/referral';
 import { isChoice, type ThemeChoice } from '@/theme/theme';
 import { MENU, NAV, href, type Route } from './routes';
 
@@ -39,13 +40,6 @@ export function NetworkBadge({ network }: { network: string }) {
   );
 }
 
-function referralLink(address: string): string {
-  const u = new URL(window.location.href);
-  u.hash = '';
-  u.search = `?ref=${encodeURIComponent(address)}`;
-  return u.toString();
-}
-
 export function Shell({ route, network, theme, onTheme, referralAddress, wide, children }: ShellProps) {
   return (
     <div className={cn('mx-auto flex min-h-dvh w-full flex-col', wide ? 'max-w-[1200px]' : 'max-w-[560px]')}>
@@ -53,7 +47,7 @@ export function Shell({ route, network, theme, onTheme, referralAddress, wide, c
         <div className="flex items-center gap-2">
           <a
             href={href('play')}
-            className="text-lg font-semibold tracking-tight text-ink no-underline"
+            className="inline-flex min-h-11 items-center text-lg font-semibold tracking-tight text-ink no-underline"
             data-testid="brand"
           >
             Kaspalionare
@@ -62,14 +56,18 @@ export function Shell({ route, network, theme, onTheme, referralAddress, wide, c
         </div>
         <div className="flex items-center gap-2">
           <Button asChild variant="secondary" data-testid="connect-button">
-            <a href={href('wallet')} className="no-underline">
-              Connect
+            <a
+              href={href('wallet')}
+              className="font-mono no-underline"
+              aria-label={referralAddress ? `Wallet ${referralAddress}` : 'Connect'}
+            >
+              {referralAddress ? `…${referralAddress.slice(-6)}` : 'Connect'}
             </a>
           </Button>
           {/* Non-modal: a modal menu sets aria-hidden on the page while it keeps focusable elements (axe aria-hidden-focus). */}
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
-              <Button variant="secondary" size="icon" aria-label="Menu" data-testid="menu-button">
+              <Button variant="secondary" size="icon" aria-label="Menu" data-testid="menu-button" className="shrink-0">
                 <svg
                   width="18"
                   height="18"
@@ -112,7 +110,10 @@ export function Shell({ route, network, theme, onTheme, referralAddress, wide, c
               <DropdownMenuItem
                 data-testid="menu-referral"
                 disabled={!referralAddress}
-                onSelect={() => referralAddress && void navigator.clipboard?.writeText(referralLink(referralAddress))}
+                onSelect={() =>
+                  referralAddress &&
+                  void navigator.clipboard?.writeText(referralLink(referralAddress, window.location.href))
+                }
               >
                 Copy referral link
               </DropdownMenuItem>

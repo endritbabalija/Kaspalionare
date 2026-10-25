@@ -170,6 +170,19 @@ pub fn script_of(address: &str) -> JsValue {
     out(net().and_then(|n| api::script_of(n, address)))
 }
 
+/// Spec S1, 7: the cost panel's rows of a built `buy()`, each checked against its transaction.
+#[wasm_bindgen(js_name = buyFigures, unchecked_return_type = "Outcome<BuyFigures>")]
+pub fn buy_figures(#[wasm_bindgen(unchecked_param_type = "BuyFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| api::buy_figures(n, &parse("input", input)?)))
+}
+
+/// The local store's format (spec 6.3, `webstore/1`): its name, version and object stores.
+#[wasm_bindgen(js_name = webstoreInfo, unchecked_return_type = "WebstoreInfo")]
+pub fn webstore_info() -> JsValue {
+    let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    crate::webstore::info().serialize(&ser).unwrap_or(JsValue::NULL)
+}
+
 // ------------------------------------------------------------------------------ indexer API (F2)
 
 /// The size caps of the indexer API's responses (bytes; the server enforces the same).

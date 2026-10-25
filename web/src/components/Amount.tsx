@@ -21,7 +21,7 @@ export function Amount({ sompi, className, testId = 'amount' }: AmountProps) {
       data-sompi={sompi}
       aria-pressed={exact}
       onClick={() => setExact((x) => !x)}
-      className={cn('min-h-11 cursor-pointer text-left font-mono tabular-nums', className)}
+      className={cn('min-h-11 shrink-0 cursor-pointer text-left font-mono whitespace-nowrap tabular-nums', className)}
     >
       {text}
     </button>

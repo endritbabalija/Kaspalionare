@@ -1,65 +1,9 @@
 // F3 part A smoke run against the simnet dev run (spec 8): the round card shows real chain data (checked
 // against the indexer API the dev run serves), both themes, the remembered theme switch, axe-core with no
 // serious or critical issue on what exists, and every interactive element named with a data-testid.
-import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
-
-const web = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')));
-const shots = path.join(web, 'test-results', 'shots');
-
-interface DevRun {
-  api: string;
-  covenantId: string;
-  network: string;
-}
-
-function devRun(): DevRun {
-  const p = path.join(web, '..', 'crates', 'target', 'simnet-dev', 'current.json');
-  const text = readFileSync(p, 'utf8');
-  return JSON.parse(text) as DevRun;
-}
-
-async function roundCardReady(page: Page) {
-  const card = page.getByTestId('round-card');
-  await expect(card).toHaveAttribute('data-state', /ready|stale/);
-  return card;
-}
-
-async function axe(page: Page, label: string) {
-  const r = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
-  const bad = r.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
-  for (const v of r.violations) console.log(`axe ${label}: ${v.impact} ${v.id} (${v.nodes.length})`);
-  expect(
-    bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`),
-    label,
-  ).toEqual([]);
-  return r.violations.length;
-}
-
-/** Spec 8 AX check: every interactive element has a data-testid and an accessible name. */
-async function namedAndTagged(page: Page) {
-  const missing = await page.evaluate(() => {
-    const sel = 'button, a[href], input, select, textarea, [role="menuitem"], [role="menuitemradio"], [role="tab"]';
-    const out: string[] = [];
-    for (const el of Array.from(document.querySelectorAll<HTMLElement>(sel))) {
-      const labelled = el.getAttribute('aria-labelledby');
-      const name =
-        el.getAttribute('aria-label') ??
-        (labelled
-          ? labelled
-              .split(' ')
-              .map((id) => document.getElementById(id)?.textContent ?? '')
-              .join(' ')
-          : el.textContent);
-      if (!el.dataset.testid) out.push(`no data-testid: ${el.outerHTML.slice(0, 120)}`);
-      if (!name || !name.trim()) out.push(`no name: ${el.outerHTML.slice(0, 120)}`);
-    }
-    return out;
-  });
-  expect(missing).toEqual([]);
-}
+import { expect, test } from '@playwright/test';
+import { axe, devRun, namedAndTagged, roundCardReady, shots } from './helpers';
 
 test('the round card shows the open round from the simnet, checked against the node', async ({ page, request }) => {
   const run = devRun();
@@ -87,44 +31,64 @@ test('the round card shows the open round from the simnet, checked against the n
   await namedAndTagged(page);
 });
 
-// Chromium answers `prefers-color-scheme: light` when no preference is set (checked: emulated no-preference
-// matches light), so "no preference shows dark" (D139) is covered by the unit test of resolveTheme and by
-// theme-boot.js's rule (dark unless the device asks for light); here the device's two answers.
-test('the device setting picks the theme, both drawn from the tokens', async ({ browser }) => {
-  for (const [scheme, theme, ground] of [
-    ['dark', 'dark', 'rgb(14, 16, 18)'],
-    ['light', 'light', 'rgb(246, 246, 243)'],
-  ] as const) {
+// Owner decision 2026-10-26 (amends D139): a first-time visitor always sees dark, whatever the device's
+// colour-scheme setting; "device" is a menu choice that follows prefers-color-scheme; the choice is remembered.
+test('a first-time visitor sees dark under either device setting; both themes drawn from the tokens', async ({
+  browser,
+}) => {
+  for (const scheme of ['dark', 'light'] as const) {
     const ctx = await browser.newContext({ colorScheme: scheme, viewport: { width: 390, height: 844 } });
     const page = await ctx.newPage();
     await page.goto('/');
-    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-    expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe(ground);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(14, 16, 18)');
     await roundCardReady(page);
-    await axe(page, `play ${scheme}`);
-    if (scheme === 'light') await page.screenshot({ path: path.join(shots, 'play-light.png'), fullPage: true });
+    await axe(page, `play dark (device ${scheme})`);
     await ctx.close();
   }
+  const ctx = await browser.newContext({ colorScheme: 'dark', viewport: { width: 390, height: 844 } });
+  const page = await ctx.newPage();
+  await page.goto('/');
+  await page.getByTestId('menu-button').click();
+  await page.getByTestId('theme-light').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(246, 246, 243)');
+  await roundCardReady(page);
+  await axe(page, 'play light');
+  await page.screenshot({ path: path.join(shots, 'play-light.png'), fullPage: true });
+  await ctx.close();
 });
 
-test('the menu switch overrides the device setting and is remembered', async ({ browser }) => {
+test('the menu switch overrides the first-visit dark and is remembered; device follows the device', async ({
+  browser,
+}) => {
   const ctx = await browser.newContext({ colorScheme: 'light', viewport: { width: 390, height: 844 } });
   const page = await ctx.newPage();
   await page.goto('/');
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.getByTestId('menu-button').click();
   await expect(page.getByTestId('menu')).toBeVisible();
+  await expect(page.getByTestId('theme-dark')).toHaveAttribute('aria-checked', 'true');
   await axe(page, 'menu open');
   await namedAndTagged(page);
-  await page.getByTestId('theme-dark').click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.getByTestId('theme-light').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await page.reload();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await page.getByTestId('menu-button').click();
   await page.getByTestId('theme-device').click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.getByTestId('menu-button').click();
+  await page.getByTestId('theme-dark').click();
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await ctx.close();
 });
 

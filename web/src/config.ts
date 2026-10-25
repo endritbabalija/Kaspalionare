@@ -15,8 +15,10 @@ export interface Config {
   covenantId: string;
   /** The launch bundle's blake2b-256 (spec 6.5), if pinned. */
   bundleHash: string | undefined;
-  /** The site owner's referral address (a kaspatest: address; spec 7). */
+  /** The site owner's referral address (a kaspatest: address; spec 7; kaspasim: on the simnet dev run). */
   referralAddress: string | undefined;
+  /** The testnet-10 faucet the wallet sheet links to (spec S7; https only). */
+  faucetLink: string | undefined;
   /** The testnet block explorer (transactions at <url>/txs/<id>, addresses at <url>/addresses/<a>). */
   explorerUrl: string | undefined;
   /** The dev faucet (simnet dev run only; never in a production build). */
@@ -41,6 +43,7 @@ export type ConfigEnv = Partial<
     | 'VITE_REFERRAL_ADDRESS'
     | 'VITE_EXPLORER_URL'
     | 'VITE_FAUCET_URL'
+    | 'VITE_FAUCET_LINK'
   >
 >;
 
@@ -56,8 +59,11 @@ export function readConfig(env: ConfigEnv, dev: boolean): { config: Config } | {
   const bundleHash = nonEmpty(env.VITE_BUNDLE_HASH)?.toLowerCase();
   if (bundleHash && !HEX64.test(bundleHash)) problems.push('VITE_BUNDLE_HASH is not 64 hex digits');
   const referralAddress = nonEmpty(env.VITE_REFERRAL_ADDRESS);
-  if (referralAddress && !referralAddress.startsWith('kaspatest:'))
-    problems.push('VITE_REFERRAL_ADDRESS is not kaspatest:');
+  const refPrefix = network === 'simnet' ? 'kaspasim:' : 'kaspatest:';
+  if (referralAddress && !referralAddress.startsWith(refPrefix))
+    problems.push(`VITE_REFERRAL_ADDRESS is not ${refPrefix}`);
+  const faucetLink = nonEmpty(env.VITE_FAUCET_LINK);
+  if (faucetLink && !faucetLink.startsWith('https://')) problems.push('VITE_FAUCET_LINK is not https://');
   const faucetUrl = dev && network === 'simnet' ? nonEmpty(env.VITE_FAUCET_URL) : undefined;
   if (problems.length || !indexerUrl || !covenantId) return { problems };
   return {
@@ -70,6 +76,7 @@ export function readConfig(env: ConfigEnv, dev: boolean): { config: Config } | {
       referralAddress,
       explorerUrl: nonEmpty(env.VITE_EXPLORER_URL),
       faucetUrl,
+      faucetLink,
     },
   };
 }

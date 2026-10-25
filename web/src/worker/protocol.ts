@@ -2,9 +2,10 @@
 // are crates/web's export names; every argument and result type is taken from the generated web.d.ts
 // (`typeof import('@wasm/web.js')`), so a change on the Rust side is a type error here.
 import type * as Wasm from '@wasm/web.js';
+import { QUICK_WALLET } from '@/wallet/quickEnabled';
 
 /** The exports the page may call (functions of crates/web; the wasm-bindgen glue's own are not listed). */
-export const CALLS = [
+const BASE = [
   'start',
   'errorTable',
   'indexerLimits',
@@ -27,6 +28,8 @@ export const CALLS = [
   'buildRequestWithdraw',
   'buildSettle',
   'assemble',
+  'buyFigures',
+  'webstoreInfo',
   'parseIndexerStatus',
   'parseIndexerRounds',
   'parseIndexerRound',
@@ -39,20 +42,26 @@ export const CALLS = [
   'checkIndexerInstance',
   'checkIndexerObjects',
   'checkIndexerRound',
-  'quickWalletNew',
-  'quickWalletImport',
-  'quickWalletSign',
   'nodeConnect',
   'nodeDisconnect',
   'nodeInfo',
   'nodeEntries',
   'nodeCoins',
+  'nodeBalance',
   'nodeFeeRate',
   'nodeAnchorBlock',
   'nodeSubmit',
 ] as const satisfies readonly (keyof typeof Wasm)[];
 
-export type CallName = (typeof CALLS)[number];
+/** The quick wallet's exports: absent from a mainnet check build (wallet/quickEnabled.ts). */
+const QUICK = [
+  'quickWalletNew',
+  'quickWalletImport',
+  'quickWalletSign',
+] as const satisfies readonly (keyof typeof Wasm)[];
+
+export type CallName = (typeof BASE)[number] | (typeof QUICK)[number];
+export const CALLS: readonly CallName[] = QUICK_WALLET ? [...BASE, ...QUICK] : BASE;
 type Api = typeof Wasm;
 export type CallArgs<K extends CallName> = Parameters<Api[K]>;
 export type CallResult<K extends CallName> = Awaited<ReturnType<Api[K]>>;

@@ -6,7 +6,17 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'src/wasm', 'playwright-report', 'test-results', '.playwright-browsers'] },
+  {
+    ignores: [
+      'dist',
+      'dist-mainnet-check',
+      'node_modules',
+      'src/wasm',
+      'playwright-report',
+      'test-results',
+      '.playwright-browsers',
+    ],
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.strict],
     files: ['**/*.{ts,tsx}'],
@@ -25,6 +35,11 @@ export default tseslint.config(
         },
       ],
     },
+  },
+  {
+    // Tests read their own fixtures and mock a wallet's JSON answer; nothing there is page input.
+    files: ['src/**/*.test.{ts,tsx}', 'src/test/**/*.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
   },
   {
     files: ['scripts/**/*.mjs', 'eslint.config.js'],

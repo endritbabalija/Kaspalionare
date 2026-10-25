@@ -29,5 +29,16 @@ describe('config (spec 6.5, 6.6)', () => {
     expect('problems' in readConfig({ ...base, VITE_COVENANT_ID: 'xyz' }, false)).toBe(true);
     expect('problems' in readConfig({ ...base, VITE_REFERRAL_ADDRESS: 'kaspa:qq' }, false)).toBe(true);
     expect('problems' in readConfig({ VITE_COVENANT_ID: COV }, false)).toBe(true);
+    expect('problems' in readConfig({ ...base, VITE_REFERRAL_ADDRESS: 'kaspasim:qq' }, false)).toBe(true);
+    expect('problems' in readConfig({ ...base, VITE_FAUCET_LINK: 'http://faucet.example' }, false)).toBe(true);
+  });
+
+  it('takes a kaspasim: site owner on the simnet dev run only', () => {
+    const r = readConfig({ ...base, VITE_NETWORK: 'simnet', VITE_REFERRAL_ADDRESS: 'kaspasim:qq' }, true);
+    if (!('config' in r)) throw new Error(r.problems.join(', '));
+    expect(r.config.referralAddress).toBe('kaspasim:qq');
+    expect(
+      'problems' in readConfig({ ...base, VITE_NETWORK: 'simnet', VITE_REFERRAL_ADDRESS: 'kaspatest:qq' }, true),
+    ).toBe(true);
   });
 });

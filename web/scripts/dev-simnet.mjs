@@ -80,6 +80,8 @@ const env = {
   VITE_INDEXER_URL: info.api,
   VITE_COVENANT_ID: info.covenantId,
   VITE_FAUCET_URL: info.faucet,
+  // The dev run's stand-in for the site owner's referral address (spec 6.5, 7): a kaspasim: address.
+  ...(info.referralAddress ? { VITE_REFERRAL_ADDRESS: info.referralAddress } : {}),
   VITE_WASM: 'dev',
 };
 const vite = start(

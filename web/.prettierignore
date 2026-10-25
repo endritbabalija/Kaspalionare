@@ -1,7 +1,9 @@
 node_modules
 dist
+dist-mainnet-check
 src/wasm
 playwright-report
 test-results
 package-lock.json
 src/fonts
+src/test/fixtures

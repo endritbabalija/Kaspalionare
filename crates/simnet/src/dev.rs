@@ -63,10 +63,20 @@ pub struct Opts {
 /// The dev run's fixed node port (F3): Borsh wRPC on 127.0.0.1:18610 (not a rusty-kaspa default).
 pub const NODE_PORT: u16 = 18_610;
 
-/// The M8 testnet instance's round knobs (spec 8 A2): ten minutes of sales at 10 BPS.
+/// The M8 testnet instance's round knobs (spec 8 A2): ten minutes of sales at 10 BPS. Front end
+/// F3 part B: the referral share s_R = 500 (5 %) in every round, so that at p = 1 KAS a
+/// one-combination referral (0.05 KAS) is below M_REF = 0.1 KAS and stays in the round, while
+/// a four-combination one (0.2 KAS) is paid: both spec 8 cases on one instance.
+pub const DEV_S_R: i64 = 500;
+
 fn short_rounds(g: &mut lottery::genesis::GenesisCase) {
     g.controller.round_len = 6_000;
     g.controller.d_min = 6_000;
+    g.controller.s_r = DEV_S_R;
+    g.params.next_s_r = DEV_S_R;
+    for s in &mut g.shards {
+        s.s_r = DEV_S_R;
+    }
 }
 
 fn combo(n: u32, bonus: u8) -> Combo {
@@ -382,11 +392,16 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
     acfg.anchor = Some(Arc::new(NodeAnchor { c: c.clone(), starts: starts.clone() }));
     let api = tokio::spawn(indexer_api::run(acfg));
     let faucet = crate::faucet::serve(o.faucet_bind, c.clone(), Wallet { sk: w.sk, addr: w.addr.clone() }).await?;
+    // The page's default referrer (spec 6.5, 7: the site owner's address) for the dev run: a
+    // fresh address whose key is dropped at once (nobody spends what it receives on this
+    // throwaway node); only its address goes into current.json.
+    let owner = Wallet::random().addr.to_string();
     let info = serde_json::json!({
         "network": "simnet",
         "api": format!("http://{}/v1/", o.api_bind),
         "wrpcBorsh": node.url,
         "faucet": format!("http://{}/faucet", o.faucet_bind),
+        "referralAddress": owner,
         "startedMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
         "covenantId": lottery::store::to_hex(&cov.as_bytes()),
         "store": dir.display().to_string(),

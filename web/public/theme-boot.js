@@ -1,8 +1,9 @@
-// Sets <html data-theme> before first paint (spec 5, D139): the choice remembered in this browser
-// (dark, light or device; key kl.theme), else the device setting; no preference means dark.
+// Sets <html data-theme> before first paint (spec 5, D139 as amended 2026-10-26): the choice remembered
+// in this browser (dark, light or device; key kl.theme); with nothing stored, dark, whatever the device
+// says. Only the "device" choice follows prefers-color-scheme.
 // An external file so the production CSP needs no inline script. Mirrors src/theme/theme.ts.
 (function () {
-  var choice = 'device';
+  var choice = 'dark';
   try {
     var v = localStorage.getItem('kl.theme');
     if (v === 'dark' || v === 'light' || v === 'device') choice = v;

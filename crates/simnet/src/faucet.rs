@@ -105,6 +105,9 @@ async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
     let _ = s.shutdown().await;
 }
 
+/// The most coins one faucet payment spends (its mass stays far below the standard limit).
+const MAX_INPUTS: usize = 40;
+
 async fn pay(st: &State, address: &str) -> Result<(String, u64), String> {
     let to = crate::net::parse_simnet(address)?;
     let mut g = st.spent.lock().await;
@@ -112,16 +115,23 @@ async fn pay(st: &State, address: &str) -> Result<(String, u64), String> {
         return Err(format!("the faucet paid {MAX_REQUESTS} times this run; restart the dev run"));
     }
     let vdaa = st.c.get_block_dag_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
-    let coin = st
-        .w
-        .spendable(&*st.c, vdaa)
-        .await?
-        .into_iter()
-        .find(|u| !g.0.contains(&u.op) && u.entry.amount >= AMOUNT + KAS)
-        .ok_or("the dev wallet has no spendable coin large enough yet; retry in a minute")?;
-    let tx = st.w.pay(std::slice::from_ref(&coin), &kaspa_txscript::pay_to_address_script(&to), AMOUNT)?;
+    // F3 part B: the largest unspent coins (the dev loop mines small coinbase coins to this wallet), up to
+    // MAX_INPUTS of them, until they cover the payment and its fee; one coin when one is large enough.
+    let mut ins = vec![];
+    let mut total = 0u64;
+    for u in st.w.spendable(&*st.c, vdaa).await?.into_iter().filter(|u| !g.0.contains(&u.op)) {
+        if total >= AMOUNT + KAS || ins.len() >= MAX_INPUTS {
+            break;
+        }
+        total += u.entry.amount;
+        ins.push(u);
+    }
+    if total < AMOUNT + KAS {
+        return Err("the dev wallet has no spendable coins large enough yet; retry in a minute".into());
+    }
+    let tx = st.w.pay(&ins, &kaspa_txscript::pay_to_address_script(&to), AMOUNT)?;
     st.c.submit_transaction(RpcTransaction::from(&tx), false).await.map_err(|e| format!("the node rejected the faucet payment: {e}"))?;
-    g.0.insert(coin.op);
+    g.0.extend(ins.iter().map(|u| u.op));
     g.1 += 1;
     Ok((tx.id().to_string(), AMOUNT))
 }

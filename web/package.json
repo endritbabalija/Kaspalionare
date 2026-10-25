@@ -13,6 +13,7 @@
     "wasm:dev": "node scripts/wasm.mjs dev",
     "wasm:release": "node scripts/wasm.mjs release",
     "build": "node scripts/wasm.mjs release && tsc -b && vite build && node scripts/check-bundle.mjs",
+    "check:mainnet": "node scripts/check-mainnet.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b",
     "lint": "eslint .",

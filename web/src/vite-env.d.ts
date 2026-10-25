@@ -11,6 +11,10 @@ interface ImportMetaEnv {
   readonly VITE_EXPLORER_URL?: string;
   readonly VITE_FAUCET_URL?: string;
   readonly VITE_WASM?: string;
+  /** TEST-ONLY: a build that must not contain the quick wallet (scripts/check-mainnet.mjs). */
+  readonly VITE_MAINNET_CHECK?: string;
+  /** The testnet-10 faucet the wallet sheet links to (spec S7). */
+  readonly VITE_FAUCET_LINK?: string;
 }
 
 interface ImportMeta {

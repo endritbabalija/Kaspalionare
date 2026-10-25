@@ -156,9 +156,65 @@ pub fn coin_address(net: Net, address: &str) -> Result<Address> {
     Ok(address.to_string())
 }
 
+/// The node's refusal texts that mean an input is already spent (rusty-kaspa v2.1.0
+/// `mining/errors/src/mempool.rs`: `RejectDoubleSpendInMempool` "output {0} already spent by
+/// transaction {1} in the mempool", line 33; `RejectDisallowedOrphan` "transaction {0} is an
+/// orphan where orphan is disallowed", line 77, which the page meets because it submits with
+/// `allow_orphan = false` and an input no longer in the UTXO set makes the transaction an
+/// orphan; `RejectMissingOutpoint` "at least one outpoint of the transaction is lacking a
+/// matching UTXO entry", line 18). Front end F3 part B: shard contention (spec S1).
+pub const CONFLICT_TEXTS: [&str; 3] = ["already spent by transaction", "is an orphan where orphan is disallowed", "is lacking a matching utxo entry"];
+
+/// A submit refusal as the page reads it: `node_conflict` when the node says an input is
+/// already spent (another buyer took the shard first, or the wallet's coin was spent: the page
+/// rebuilds on fresh entries), else the error as it was.
+pub fn submit_refusal(e: Error) -> Error {
+    if e.code != Code::NodeRefused {
+        return e;
+    }
+    let lower = e.detail.to_ascii_lowercase();
+    if CONFLICT_TEXTS.iter().any(|t| lower.contains(t)) { Error::new(Code::NodeConflict, e.detail) } else { e }
+}
+
+/// The total of a wallet's coins (sompi), for the wallet sheet's balance (spec S7).
+pub fn coins_total(coins: &[Utxo]) -> Result<Dec> {
+    let mut t = 0u64;
+    for c in coins {
+        let v = convert::dec("amount", &c.amount)?;
+        t = t.checked_add(v).ok_or_else(|| Error::new(Code::Overflow, "the coins' total"))?;
+    }
+    Ok(t.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_conflicts_are_classified() {
+        let refused = |t: &str| Error::new(Code::NodeRefused, format!("submitTransaction: Rejected transaction {}: {t}", "ab".repeat(32)));
+        for t in [
+            "output 1f2e…:0 already spent by transaction 3c4d… in the mempool",
+            "transaction 3c4d… is an orphan where orphan is disallowed",
+            "at least one outpoint of the transaction is lacking a matching UTXO entry",
+        ] {
+            assert_eq!(submit_refusal(refused(t)).code, Code::NodeConflict, "{t}");
+        }
+        for t in ["transaction has 10 fees which is under the required amount of 20 for compute mass 30", "transaction 3c4d… is invalid"] {
+            assert_eq!(submit_refusal(refused(t)).code, Code::NodeRefused, "{t}");
+        }
+        // A transport failure stays what it is, whatever its text.
+        assert_eq!(submit_refusal(Error::new(Code::NodeUnavailable, "already spent by transaction")).code, Code::NodeUnavailable);
+    }
+
+    #[test]
+    fn coin_totals() {
+        let u = |a: &str| Utxo { transaction_id: "00".repeat(32), index: 0, amount: a.into(), script_public_key: String::new(), block_daa_score: "1".into(), is_coinbase: false, covenant_id: None };
+        assert_eq!(coins_total(&[]).unwrap(), "0");
+        assert_eq!(coins_total(&[u("10000000000"), u("5")]).unwrap(), "10000000005");
+        assert_eq!(coins_total(&[u(&u64::MAX.to_string()), u("1")]).unwrap_err().code, Code::Overflow);
+        assert_eq!(coins_total(&[u("x")]).unwrap_err().code, Code::InputFormat);
+    }
 
     #[test]
     fn rates_round_up_with_floor_and_cap() {

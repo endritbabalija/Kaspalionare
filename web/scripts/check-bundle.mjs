@@ -14,6 +14,9 @@ const FORBIDDEN = [
   '18610',
   '127.0.0.1:8791',
   'devFixtureNames',
+  'KASPALIONARE_DEV_HOOKS',
+  '__klDev',
+  'Dev faucet',
 ];
 
 function files(dir) {

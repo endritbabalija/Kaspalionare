@@ -52,6 +52,9 @@ pub mod node_client;
 pub mod quick_wallet;
 pub mod safe_json;
 pub mod views;
+/// The page's local store format (`webstore/1`, spec 6.3; front end F3 part B): the records the
+/// page keeps in IndexedDB, declared here so the page has no hand-written copy of them.
+pub mod webstore;
 /// The wRPC feasibility probe (feature `wrpc-probe`, wasm32 only; spec 6.1 "Anchor proof").
 #[cfg(all(feature = "wrpc-probe", target_arch = "wasm32"))]
 pub mod wrpc_probe;

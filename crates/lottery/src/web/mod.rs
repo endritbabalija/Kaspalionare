@@ -172,6 +172,21 @@ codes! {
     /// Front end F3 (the page, not the wasm): the worker running the lottery code stopped (wasm
     /// aborts on a panic); the page restarted it.
     WorkerStopped = 39, "worker_stopped", "The lottery code stopped and was restarted.";
+    /// Front end F3 part B: the node refused the transaction because one of its inputs is
+    /// already spent (a double spend in the mempool, or an input no longer in the UTXO set):
+    /// another buyer took the shard first, or the wallet's coin was spent. The page rebuilds.
+    NodeConflict = 40, "node_conflict", "Another transaction spent one of its inputs first.";
+    /// Front end F3 part B (the page): no wallet extension of the chosen kind in this browser.
+    WalletMissing = 41, "wallet_missing", "The wallet is not available in this browser.";
+    /// Front end F3 part B (the page): the wallet declined the request (the user rejected it,
+    /// or the wallet returned an error).
+    WalletRejected = 42, "wallet_rejected", "The wallet declined the request.";
+    /// Front end F3 part B (the page): the wallet is on another network than the page (spec
+    /// 6.6: KasWare must report `kaspa_testnet_10`).
+    WalletNetwork = 43, "wallet_network", "The wallet is on another network.";
+    /// Front end F3 part B (the page): this browser does not let the page keep its local data
+    /// (IndexedDB unavailable, for example in some private windows).
+    StorageUnavailable = 44, "storage_unavailable", "This browser cannot keep the page's data.";
 }
 
 impl fmt::Display for Code {

@@ -587,23 +587,26 @@ pub fn fee_of(m: &Masses, rate: u64) -> Result<u64> {
 /// with that fee (the change absorbs it). The mass depends on the fee only through the
 /// change output's storage mass, so this settles in a few rounds (as `tn10::fees::with_fee`).
 ///
-/// The loop never drops the change: a change too small to pay for its own output (its
-/// storage mass) makes it fail. F1 review: that failure is `ChangeDust` when the same coins
-/// cover the transaction without a change output (`diagnose`), and stays `FundingShort` (or
-/// the fee cap's `FeeRate`) when they do not. Only the code differs; the coins are refused
-/// either way.
+/// The loop never drops a change worth something: a change too small to pay for its own
+/// output (its storage mass) makes it fail. F1 review: that failure is `ChangeDust` when the
+/// same coins cover the transaction without a change output (`diagnose`), and stays
+/// `FundingShort` (or the fee cap's `FeeRate`) when they do not. Owner decision (DECISIONS
+/// 2026-10-26 (2)): when the transaction without a change output pays exactly the fee its
+/// own mass needs (the leftover is exactly zero), that transaction is the result: no change
+/// output and no extra fee. Any other leftover below dust is still refused (`ChangeDust`),
+/// so the player never gives coins away as fee.
 pub fn with_fee(rate: u64, mut mk: impl FnMut(u64) -> Result<Unsigned>) -> Result<Unsigned> {
     let mut fee = fee_of(&Masses { compute: 0, transient: 0, storage: 0, priority: 1_000 }, rate)?;
     let mut prev: Option<Unsigned> = None;
     for _ in 0..6 {
         let u = match mk(fee) {
             Ok(u) => u,
-            Err(e) if e.code == Code::FundingShort => return Err(diagnose(rate, prev.as_ref(), e, &mut mk)),
+            Err(e) if e.code == Code::FundingShort => return diagnose(rate, prev.as_ref(), e, &mut mk),
             Err(e) => return Err(e),
         };
         let need = match fee_of(&u.masses, rate) {
             Ok(n) => n,
-            Err(e) if e.code == Code::FeeRate => return Err(diagnose(rate, Some(&u), e, &mut mk)),
+            Err(e) if e.code == Code::FeeRate => return diagnose(rate, Some(&u), e, &mut mk),
             Err(e) => return Err(e),
         };
         if u.fee >= need {
@@ -619,22 +622,27 @@ pub fn with_fee(rate: u64, mut mk: impl FnMut(u64) -> Result<Unsigned>) -> Resul
 /// value c at fee f; the builders leave the change out when it would be 0, so `mk(f + c)` is
 /// the same transaction without change. If one of `prev`'s plain outputs, taken as c, gives a
 /// build with fewer outputs whose fee covers its own mass, the coins cover the transaction
-/// and only the change is too small: `ChangeDust`, with the extra fee dropping it would pay
-/// in the detail. That build is discarded. Otherwise `e` stands.
-fn diagnose(rate: u64, prev: Option<&Unsigned>, e: Error, mk: &mut impl FnMut(u64) -> Result<Unsigned>) -> Error {
-    let Some(p) = prev else { return e };
+/// and only the change is too small. If that build's fee is exactly what its mass needs (the
+/// leftover is exactly zero), it is returned (owner decision, DECISIONS 2026-10-26 (2)).
+/// Otherwise it is discarded and the error is `ChangeDust`, with the extra fee dropping the
+/// change would pay in the detail. Otherwise `e` stands.
+fn diagnose(rate: u64, prev: Option<&Unsigned>, e: Error, mk: &mut impl FnMut(u64) -> Result<Unsigned>) -> Result<Unsigned> {
+    let Some(p) = prev else { return Err(e) };
     for o in p.tx.outputs.iter().rev().filter(|o| o.covenant.is_none()) {
         let Some(f) = p.fee.checked_add(o.value).filter(|f| *f <= MAX_FEE_SOMPI) else { continue };
         let Ok(u) = mk(f) else { continue };
         let Ok(need) = fee_of(&u.masses, rate) else { continue };
         if u.tx.outputs.len() < p.tx.outputs.len() && u.fee >= need {
-            return Error::new(
+            if u.fee == need {
+                return Ok(u);
+            }
+            return Err(Error::new(
                 Code::ChangeDust,
                 format!("{}; without the change output the fee would be {} sompi, {} above what its mass needs at {rate} sompi/gram", e.detail, u.fee, u.fee - need),
-            );
+            ));
         }
     }
-    e
+    Err(e)
 }
 
 /// The withdrawal minimum of a vault state (spec M6 A4, D86): `game::w_min`.

@@ -1,6 +1,7 @@
-// The theme switch (spec 5, D139): dark, light or device; remembered per browser (localStorage key
-// kl.theme); "device" follows prefers-color-scheme, and with no preference the page is dark.
-// public/theme-boot.js applies the same rule before first paint.
+// The theme switch (spec 5, D139 as amended by the owner on 2026-10-26): dark, light or device;
+// remembered per browser (localStorage key kl.theme). A first-time visitor (nothing stored) always sees
+// dark, whatever the device's colour-scheme setting; "device" is an opt-in menu choice that follows
+// prefers-color-scheme. public/theme-boot.js applies the same rule before first paint.
 
 export type ThemeChoice = 'dark' | 'light' | 'device';
 export type Theme = 'dark' | 'light';
@@ -12,13 +13,13 @@ export function isChoice(v: unknown): v is ThemeChoice {
   return v === 'dark' || v === 'light' || v === 'device';
 }
 
-/** The remembered choice; "device" when none (or storage is unavailable). */
+/** The remembered choice; "dark" when none (or storage is unavailable). */
 export function readChoice(storage: Pick<Storage, 'getItem'> | undefined = safeStorage()): ThemeChoice {
   try {
     const v = storage?.getItem(THEME_KEY);
-    return isChoice(v) ? v : 'device';
+    return isChoice(v) ? v : 'dark';
   } catch {
-    return 'device';
+    return 'dark';
   }
 }
 
