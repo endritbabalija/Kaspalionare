@@ -16,9 +16,33 @@
 //! The campaign therefore pays `lottery::buy::fee_for(priority mass, ceil(normal rate))`:
 //! the estimator's fractional rate rounded up to whole sompi per gram, raised to the 100
 //! sompi/gram floor by `fee_for` (design section 9), times the builder's exact mass.
+//!
+//! Caps (M8 S5, D115: the node is not trusted off-chain; a wrong estimate must stop the
+//! runner, never drain the change into fees):
+//! - `MAX_RATE_SOMPI_PER_GRAM` = 1,000 sompi/gram, 10 x the floor. The floor is the
+//!   mempool's DEFAULT_MINIMUM_RELAY_TRANSACTION_FEE = 100,000 sompi per kg = 100 sompi per
+//!   gram (`mining/src/mempool/config.rs:20`, applied at `:138-141`;
+//!   `harness::MIN_FEERATE_SOMPI_PER_GRAM`). The M8 campaign's C0 recorded "normal bucket
+//!   100 -> 100 sompi/gram" (`docs/tn10-mass-check.md`). A higher normal-bucket rate is a
+//!   fee spike worth a human decision or a lying node; `round_rate` refuses it (an error,
+//!   not a clamp: a clamped rate would quietly underpay).
+//! - `MAX_FEE_SOMPI` = 5 KAS per transaction, whatever the rate and mass: the largest
+//!   priority mass a block admits (the compute limit, 500,000 grams, is the reference every
+//!   mass is normalized to: `consensus/core/src/config/params.rs:626`,
+//!   `consensus/core/src/mass/mod.rs:175-182, 225-228, 299-305`) at the maximum rate. No
+//!   transaction a block can hold needs more at an accepted rate, so a fee above it is a
+//!   builder fault: a mass above the block limit, or change miscounted so the fee (inputs -
+//!   outputs) swallows it. `fee_of` and `with_fee` refuse it. For scale: the heaviest
+//!   campaign transaction, close() with K = 16 (priority mass 432,306 grams = transient
+//!   864,612 x 0.5), pays 0.43 KAS at the floor, 4.32 KAS at the maximum rate.
 
 use kaspa_rpc_core::api::rpc::RpcApi;
 use lottery::buy::Final;
+
+/// The highest node rate the campaign accepts (sompi/gram; module doc).
+pub const MAX_RATE_SOMPI_PER_GRAM: u64 = 1_000;
+/// The most any one transaction may pay in fees (sompi; module doc).
+pub const MAX_FEE_SOMPI: u64 = 500_000 * MAX_RATE_SOMPI_PER_GRAM;
 
 /// The rate the campaign pays: whole sompi per gram, at least the floor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,17 +54,26 @@ pub struct Rate {
 }
 
 /// Round an estimator rate up to whole sompi per gram and apply the 100 sompi/gram floor.
-/// A rate that is not a finite non-negative number, or does not fit in u64, is an error
-/// (never a silent floor: a broken estimator is worth a stop).
+/// A rate that is not a finite non-negative number, or is above `MAX_RATE_SOMPI_PER_GRAM`
+/// after rounding up, is an error (never a silent floor or clamp: a broken or hostile
+/// estimator is worth a stop).
 pub fn round_rate(raw: f64) -> Result<Rate, String> {
     if !raw.is_finite() || raw < 0.0 {
         return Err(format!("fee estimate {raw} is not a finite non-negative rate"));
     }
     let up = raw.ceil();
-    if up > u64::MAX as f64 / 2.0 {
-        return Err(format!("fee estimate {raw} sompi/gram is out of range"));
+    if up > MAX_RATE_SOMPI_PER_GRAM as f64 {
+        return Err(format!("fee estimate {raw} sompi/gram is above the maximum of {MAX_RATE_SOMPI_PER_GRAM} sompi/gram (10 x the floor; D115: refused, not clamped)"));
     }
     Ok(Rate { raw, sompi_per_gram: (up as u64).max(harness::MIN_FEERATE_SOMPI_PER_GRAM) })
+}
+
+/// A fee within the per-transaction cap.
+fn capped(fee: u64, what: &str) -> Result<u64, String> {
+    if fee > MAX_FEE_SOMPI {
+        return Err(format!("{what} {fee} sompi is above the per-transaction fee cap of {MAX_FEE_SOMPI} sompi (5 KAS)"));
+    }
+    Ok(fee)
 }
 
 /// The node's normal-bucket rate (spec A5 C0: rate >= 100 sompi/gram after the floor).
@@ -51,8 +84,9 @@ pub async fn estimate<C: RpcApi + ?Sized>(c: &C) -> Result<Rate, String> {
 }
 
 /// The fee of a transaction of these masses at `rate` (D120): `fee_for(priority, rate)`.
+/// Above `MAX_FEE_SOMPI` it is an error.
 pub fn fee_of(m: &harness::Masses, rate: u64) -> Result<u64, String> {
-    lottery::buy::fee_for(m.priority, rate)
+    capped(lottery::buy::fee_for(m.priority, rate)?, &format!("fee for priority mass {} at {rate} sompi/gram:", m.priority))
 }
 
 /// The fee a built transaction needs at `rate`, from its own masses.
@@ -63,12 +97,18 @@ pub fn fee_needed(f: &Final, rate: u64) -> Result<u64, String> {
 /// Build a transaction whose fee covers its own exact mass at `rate`. `mk(fee)` builds it
 /// with that fee (the change absorbs it). The mass depends on the fee only through the
 /// change output's storage mass, so this settles in a few rounds; the fee returned is
-/// never below what the final transaction needs.
+/// never below what the final transaction needs. A rate above `MAX_RATE_SOMPI_PER_GRAM`, a
+/// needed fee above `MAX_FEE_SOMPI`, or a built transaction that pays more than the cap is
+/// an error.
 pub fn with_fee(rate: u64, mut mk: impl FnMut(u64) -> Result<Final, String>) -> Result<Final, String> {
+    if rate > MAX_RATE_SOMPI_PER_GRAM {
+        return Err(format!("fee rate {rate} sompi/gram is above the maximum of {MAX_RATE_SOMPI_PER_GRAM} sompi/gram"));
+    }
     let mut fee = lottery::buy::fee_for(1_000, rate)?;
     for _ in 0..6 {
         let f = mk(fee)?;
         let need = fee_needed(&f, rate)?;
+        capped(f.fee(), &format!("transaction {} pays a fee of", f.tx.id()))?;
         if f.fee() >= need {
             return Ok(f);
         }
@@ -89,10 +129,58 @@ mod tests {
         assert_eq!(round_rate(100.0).unwrap().sompi_per_gram, 100);
         assert_eq!(round_rate(100.0001).unwrap().sompi_per_gram, 101);
         assert_eq!(round_rate(250.5).unwrap().sompi_per_gram, 251);
-        assert_eq!(round_rate(1e6).unwrap().sompi_per_gram, 1_000_000);
-        for bad in [f64::NAN, f64::INFINITY, -1.0, -0.5, 1e30] {
+        // M8 S5: 1e6 sompi/gram (10,000 x the floor) was accepted before; it is now above
+        // MAX_RATE_SOMPI_PER_GRAM and refused (see `rate_above_the_max_is_an_error`).
+        for bad in [f64::NAN, f64::INFINITY, -1.0, -0.5, 1e30, 1e6] {
             assert!(round_rate(bad).is_err(), "{bad} accepted");
         }
+    }
+
+    /// M8 S5 (D115: the node is not trusted): a node rate above the maximum is an error, not
+    /// a clamp; the maximum itself is accepted.
+    #[test]
+    fn rate_above_the_max_is_an_error() {
+        assert_eq!(MAX_RATE_SOMPI_PER_GRAM, 1_000);
+        assert_eq!(round_rate(1_000.0).unwrap().sompi_per_gram, 1_000);
+        assert_eq!(round_rate(999.5).unwrap().sompi_per_gram, 1_000);
+        for bad in [1_000.0001, 1_001.0, 5_000.0, 1e9] {
+            let e = round_rate(bad).unwrap_err();
+            assert!(e.contains("above the maximum"), "{bad}: {e}");
+        }
+        // with_fee refuses a rate above the maximum before building anything.
+        let mut built = 0;
+        let Err(e) = with_fee(MAX_RATE_SOMPI_PER_GRAM + 1, |_| {
+            built += 1;
+            Err("must not be called".into())
+        }) else {
+            panic!("a rate above the maximum was accepted")
+        };
+        assert!(e.contains("above the maximum"), "{e}");
+        assert_eq!(built, 0);
+    }
+
+    /// M8 S5: no transaction pays more than MAX_FEE_SOMPI, whatever the rate and mass.
+    #[test]
+    fn fee_above_the_per_transaction_cap_is_an_error() {
+        assert_eq!(MAX_FEE_SOMPI, 5 * lottery::buy::KAS);
+        // The largest priority mass a block admits (compute limit 500,000 grams) at the
+        // maximum rate is exactly the cap; one gram more is refused.
+        let big = harness::Masses { compute: 500_000, transient: 1_000_000, storage: 500_000, priority: 500_000 };
+        assert_eq!(fee_of(&big, MAX_RATE_SOMPI_PER_GRAM).unwrap(), MAX_FEE_SOMPI);
+        let over = harness::Masses { priority: 500_001, ..big };
+        assert!(fee_of(&over, MAX_RATE_SOMPI_PER_GRAM).unwrap_err().contains("per-transaction fee cap"));
+        assert!(fee_of(&harness::Masses { priority: 5_000_001, ..big }, 100).unwrap_err().contains("per-transaction fee cap"));
+        // A builder that pays more than the cap from change (the fee is inputs - outputs) is
+        // refused even when the rate and mass are fine.
+        let c = lottery::buy::BuyCase::new(lottery::buy::b_max());
+        let Err(e) = with_fee(100, |_| {
+            let mut c = c.clone();
+            c.fee = MAX_FEE_SOMPI + 1;
+            Ok(c.build().finish())
+        }) else {
+            panic!("a fee above the per-transaction cap was accepted")
+        };
+        assert!(e.contains("per-transaction fee cap"), "{e}");
     }
 
     #[test]

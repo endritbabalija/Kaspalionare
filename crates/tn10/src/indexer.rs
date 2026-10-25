@@ -21,7 +21,9 @@
 //!   never skips ahead.
 //! - `get_block` returns a header-only (pruned) block with no transactions and an unknown
 //!   one as an error (`rpc/service/src/service.rs:493-503`, `consensus/src/consensus/mod.rs:1427-1439`):
-//!   `deleted_block` treats both as deletion evidence.
+//!   `deleted_block` treats both as deletion evidence, the error only when it is the node's
+//!   "cannot find header <hash>" (or the retention-root refusal); a timeout or another error
+//!   is not evidence (M8 S5).
 //!
 //! What it keeps (A4): every accepted transaction that creates an output bound to the
 //! instance's covenant ID or spends a live instance UTXO, as `index/1` add lines; chain
@@ -159,6 +161,9 @@ pub struct Indexer {
     /// The chain block the next poll starts from.
     pub last: Hash,
     pub last_daa: u64,
+    /// Whether `last_daa` is `last`'s own DAA (from an ingested chain block, a re-anchor, the
+    /// caller's start block, or the log line of that block) or only a lower bound (M8 S5).
+    last_daa_exact: bool,
     /// Transactions the caller waits for (any transaction, instance or not), and the chain
     /// block and DAA that accepted them (dropped again if that block is removed).
     watched: HashSet<TransactionId>,
@@ -183,6 +188,7 @@ impl Indexer {
             active: vec![],
             last: start,
             last_daa: start_daa,
+            last_daa_exact: true,
             watched: HashSet::new(),
             accepted: HashMap::new(),
             reanchors: vec![],
@@ -243,6 +249,12 @@ impl Indexer {
             }
             me.last_daa = me.last_daa.max(r.new_daa);
         }
+        // Exact only when the resume block's own DAA is on record: the chain block of the
+        // newest log line, or the newest re-anchor's new block. A snapshot block after those
+        // (an empty chain block) has only the snapshot's figure, taken as a lower bound.
+        let from_line = me.active.last().is_some_and(|a| a.chain_block == me.last && a.chain_daa == me.last_daa);
+        let from_ra = me.reanchors.last().is_some_and(|r| r.new_block == me.last.as_bytes() && r.new_daa == me.last_daa);
+        me.last_daa_exact = from_line || from_ra;
         Ok(me)
     }
 
@@ -277,6 +289,23 @@ impl Indexer {
         &self.reanchors
     }
 
+    /// The re-anchor line from this index's resume block to `new_block` (see `reanchor`).
+    pub fn reanchor_line(&self, new_block: Hash, new_daa: u64, node: &str, live_checked: u64, wall_time: u64) -> ReanchorLine {
+        ReanchorLine {
+            kind: REANCHOR.into(),
+            at: self.lines.len() as u64,
+            old_block: self.last.as_bytes(),
+            old_daa: self.last_daa,
+            old_daa_is_lower_bound: !self.last_daa_exact,
+            new_block: new_block.as_bytes(),
+            new_daa,
+            node: node.into(),
+            live_checked,
+            wall_time,
+            argument: REANCHOR_ARGUMENT.into(),
+        }
+    }
+
     /// Record a re-anchor (checked by `check_unchanged` on a node, see `reanchor`): the
     /// line goes into the log after every add/remove line so far, the resume block becomes
     /// its new block, and both files are written at once.
@@ -296,6 +325,7 @@ impl Indexer {
         }
         self.last = Hash::from_bytes(r.new_block);
         self.last_daa = r.new_daa;
+        self.last_daa_exact = true;
         self.reanchors.push(r);
         self.persist()
     }
@@ -364,6 +394,7 @@ impl Indexer {
             }
             self.last = blk.hash;
             self.last_daa = blk.daa;
+            self.last_daa_exact = true;
             out.blocks += 1;
         }
         Ok(out)
@@ -589,8 +620,11 @@ pub fn check_unchanged(live: &HashMap<TransactionOutpoint, Live>, cov: Hash, nod
 /// check is conservative). `write`: record the line in the index (`apply_reanchor`), else
 /// only return it (a read-only check).
 pub async fn reanchor<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer, node_url: &str, extra: &[kaspa_addresses::Address], now: u64, write: bool) -> Result<(ReanchorLine, Unchanged), String> {
-    if let Ok(b) = c.get_block(x.last, false).await {
-        return Err(format!("re-anchor refused: the node still knows the resume block {} (DAA {}); resume normally", x.last, b.header.daa_score));
+    match c.get_block(x.last, false).await {
+        Ok(b) => return Err(format!("re-anchor refused: the node still knows the resume block {} (DAA {}); resume normally", x.last, b.header.daa_score)),
+        // M8 S5: only the node's own "unknown block" answer counts, never a timeout.
+        Err(e) if says_block_unknown(x.last, &e.to_string()) => {}
+        Err(e) => return Err(format!("re-anchor refused: get_block({}) failed with \"{e}\", which is not the node saying it no longer has the block; retry", x.last)),
     }
     let sink = c.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
     let new_daa = c.get_block(sink, false).await.map_err(|e| e.to_string())?.header.daa_score;
@@ -616,31 +650,68 @@ pub async fn reanchor<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer, node_url: &str
         node.extend(v.iter().map(NodeUtxo::of));
     }
     let u = check_unchanged(x.ix.live(), x.cov, &node)?;
-    let line = ReanchorLine {
-        kind: REANCHOR.into(),
-        at: x.lines.len() as u64,
-        old_block: x.last.as_bytes(),
-        old_daa: x.last_daa,
-        new_block: sink.as_bytes(),
-        new_daa,
-        node: node_url.into(),
-        live_checked: u.live_checked as u64,
-        wall_time: now,
-        argument: REANCHOR_ARGUMENT.into(),
-    };
+    let line = x.reanchor_line(sink, new_daa, node_url, u.live_checked as u64, now);
     if write {
         x.apply_reanchor(line.clone())?;
     }
     Ok((line, u))
 }
 
-/// Deletion evidence for block `h` (A4): `Some(what the node returned)` if the node no
-/// longer serves its body (an error, or a header with no transactions), `None` if it does.
+/// Deletion evidence for block `h` (A4): `Some(what the node returned)` if the node says it
+/// no longer has the block or its body, `None` if it serves the body, and an error for any
+/// other answer (a timeout, a disconnect, another node error, an inconsistent block): that
+/// is not evidence, and the caller stops (M8 S5). See `deletion_evidence`.
 pub async fn deleted_block<C: RpcApi + ?Sized>(c: &C, h: Hash) -> Result<Option<String>, String> {
-    match c.get_block(h, true).await {
-        Err(e) => Ok(Some(format!("get_block({h}) failed: {e}"))),
-        Ok(b) if b.transactions.is_empty() => Ok(Some(format!("get_block({h}) returned the header (DAA {}) with no transactions (body pruned)", b.header.daa_score))),
-        Ok(_) => Ok(None),
+    let a = c.get_block(h, true).await.map(|b| BlockAnswer { daa: b.header.daa_score, txs: b.transactions.len(), header_only: b.verbose_data.as_ref().map(|v| v.is_header_only) }).map_err(|e| e.to_string());
+    deletion_evidence(h, a)
+}
+
+/// What `get_block(h, true)` returned, reduced to what the deletion check reads.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockAnswer {
+    pub daa: u64,
+    pub txs: usize,
+    /// `verbose_data.is_header_only`, if the node sent verbose data.
+    pub header_only: Option<bool>,
+}
+
+/// The node's error text for a block it does not have: `ConsensusError::HeaderNotFound`,
+/// `#[error("cannot find header {0}")]` (rusty-kaspa v2.1.0
+/// `consensus/core/src/errors/consensus.rs:13-14`), returned by `get_block` through
+/// `get_block_even_if_header_only` (`consensus/src/consensus/mod.rs:1427-1432`; RPC
+/// `rpc/service/src/service.rs:493-503`, wrapped transparently by `RpcError::ConsensusError`,
+/// `rpc/core/src/error.rs:108-109`). Testnet-10 sent it as "RPC Server (remote error) ->
+/// cannot find header <hash>" (C8c, 25 Oct).
+pub const HEADER_NOT_FOUND: &str = "cannot find header";
+/// The node's refusal of a hash below its retention root: `ConsensusError::General("the
+/// queried hash does not have retention root on its chain")`
+/// (`consensus/src/consensus/mod.rs:858-863`). `get_block` itself does not raise it (it
+/// answers `HeaderNotFound` once the header is gone); accepted as the same evidence.
+pub const BELOW_RETENTION_ROOT: &str = "the queried hash does not have retention root on its chain";
+
+/// Whether a node error says the node no longer has block `h`: `HEADER_NOT_FOUND` naming
+/// `h` itself, or `BELOW_RETENTION_ROOT`.
+pub fn says_block_unknown(h: Hash, e: &str) -> bool {
+    e.contains(&format!("{HEADER_NOT_FOUND} {h}")) || e.contains(BELOW_RETENTION_ROOT)
+}
+
+/// Classify a `get_block(h, true)` answer as deletion evidence (see `deleted_block`).
+/// Evidence: the error text `HEADER_NOT_FOUND` naming `h` itself, `BELOW_RETENTION_ROOT`, or
+/// a block whose verbose data says `is_header_only` (set from the block status,
+/// `rpc/service/src/converter/consensus.rs:78`) with no transactions (the body is pruned,
+/// `consensus/src/consensus/mod.rs:1433-1437`). Served: a block with transactions that is not
+/// header-only. Anything else is an error, never evidence: a timeout, a disconnect, another
+/// node error, or an empty block without the header-only flag (a block always has its
+/// coinbase transaction).
+pub fn deletion_evidence(h: Hash, a: Result<BlockAnswer, String>) -> Result<Option<String>, String> {
+    match a {
+        Err(e) if says_block_unknown(h, &e) => Ok(Some(format!("get_block({h}) failed: {e}"))),
+        Err(e) => Err(format!("get_block({h}) failed: {e}; not deletion evidence (only \"{HEADER_NOT_FOUND} {h}\", the retention-root refusal or a header-only block count)")),
+        Ok(b) if b.header_only == Some(true) && b.txs == 0 => {
+            Ok(Some(format!("get_block({h}) returned a header-only block (DAA {}) with no transactions (body pruned)", b.daa)))
+        }
+        Ok(b) if b.header_only == Some(false) && b.txs > 0 => Ok(None),
+        Ok(b) => Err(format!("get_block({h}): inconsistent answer ({} transactions, header-only {:?}); not deletion evidence", b.txs, b.header_only)),
     }
 }
 
@@ -746,6 +817,7 @@ mod tests {
             at: x.lines().len() as u64,
             old_block: x.last.as_bytes(),
             old_daa: x.last_daa,
+            old_daa_is_lower_bound: false,
             new_block: [new; 32],
             new_daa,
             node: "wss://example.invalid/testnet-10".into(),
@@ -753,6 +825,42 @@ mod tests {
             wall_time: 1_792_900_000,
             argument: REANCHOR_ARGUMENT.into(),
         }
+    }
+
+    /// M8 S5: a re-anchor line says whether its `old_daa` is the old block's own DAA (known
+    /// from an ingested chain block or a re-anchor) or only a lower bound (an index reopened
+    /// from disk whose resume block is not the chain block of its newest logged line).
+    #[test]
+    fn reanchor_line_says_whether_old_daa_is_exact() {
+        let dir = std::env::temp_dir().join(format!("tn10-reanchor-bound-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = Templates::get(lottery::buy::b_max());
+        let cov = Hash::from_bytes(COV);
+        let flag = |x: &Indexer| x.reanchor_line(Hash::from_bytes([60; 32]), 9_000, "n", 0, 0).to_line().unwrap();
+        let mut x = Indexer::open(Some(&dir), t.clone(), cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        x.ingest(ChainBatch { removed: vec![], added: vec![block(2, 20, vec![plain_tx(1)])] }).unwrap();
+        x.persist().unwrap();
+        assert!(flag(&x).contains(r#""old_daa":20,"#) && flag(&x).contains(r#""old_daa_is_lower_bound":false"#), "{}", flag(&x));
+        // Reopened: the transaction was foreign (not logged), so only the snapshot's figure
+        // is on record for the resume block: a lower bound.
+        let y = Indexer::open(Some(&dir), t.clone(), cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        assert_eq!((y.last, y.last_daa), (Hash::from_bytes([2; 32]), 20));
+        assert!(flag(&y).contains(r#""old_daa_is_lower_bound":true"#), "{}", flag(&y));
+        // An empty chain block after it: in process the DAA is the block's own ...
+        x.ingest(ChainBatch { removed: vec![], added: vec![block(3, 30, vec![])] }).unwrap();
+        x.persist().unwrap();
+        assert!(flag(&x).contains(r#""old_daa":30,"#) && flag(&x).contains(r#""old_daa_is_lower_bound":false"#), "{}", flag(&x));
+        // ... but an index reopened from disk only has a lower bound for it.
+        let z = Indexer::open(Some(&dir), t.clone(), cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        assert_eq!(z.last, Hash::from_bytes([3; 32]));
+        assert!(flag(&z).contains(r#""old_daa_is_lower_bound":true"#), "{}", flag(&z));
+        // After a re-anchor the new block's DAA is on record (in process and reopened).
+        let mut w = z;
+        w.apply_reanchor(line(&w, 50, 5_000)).unwrap();
+        assert!(flag(&w).contains(r#""old_daa":5000,"#) && flag(&w).contains(r#""old_daa_is_lower_bound":false"#), "{}", flag(&w));
+        let v = Indexer::open(Some(&dir), t.clone(), cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        assert!(flag(&v).contains(r#""old_daa_is_lower_bound":false"#), "{}", flag(&v));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The re-anchor line is written to both files; a reopened index resumes from the new
@@ -786,6 +894,43 @@ mod tests {
         let z = Indexer::open(Some(&dir), t, cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
         assert_eq!((z.last, z.last_daa), (Hash::from_bytes([50; 32]), 5_000));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M8 S5: only the node's own answers for a deleted block count as deletion evidence:
+    /// "cannot find header <h>" (ConsensusError::HeaderNotFound), the retention-root refusal,
+    /// or an explicit header-only block. A timeout, a disconnect or another error is not
+    /// evidence (an error: the caller stops), and neither is an inconsistent answer.
+    #[test]
+    fn deletion_evidence_needs_the_nodes_answer() {
+        let h = Hash::from_bytes([0xe0; 32]);
+        let other = Hash::from_bytes([0x11; 32]);
+        // Not evidence: connection failures, other errors, the header text for another hash.
+        for e in [
+            "RPC request timeout".to_string(),
+            "WebSocket disconnected".to_string(),
+            "not connected".to_string(),
+            "websocket error: Connection reset by peer".to_string(),
+            "RPC Server (remote error) -> cannot find full block 1111".to_string(),
+            format!("RPC Server (remote error) -> cannot find header {other}"),
+            "cannot find header".to_string(),
+        ] {
+            let r = deletion_evidence(h, Err(e.clone()));
+            assert!(r.is_err(), "{e:?} counted as deletion evidence: {r:?}");
+        }
+        // The real testnet-10 text (C8c, 25 Oct; campaign.json of instance e9f4...).
+        let real = format!("RPC Server (remote error) -> cannot find header {h}");
+        assert!(deletion_evidence(h, Err(real)).unwrap().unwrap().contains("cannot find header"));
+        let ret = "RPC Server (remote error) -> the queried hash does not have retention root on its chain".to_string();
+        assert!(deletion_evidence(h, Err(ret)).unwrap().is_some());
+        let ho = BlockAnswer { daa: 605_000_000, txs: 0, header_only: Some(true) };
+        assert!(deletion_evidence(h, Ok(ho)).unwrap().unwrap().contains("header-only"));
+        // Served: a full block.
+        assert_eq!(deletion_evidence(h, Ok(BlockAnswer { daa: 1, txs: 3, header_only: Some(false) })).unwrap(), None);
+        // Not evidence: no transactions without the explicit header-only flag (a block always
+        // has its coinbase), or a body served with the flag set.
+        for a in [BlockAnswer { daa: 1, txs: 0, header_only: None }, BlockAnswer { daa: 1, txs: 0, header_only: Some(false) }, BlockAnswer { daa: 1, txs: 2, header_only: Some(true) }] {
+            assert!(deletion_evidence(h, Ok(a)).is_err(), "{a:?}");
+        }
     }
 
     #[test]

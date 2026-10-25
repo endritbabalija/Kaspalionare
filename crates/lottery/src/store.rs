@@ -480,9 +480,16 @@ pub struct ReanchorLine {
     pub at: u64,
     #[serde(with = "hex")]
     pub old_block: [u8; 32],
-    /// The old block's DAA score as the index recorded it (snapshots before M8 S4 did not
-    /// store it: then the DAA of the newest logged transaction, a lower bound).
+    /// The old block's DAA score as the index recorded it: the block's own DAA, or only a
+    /// lower bound (`old_daa_is_lower_bound`; e.g. the DAA of the newest logged transaction's
+    /// chain block, when the snapshot did not store the resume block's).
     pub old_daa: u64,
+    /// M8 S5: true when `old_daa` is only a lower bound of the old block's DAA, false when it
+    /// is that block's own DAA. Missing in lines written before S5 (the one S4 line of
+    /// instance e9f4... holds the newest logged transaction's DAA): read as true, and the
+    /// existing line is not rewritten. Always written by new lines.
+    #[serde(default = "lower_bound_default")]
+    pub old_daa_is_lower_bound: bool,
     #[serde(with = "hex")]
     pub new_block: [u8; 32],
     pub new_daa: u64,
@@ -493,7 +500,16 @@ pub struct ReanchorLine {
     pub argument: String,
 }
 
+fn lower_bound_default() -> bool {
+    true
+}
+
 impl ReanchorLine {
+    /// `old_daa` for a reader: "598642669" when exact, ">= 598642669" when a lower bound.
+    pub fn old_daa_text(&self) -> String {
+        if self.old_daa_is_lower_bound { format!(">= {}", self.old_daa) } else { self.old_daa.to_string() }
+    }
+
     /// This line as one JSON line (no newline); `kind` must be `reanchor`.
     pub fn to_line(&self) -> Result<String, String> {
         if self.kind != REANCHOR {
@@ -979,8 +995,29 @@ pub struct TxRef {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckJson {
     pub name: String,
+    /// False only for a failed check. A check that could not run keeps `ok` true (it is
+    /// not a failure: the campaign's gates are unchanged) and says so in `status`.
     pub ok: bool,
     pub detail: String,
+    /// M8 S5: `Some(NotExercised)` for a check the A5 luck rule let pass without running
+    /// it (no winning holding); absent for a plain pass or failure, and in every campaign/1
+    /// file written before S5 (those read as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CheckStatus>,
+}
+
+/// A check's outcome besides plain pass/fail (`CheckJson::status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    /// The item was not exercised (A5 luck rule): neither a pass nor a failure.
+    NotExercised,
+}
+
+impl CheckJson {
+    pub fn not_exercised(&self) -> bool {
+        self.status == Some(CheckStatus::NotExercised)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

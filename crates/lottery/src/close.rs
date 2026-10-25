@@ -38,6 +38,40 @@ pub const TEST_FEE_ADDR: Payout = Payout::Schnorr([0x44; 32]);
 /// tests that need a smaller caller output edit the `Built` afterwards.
 pub const MIN_CALLER_OUTPUT: u64 = KAS;
 
+/// Round r+1's deadline as `close()` computes it (A4 check 20, `controller.sil:473-484`):
+/// T' = max(T + round_len, own + d_min), `own` the newest input's creation DAA score.
+pub fn close_deadline(deadline: u64, round_len: u64, input_daas: impl IntoIterator<Item = u64>, d_min: u64) -> u64 {
+    let own = input_daas.into_iter().max().unwrap_or(0);
+    (deadline + round_len).max(own + d_min)
+}
+
+/// Builder guard against stale inputs (M8 S5; DECISIONS D24, the accepted late-close gap).
+/// `close()` takes T' from the newest input's creation DAA, not from the DAA of the block
+/// that includes it (`controller.sil:473-484`; no script can bound the current DAA from
+/// above, R3), so a close that spends only old inputs, sent long after them, opens a round
+/// whose deadline has passed or nearly so and whose shards sell nothing (shard check 6;
+/// testnet-10 round 3, M8 S3b). Refused when T' < `now` + d_min / 2, `now` being the
+/// virtual DAA when the caller builds: the next round must keep at least half the minimum
+/// sales window. Honest callers add a funding input created just before the close (D24
+/// CP6). Returns T'. Not a script check: an attacker's own builder can skip it, which only
+/// costs that round its sales (D24).
+pub fn refuse_stale_inputs(deadline: i64, round_len: i64, d_min: i64, input_daas: impl IntoIterator<Item = u64>, now: u64) -> Result<u64, String> {
+    let nn = |v: i64, what: &str| u64::try_from(v).map_err(|_| format!("close guard: {what} {v} is negative"));
+    let (t, len, d_min) = (nn(deadline, "deadline")?, nn(round_len, "round_len")?, nn(d_min, "d_min")?);
+    let daas: Vec<u64> = input_daas.into_iter().collect();
+    let own = daas.iter().copied().max().unwrap_or(0);
+    let t_next = t.checked_add(len).zip(own.checked_add(d_min)).map(|(a, b)| a.max(b)).ok_or("close guard: T' overflows")?;
+    let floor = now.checked_add(d_min / 2).ok_or("close guard: now + d_min / 2 overflows")?;
+    if t_next < floor {
+        return Err(format!(
+            "close() refused by the builder (stale inputs): the next round's deadline T' = max(T + round_len, own + d_min) = {t_next} leaves {} DAA of sales after the virtual DAA {now}, less than d_min / 2 = {}; the newest input was created at DAA {own}. Add a funding input created just before the close (D24; controller.sil:473-484)",
+            t_next.saturating_sub(now),
+            d_min / 2
+        ));
+    }
+    Ok(t_next)
+}
+
 /// Root of the empty counter tree, Z_18 (spec M1 3; same for every m).
 pub fn z18() -> [u8; 32] {
     empty_hashes()[crate::smt::DEPTH]
@@ -345,6 +379,24 @@ impl CloseCase {
         self.build_with(Templates::get(self.b_max))
     }
 
+    /// `refuse_stale_inputs` for this case's controller and inputs at virtual DAA `now`:
+    /// T', or the refusal.
+    pub fn check_fresh(&self, now: u64) -> Result<u64, String> {
+        let c = &self.controller;
+        let mut daas = vec![self.controller_daa, self.params_daa];
+        daas.extend(self.shards.iter().map(|s| s.daa));
+        daas.extend(self.funding.iter().map(|f| f.daa));
+        refuse_stale_inputs(c.deadline, c.round_len, c.d_min, daas, now)
+    }
+
+    /// The builder for real submissions: `check_fresh(now)` first, then `build_with(t)`.
+    /// (`build`/`build_with` stay unguarded for the attack tests, which build stale cases
+    /// on purpose.)
+    pub fn build_fresh(&self, t: Arc<Templates>, now: u64) -> Result<Built, String> {
+        self.check_fresh(now)?;
+        Ok(self.build_with(t))
+    }
+
     /// Build against given templates (mutants compile one covenant without one check).
     pub fn build_with(&self, t: Arc<Templates>) -> Built {
         let x = self.expected();
@@ -462,6 +514,39 @@ mod tests {
         }
         assert_eq!(x.marker.roots.len(), 512);
         assert_eq!(x.shards[3].root, z18());
+    }
+
+    /// M8 S5 (D24; `controller.sil:473-484`): the builder refuses a close whose newest input
+    /// is so old that the next round would get less than d_min / 2 of sales after `now`
+    /// (the virtual DAA when the caller builds); a fresh funding input passes. Fixture:
+    /// T = 1,000,000, round_len 864,000, d_min 72,000, newest input 900,000 (funding).
+    #[test]
+    fn stale_close_inputs_are_refused_by_the_builder() {
+        let c = CloseCase::new(4);
+        assert_eq!(c.own(), 900_000);
+        // T' = max(T + round_len, own + d_min) = 1,864,000.
+        assert_eq!(close_deadline(1_000_000, 864_000, [4_000, 5_000, 900_000], 72_000), 1_864_000);
+        // A timely close: 1,864,000 - 1,000,100 >= 36,000 of sales.
+        assert_eq!(c.check_fresh(1_000_100), Ok(1_864_000));
+        // The last DAA that still leaves d_min / 2: T' - 36,000.
+        assert_eq!(c.check_fresh(1_828_000), Ok(1_864_000));
+        // One DAA later, and far later (T' already past: no underflow), refused.
+        for now in [1_828_001, 1_900_000, 3_000_000] {
+            let e = c.check_fresh(now).unwrap_err();
+            assert!(e.contains("stale inputs") && e.contains("d_min / 2") && e.contains("controller.sil:473-484"), "{now}: {e}");
+            let b = c.build_fresh(Templates::get(c.b_max), now);
+            assert!(b.is_err(), "{now}: the builder must refuse");
+        }
+        // A fresh funding input created just before the close: T' = own + d_min.
+        let mut f = c.clone();
+        f.funding[0].daa = 1_899_990;
+        assert_eq!(f.check_fresh(1_900_000), Ok(1_971_990));
+        let built = f.build_fresh(Templates::get(f.b_max), 1_900_000).expect("fresh input passes").finish();
+        assert_eq!(built.tx.inputs.len(), 4 + 2 + 1);
+        // A controller with nonsense timing fields is refused, not wrapped.
+        let mut bad = c.clone();
+        bad.controller.d_min = -1;
+        assert!(bad.check_fresh(1_000_100).is_err());
     }
 
     #[test]

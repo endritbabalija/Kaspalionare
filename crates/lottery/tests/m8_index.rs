@@ -894,7 +894,7 @@ fn ix6_store_formats_round_trip() {
     c.steps.push(StepJson {
         id: "C2".into(),
         txids: vec![TxRef { txid: ch.log[1].tx.id().as_bytes(), node: "wss://example.invalid/testnet-10".into(), action: "C2/deposit".into() }],
-        checks: vec![CheckJson { name: "9.99 KAS deposit refused".into(), ok: true, detail: "rejection reason text".into() }],
+        checks: vec![CheckJson { name: "9.99 KAS deposit refused".into(), ok: true, detail: "rejection reason text".into(), status: None }],
         daa: 123_456,
         wall_time: 1_760_000_000,
     });
@@ -952,6 +952,7 @@ fn s4_reanchor_line_round_trips_and_changes_no_state() {
         at,
         old_block: blk(old).as_bytes(),
         old_daa: 1_000 + old as u64,
+        old_daa_is_lower_bound: false,
         new_block: blk(new).as_bytes(),
         new_daa: 9_000 + new as u64,
         node: "wss://example.invalid/testnet-10".into(),
@@ -984,6 +985,26 @@ fn s4_reanchor_line_round_trips_and_changes_no_state() {
     let mut bad = ra(n, 1, 250);
     bad.kind = "add".into();
     assert!(bad.to_line().is_err());
+}
+
+/// M8 S5: `old_daa` of a re-anchor line is the index's recorded DAA for the old block,
+/// which may be only a lower bound; the line says which. The one line on disk (instance
+/// e9f4..., log line 407, written by S4 without the flag) reads as a lower bound and the
+/// file is not rewritten; a new line always writes the flag.
+#[test]
+fn s5_reanchor_old_daa_bound_is_explicit() {
+    let s4 = r#"{"kind":"reanchor","at":405,"old_block":"e2f2ddcfbea137fb31e7e5aeece693944354555abc00f8731472462313d1cf70","old_daa":598642669,"new_block":"1c6f6873fb149b31523f3355e049ee1e3e89d68650b2541a8ffed76696af6f72","new_daa":605547454,"node":"wss://vector-10.kaspa.green/kaspa/testnet-10/wrpc/borsh","live_checked":380,"wall_time":1792888212,"argument":"KIP-20 covenant binding"}"#;
+    let v: serde_json::Value = serde_json::from_str(s4).unwrap();
+    let r: store::ReanchorLine = serde_json::from_value(v).unwrap();
+    assert_eq!(r.old_daa, 598_642_669);
+    let out = r.to_line().unwrap();
+    assert!(out.contains(r#""old_daa_is_lower_bound":true"#), "an S4 line without the flag is a lower bound: {out}");
+    let back: store::ReanchorLine = serde_json::from_str(&out).unwrap();
+    assert_eq!(back, r);
+    let exact: store::ReanchorLine = serde_json::from_str(&out.replace(r#""old_daa_is_lower_bound":true"#, r#""old_daa_is_lower_bound":false"#)).unwrap();
+    assert!(exact.to_line().unwrap().contains(r#""old_daa_is_lower_bound":false"#));
+    assert_ne!(exact, r);
+    assert_eq!((r.old_daa_text().as_str(), exact.old_daa_text().as_str()), (">= 598642669", "598642669"));
 }
 
 // ---------------------------------------------------------------- IX8

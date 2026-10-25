@@ -1016,3 +1016,71 @@ Timing: a catch-up of about 29 h through public nodes needs many retries. Single
 | SN4 (m = 2, D = 3,069) | held main, either bonus, p = 1/N | 129,055 | 142,506 | 0.136 | `f9388fc8…dd95` → [6, 10, 22, 25, 27]+2 | `788c2c98…2a03` → [1, 6, 11, 12, 29]+1 (main differs) |
 
 In total: 735,196 header hashes in 0.84 s, about 0.86–0.95 million tries per second, against 1,282,554 expected. In every scenario the ungrounded first candidate gave a different result from the ground one. **What this shows (D100):** a sole miner chooses X.hash for one header hash per try and can make a chosen combination win (expected C = 142,506·m tries for one target combination) in under a second on a PC. On simnet nothing competes for the block and proof of work is skipped. On a real network every try is a full proof-of-work solution, and the block must still win the race. So this is evidence of the mechanism, not a mainnet cost. Earlier runs on the same code: SN1 850,198 tries in 0.89 s; SN2 140,311 in 0.16 s; SN3 80,482 in 0.10 s; SN4 61,874 in 0.07 s.
+
+## M8 S5: review tools (sil-debug, kascov preflight, bundle refresh; spec 8 A7, D116; 2026-10-25)
+
+Nothing was submitted to any network, and no `.sil` or repo code changed. The helper programs below are scratch tools in the session scratchpad, not in the repository.
+
+### sil-debug on the campaign's `draw()` and `claim()` spends
+
+**Build.** `cli-debugger` from the pinned `refs/silverscript` v1.0.0 (`3ed97333`, `debugger/cli`), `cargo +1.94.0 build -j 1 --release --locked -p cli-debugger` with `CARGO_TARGET_DIR=crates/target/sil-debug` (8 min 27 s). `refs/` is unchanged (`git status` clean). The debugger links rusty-kaspa **`a41a333b`**, SilverScript's own revision (`refs/silverscript/Cargo.toml:24-31`), not our pinned v2.1.0. `crypto/txscript/src` differs between the two revisions (`lib.rs`, `opcodes/mod.rs`, `data_stack.rs`, `runtime_resource_meter.rs`, zk precompiles: `diff -r` of the two cargo checkouts). This is the open toolchain task in the DECISIONS pins row (2026-10-09), so a debugger result is evidence from that engine revision only.
+
+**Inputs.** Round 8's draw `a08b156fb90063e62da8a760b3afbcf0a58bf3c16dee9d2268075dba1a8eed6c` (input 0, the drawer) and claim `43fb4cf3c4405e61ddb6e50c4af5e250f7c91348f5b5aa412f8b71f833f8b37f` (input 0, the ticket). Both were rebuilt from the indexer store (`tn10-data/e9f4…/index-log.jsonl` and `bundle.json`): the real transaction, each spent UTXO's value, creation DAA, script and covenant ID, and the input-0 state decoded by `lottery::index::State::decode` (constructor arguments `TicketState::ctor(pool hash)` and `DrawerState::ctor(controller hash)`). The entry arguments were decoded from the real signature script. The debugger test file gives input 0 by constructor arguments, every other input with its real UTXO script and signature script, and every output with its real script and covenant binding. The committed sources `Sources::committed(4)` for the ticket and the drawer are byte-identical to `covenants/ticket.sil` and `covenants/drawer.sil`, so the debugger ran on the repo files.
+
+**Stock `cli-debugger --run`:**
+
+| spend | result |
+|---|---|
+| claim (`ticket.sil`, entry `claim`, 5 args) | **PASS** |
+| draw (`drawer.sil`, entry `draw`, 23 args) | stops at **check 7**, `drawer.sil:498` `require(mk_daa == mkDaa)`. The stock CLI creates every UTXO with `block_daa_score` 0 (`debugger/cli/src/main.rs:944`), so `OpTxInputDaaScore(1)` reads 0, not the marker's 605,547,994 |
+
+**Patched copy (scratch).** The patched copy is `debugger/cli/src/main.rs` copied, built against the same `debugger-session` crate in `refs/`. The patch changes only the transaction context: (1) each UTXO gets its real creation DAA; (2) a `SeqCommitAccessor` answers for the anchor X only, with the commitment recomputed from the proof's X preimage exactly as check 8 does. On chain the node supplied that commitment and accepted the draw. (3) It checks that the redeem script compiled from the source and constructor arguments equals the on-chain one. (4) It counts the stack peak opcode by opcode.
+
+The patch is needed for two reasons. With (1) but without (2), the draw stops at `drawer.sil:544` with "attempt to execute invalid opcode Opcode<0xd4>": the stock CLI gives the engine no accessor (`main.rs:948`), and `OpChainblockSeqCommit` is then invalid (`a41a333` `crypto/txscript/src/opcodes/mod.rs:1581-1585`). Second, the stock `--run` reports PASS once every opcode has executed (`session.rs:366-405`). It does not apply the engine's final clean-stack check, so the patched copy prints the final stack.
+
+| spend | redeem compiled = on chain | result | opcodes run (redeem script) | stack peak (dstack + astack; limit 244, rusty-kaspa v2.1.0 `crypto/txscript/src/lib.rs:77`) | final stack |
+|---|---|---|---|---|---|
+| claim | yes (25,452 B) | **PASS**: every `require` passes | 22,453 | **88**, at `ticket.sil:331` (check 15, `validateOutputState` of ticket') | `[01]` |
+| draw | yes (64,629 B) | **PASS**: every `require` passes, the anchor checks 7-8 included | 57,170 | **240**, at `drawer.sil:994` (check 24, `validateOutputStateWithInputTemplate` of controller') | `[01]` |
+
+**What it shows.** The entry points are `claim(idx = 2, leaves, siblings, pool_pl = 1, pool_sl = 1,831)` on a round-8 ticket (b 4, deadline 598,647,336, claimed 0x00) and `draw(anchor 272 B, …)`. Every `require` passes on the real bytes. The draw's runtime stack peak of 240 at check 24 leaves **4 free slots**, the same headroom that `docs/costs.md` M7-f measured at compile time (n = 5 extra locals fails with 245 > 244). This is a runtime confirmation of the D104 floor, now on a real testnet spend. The claim peaks at 88. Surprises: the three debugger limits above (UTXO DAA 0, no seq-commit accessor, PASS without the final clean-stack check), plus the debugger's own engine revision. In the stock CLI none of them changes the claim's result. All of them matter for `draw()`.
+
+### kascov.io preflight
+
+**How to submit (from the site, 2026-10-25).** `POST https://kascov.io/data/testnet-10/preflight` takes the transaction in the SDK/RPC JSON shape. Each input carries `utxo {amount, scriptPublicKey}`. The engine runs on every input that has both its `signatureScript` and its UTXO script. The site states that it is public and keyless, the response is `no-store`, and nothing is broadcast or kept (`https://kascov.io/openapi.json`; the playground's `#/preflight` page). No account, login or registration was needed. The `kascov-decode` crate offers no preflight. `GET /data/testnet-10/debug/{txid}` is the spend-trace replay. kascov had already indexed the instance from public chain data, on its own: covenant `e9f4…88d6`, 384 events, 383 live UTXOs, `lineage_complete` true. Its server runs SilverScript v1.0.0 `3ed97333` (`/data/testnet-10/compilers.json`). Its rusty-kaspa revision is not published.
+
+**What was sent.** For each shape, one accepted campaign transaction, rebuilt from the index log with every input's spent UTXO (amount, script, `blockDaaScore`, `covenantId`), the outputs with their covenant bindings, and the lock time. The funding inputs' script is the transaction's own zero-ID change script; the funding signature check passing in every run confirms it. The bodies hold public testnet-10 bytes only: no keys, no `.env`, no `kaspa:` string (checked). The redeem scripts sent are the ones already revealed on chain. No `.sil` source was uploaded: the compile endpoint was not used. All fourteen calls answered HTTP 200.
+
+| shape | txid | kascov verdict | inputs run: pass / total | kascov compute / transient / storage | ours (`tn10 masses`; storage = the committed mass) |
+|---|---|---|---|---|---|
+| buy (b = 4) | `f874f270…2dfc` | **ready** | 2 / 2 | 46,022 / 158,488 / 83,083 | 46,022 / 158,488 / 81,507 |
+| buy with referral | `10241a93…1503` | **ready** | 2 / 2 | 46,434 / 158,696 / 109,479 | 46,434 / 158,696 / 109,470 |
+| set_params | `ef3f00a8…3d36` | **ready** | 2 / 2 | 6,404 / 13,896 / 23,663 | 6,404 / 13,896 / 23,654 |
+| close r8 (K = 16) | `6e9ddf5b…2b9b` | **will_fail**: input 0 (controller) `input_script_failed` after 1,493,292 of 3,379,999 units | 15 / 16 reported (inputs 1-15 pass; inputs 16-18 not reported) | 293,743 / 864,612 / 418,251 | 293,743 / 864,612 / 393,234 |
+| draw r8 (real anchor) | `a08b156f…ed6c` | **will_fail**: input 0 (drawer) after 370,579 of 1,499,999 units | 4 / 5 (marker, vault, controller legs and funding pass) | 139,536 / 442,944 / 41,212 | 139,536 / 442,944 / 41,104 |
+| draw of the no-sales round | `596ef438…fbae` | **will_fail**: input 0 after 370,539 units | 4 / 5 | 137,613 / 442,052 / 32,419 | 137,613 / 442,052 / 32,320 |
+| claim (tier 4, ACCRUE) | `43fb4cf3…b37f` | **ready** | 3 / 3 | 48,190 / 151,160 / 80,207 | 48,190 / 151,160 / 80,170 |
+| request_deposit | `ae05e4a1…4115` | **ready** | 2 / 2 | 23,195 / 77,580 / 23,991 | 23,195 / 77,580 / 23,982 |
+| request_withdraw | `ee68b8f6…bc32` | **ready** | 3 / 3 | 24,729 / 82,516 / 23,769 | 24,729 / 82,516 / 23,744 |
+| settle, deposit convert | `3e3bf0d8…6b38` | **ready** | 3 / 3 | 22,002 / 73,248 / 29,571 | 22,002 / 73,248 / 29,546 |
+| settle, PAY | `b583d8cd…2d5a` | **ready** | 3 / 3 | 23,159 / 73,596 / 24,112 | 23,159 / 73,596 / 24,087 |
+| settle, carried (PAY) | `717ff462…db69` | **ready** | 3 / 3 | 23,159 / 73,596 / 25,943 | 23,159 / 73,596 / 25,913 |
+| settle, FINAL | `28b0223c…c778` | **ready** | 3 / 3 | 22,102 / 73,248 / 1,332 | 22,102 / 73,248 / 1,302 |
+| refresh | `d9886d26…6d60` | **ready** | 2 / 2 | 29,097 / 103,468 / 76,917 | 29,097 / 103,468 / 76,907 |
+
+Not exercised: a void (missed-window) draw, because the campaign had none (the TEST-ONLY `void-m7` probe is a different instance), and `return_deposit_*`.
+
+**Where kascov differs from our engine and the node** (each of these transactions was accepted by testnet-10 nodes and by the local v2.1.0 engine):
+
+1. **UTXO DAA score not modelled.** Removing `blockDaaScore`, setting it to 0, or sending it as a string gave the same failure at the same script-unit count for the draw (370,579) and the close (1,493,292), so kascov ignores the field. The drawer's check 7 compares the `mk_daa` argument with `OpTxInputDaaScore(1)`. The stock debugger with UTXO DAA 0 fails exactly there (above), which is very likely kascov's draw failure. The close computes T' from the newest input's creation DAA (`controller.sil:473-484`, `OpTxInputDaaScore` at `:475`), so the controller' it expects differs from the output. This is inferred from the field test and the code; kascov's trace was not read. The buy, claim and refresh pass because their DAA checks are lower or upper bounds that a constant DAA satisfies. Because the draw stops at check 7, **whether kascov supports `OpChainblockSeqCommit` (KIP-21) could not be tested**. Result for `close()` and `draw()`: **unsupported** (preflight cannot model creation DAA), not a defect of the spends.
+2. **Storage mass.** kascov's storage mass is 9 to 25,017 grams above the storage mass committed in each accepted transaction, which equals ours: buy +1,576, close +25,017, the others +9 to +108. Compute and transient mass agree exactly for all fourteen. kascov's fee estimate is its own formula (100 sompi × compute grams + 200,000), not the node's fee rate on the priority mass (D120).
+3. **Close: only 16 of 19 inputs are reported** in `executed` (inputs 16-18, two shards and the funding input, are missing). No note in the response explains it.
+
+**Spend-trace replay** (`GET /data/testnet-10/debug/{txid}`, the same fourteen txids): every one answered `ok: true`, `pass: false`, "script ran, but verification failed". kascov documents this: "replayed against a fabricated 1-in/1-out transaction … introspection checks … can fail here even though the spend passed on-chain". Each replay runs one tracked input, for example the pool leg for the claim and the drawer for the draw. Our scripts introspect other inputs and outputs from their first checks, so the replay has no review value for this protocol. The traces are capped at 2,000 opcodes, and close, draw and refresh were truncated.
+
+### Bundle refresh
+
+`cargo build -j 1 --release -p tn10` (clean), then from `crates/`:
+
+- `./target/release/tn10 bundle --out ../docs/launch/tn10-m8.json` (vector-10.kaspa.green, v2.1.0, synced, utxoindex): covenant ID recomputed, 11 templates = the local compilation, genesis checks pass, **383 live UTXOs** (redeem = template + state bytes, P2SH = script), every one present on the node; wrote the file, **598,201 bytes, snapshot DAA 605,601,500**. The previous S3b bundle was 545,095 bytes with 305 UTXOs at DAA 598,620,952.
+- `./target/release/tn10 bundle-verify ../docs/launch/tn10-m8.json` (muon-10.kaspa.blue, DAA 605,602,325): `bundle-verify ../docs/launch/tn10-m8.json: PASS`, **exit 0**. kascov's own index also counts 383 live UTXOs for the instance.

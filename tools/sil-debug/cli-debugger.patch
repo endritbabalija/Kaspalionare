@@ -1,0 +1,95 @@
+--- a/debugger/cli/src/main.rs
++++ b/debugger/cli/src/main.rs
+@@ -941,11 +941,16 @@
+ 
+     let utxos = utxo_specs
+         .into_iter()
+-        .map(|(value, spk, covenant_id)| UtxoEntry::new(value, spk, 0, kas_tx.is_coinbase(), covenant_id))
++        .enumerate()
++        .map(|(i, (value, spk, covenant_id))| UtxoEntry::new(value, spk, sdbx_daa(i), kas_tx.is_coinbase(), covenant_id))
+         .collect::<Vec<_>>();
+     let populated_tx = PopulatedTransaction::new(&kas_tx, utxos);
+     let cov_ctx = CovenantsContext::from_tx(&populated_tx)?;
+-    let ctx = EngineCtx::new(&sig_cache).with_reused(&reused_values).with_covenants_ctx(&cov_ctx);
++    let sdbx_acc = SdbxSeqCommit::from_env();
++    let ctx = EngineCtx::new(&sig_cache)
++        .with_reused(&reused_values)
++        .with_covenants_ctx(&cov_ctx)
++        .with_seq_commit_accessor_opt(sdbx_acc.as_ref().map(|a| a as &dyn kaspa_txscript::SeqCommitAccessor));
+     let active_input =
+         kas_tx.inputs.get(tx.active_input_index).ok_or_else(|| format!("missing tx input at index {}", tx.active_input_index))?;
+     let active_utxo =
+@@ -971,6 +976,10 @@
+         Some(DebugCovenantBinding::Cov) => covenant_input_states.clone().map(DebugValue::Array),
+         None => None,
+     };
++    if let Ok(want) = std::env::var("SDB_REDEEM") {
++        let got: String = active_lockscript.iter().map(|b| format!("{b:02x}")).collect();
++        println!("SDBX redeem script compiled from the source and ctor args == on-chain redeem: {} ({} bytes)", got == want, active_lockscript.len());
++    }
+     let engine = DebugEngine::from_transaction_input(&populated_tx, active_input, tx.active_input_index, active_utxo, ctx, flags);
+     let shadow_tx_context = ShadowTxContext {
+         tx: &populated_tx,
+@@ -986,6 +995,32 @@
+         session = session.with_covenant_mode(covenant_param_value, covenant_target);
+     }
+ 
++    if cli.run && std::env::var("SDB_STACK_PEAK").is_ok() {
++        let (mut ops, mut peak_d, mut peak_all, mut peak_at) = (0usize, 0usize, 0usize, 0usize);
++        let mut peak_line = String::new();
++        loop {
++            match session.step_opcode() {
++                Ok(Some(_)) => {
++                    ops += 1;
++                    let snap = session.stack_snapshot();
++                    let (d, a) = (snap.dstack.len(), snap.astack.len());
++                    if d > peak_d { peak_d = d; }
++                    if d + a > peak_all { peak_all = d + a; peak_at = ops; peak_line = session.source_context().and_then(|c| c.lines.into_iter().find(|l| l.is_active).map(|l| format!("{}: {}", l.line, l.text.trim()))).unwrap_or_default(); }
++                }
++                Ok(None) => break,
++                Err(err) => {
++                    println!("SDBX stopped after {ops} opcodes; peak dstack {peak_d}, peak dstack+astack {peak_all} (at opcode {peak_at})");
++                    print_failure(&session, err);
++                    return Err("FAIL".into());
++                }
++            }
++        }
++        let snap = session.stack_snapshot();
++        println!("SDBX ran {ops} opcodes of the redeem script; peak dstack {peak_d}, peak dstack+astack {peak_all} (at opcode {peak_at})");
++        println!("SDBX peak at source line {peak_line}");
++        println!("SDBX final dstack {:?} astack {:?}", snap.dstack, snap.astack);
++        return Ok(());
++    }
+     if cli.run {
+         let expect_fail = expect == Some(TestExpectation::Fail);
+         match session.run_to_completion() {
+@@ -1044,3 +1079,29 @@
+         assert!(matches!(integer, DebugValue::Int(1234)));
+     }
+ }
++
++fn sdbx_daa(i: usize) -> u64 {
++    std::env::var("SDB_INPUT_DAA").ok().and_then(|v| v.split(',').nth(i).map(|x| x.trim().parse().expect("daa"))).unwrap_or(0)
++}
++
++struct SdbxSeqCommit {
++    block: Hash,
++    commit: Hash,
++}
++
++impl SdbxSeqCommit {
++    fn from_env() -> Option<Self> {
++        let v = std::env::var("SDB_SEQ_COMMIT").ok()?;
++        let (b, c) = v.split_once('=')?;
++        Some(Self { block: parse_hash32(b).ok()?, commit: parse_hash32(c).ok()? })
++    }
++}
++
++impl kaspa_txscript::SeqCommitAccessor for SdbxSeqCommit {
++    fn is_chain_ancestor_from_pov(&self, block_hash: Hash) -> Option<bool> {
++        Some(block_hash == self.block)
++    }
++    fn seq_commitment_within_depth(&self, block_hash: Hash) -> Option<Hash> {
++        (block_hash == self.block).then_some(self.commit)
++    }
++}

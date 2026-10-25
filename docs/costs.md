@@ -868,6 +868,26 @@ The ±1 / ±4 grams are one signature-script byte (a minimally encoded argument 
 
 **Margin floor note closed (MF5).** At 1.5, wherever neither the edge rule nor the cap binds, `fix_jackpot` gives the largest jackpot the whale check allows, and jackpot money per ticket is within 1/N sompi below q = ⌊p w / margin⌋ (q / p = 0.5267 at the fixture shares; 0.6752 at 1.17). At 1.5 the edge rule is never the binding check (q < a = 0.629 p).
 
+**Testnet-10 fees (S3b–S4, instance `e9f4f810…88d6`, production templates).** The fee rate was the node's normal bucket, which was 100 sompi/gram throughout, so every fee is the priority mass × 100 sompi (D120). The per-shape masses and fees of all 300 C0–C7 instance transactions are in `docs/tn10-mass-check.md` M8, "Masses and fees per shape" (`tn10 masses`; the computed storage mass equals the committed one for every transaction). In brief:
+
+| | fee per transaction (KAS) |
+|---|---|
+| `close()` K = 16 | 0.4323 |
+| `draw()`, real anchor | 0.2210–0.2217 |
+| buy b = 4 (b = 1: higher storage mass from smaller change outputs) | 0.079–0.084 (b = 1: 0.309–0.323) |
+| claim (tier 4, ACCRUE) | 0.080–0.083 |
+| request / settle | 0.037–0.041 |
+| `refresh()` of a ticket (soak) | 0.0769 |
+| genesis (K = 16) | 0.4609 |
+
+- **Instance fees C0–C7:** 35.56 tKAS for 300 transactions. The soak's sitting 3 (close, draw, four claims, refresh, fresh funding) cost about 1.05 tKAS.
+- **Spent or locked** (fees plus money left in the instance): 556.78 tKAS at C7, peak 843.73 (after round 2's buys, before the late draw and the withdrawal settles paid back), 890.54 after the soak. A campaign budget must state the peak as well as the end figure (DECISIONS, M8 owner amendments).
+- The `close()` masses equal M7's (293,743 / 864,612). The real-anchor draws are within a few hundred grams of M7's.
+
+**Drawer stack peak confirmed on a real spend (S5, sil-debug).** On round 8's `draw()` (`a08b156f…ed6c`), the patched `cli-debugger` (`tools/sil-debug/`) counts a runtime peak of **240 of 244** combined stack items, at `drawer.sil:994` (check 24). That leaves 4 free slots, the D104 floor measured at compile time above and in M7. The claim (`43fb4cf3…b37f`) peaks at 88. Caveat: the debugger links rusty-kaspa `a41a333b`, not v2.1.0.
+
+**kascov storage mass (note).** kascov.io's preflight agrees with our compute and transient mass on all 14 shapes. Its storage mass is 9 to 25,017 grams above the committed storage mass of each accepted transaction (buy +1,576, close +25,017, the others +9 to +108); the committed mass equals ours. Its fee estimate (100 sompi × compute grams + 200,000) is its own formula, not the node's rate on the priority mass. So do not size fees from kascov (`docs/tn10-mass-check.md` "M8 S5: review tools").
+
 ## Spike VDF+ZK: the seed proof inside `draw()` (local engine; spec `docs/specs/spike-vdf.md`)
 
 Measured 2026-10-13 by `cargo test -p lottery --release --test spike_vdf -- --nocapture --test-threads=1`. Test-only drawer variants, compiled in memory from a patch of the committed `drawer.sil` (unchanged). The VDF output and proof follow the 272-byte anchor inside the `anchor` argument, so the variants add no entry parameter. V1 = plain Groth16 (`g16.verify`, 4 public inputs: the X.hash halves and the MinRoot output (x_T, y_T); real proof from a local `ark-groth16` 0.6 setup, T = 64). V2 = RISC Zero receipt wrapped in Groth16 (`r0.g16.verify`, SilverScript's fixture receipt; the journal binding sha256(X.hash || y) is computed but the fixture's journal is verified). V3 = RISC Zero succinct (rusty-kaspa's fixture receipt, seal 222,668 B).

@@ -50,7 +50,7 @@ use lottery::index::{Accepted, Event, Live, Role, State, classify, parse_settle,
 use lottery::ledger::Ledger;
 use lottery::params::{SetParamsCase, admin_hash, blake2b, xonly};
 use lottery::state::{Payout, ShardState};
-use lottery::store::{self, Campaign, CheckJson, ClaimStore, Funding, Payer, StepJson, TxRef, Wallet};
+use lottery::store::{self, Campaign, CheckJson, CheckStatus, ClaimStore, Funding, Payer, StepJson, TxRef, Wallet};
 use lottery::vault::{DepositCase, SettleCase, WithdrawCase};
 
 use crate::indexer::{self, ChainBatch, ChainBlock, ChainTx, Indexer};
@@ -819,11 +819,15 @@ impl<N: Net> Runner<N> {
     }
 
     async fn check(&mut self, step: &str, name: &str, ok: bool, detail: impl Into<String>) -> R<()> {
-        let detail = detail.into();
+        self.record(step, CheckJson { name: name.into(), ok, detail: detail.into(), status: None }).await
+    }
+
+    /// Record a check (replacing an earlier one of the same name) and save.
+    async fn record(&mut self, step: &str, k: CheckJson) -> R<()> {
         let i = self.step_mut(step).await?;
-        println!("  [{}] {step} {name}: {detail}", if ok { "ok" } else { "FAIL" });
-        self.c.steps[i].checks.retain(|k| k.name != name);
-        self.c.steps[i].checks.push(CheckJson { name: name.into(), ok, detail });
+        println!("  [{}] {step} {}: {}", if !k.ok { "FAIL" } else if k.not_exercised() { "not exercised" } else { "ok" }, k.name, k.detail);
+        self.c.steps[i].checks.retain(|x| x.name != k.name);
+        self.c.steps[i].checks.push(k);
         self.save()
     }
 
@@ -1447,15 +1451,11 @@ impl<N: Net> Runner<N> {
             let fund = self.fresh_fund(10 * KAS).await?;
             let (s, _) = self.net.sink().await?;
             self.set_var(&format!("close_start.r{r}"), hex(&s.as_bytes()));
-            let (f, _, ops) = self.build_close(&fund)?;
-            let t_next = close_deadline(ctrl.deadline as u64, ctrl.round_len as u64, f.entries.iter().map(|e| e.block_daa_score), ctrl.d_min as u64);
+            let (f, c, ops) = self.build_close(&fund)?;
+            // The library's stale-input guard (M8 S5, `lottery::close::refuse_stale_inputs`;
+            // D24, controller.sil:473-484), at the virtual DAA just before submission.
             let now = self.net.daa().await?;
-            if t_next < now + ctrl.d_min as u64 / 2 {
-                return Err(format!(
-                    "{action}: not submitted: round {}'s deadline would be {t_next} (virtual DAA {now}), less than d_min / 2 of sales (stale inputs, controller.sil:473-484)",
-                    r + 1
-                ));
-            }
+            c.check_fresh(now).map_err(|e| format!("{action}: not submitted: round {}: {e}", r + 1))?;
             self.net.verify_inputs(&f, &ops).await?;
             self.send_wait(step, action, &f).await?;
         }
@@ -1709,8 +1709,8 @@ impl<N: Net> Runner<N> {
         let bal: u64 = self.net.funds(&x0).await?.iter().map(|f| f.value).sum();
         self.c.vars.insert("balance_c0".into(), bal.to_string());
         let mut c0 = StepJson { id: "C0".into(), txids: vec![], checks: vec![], daa: sd, wall_time: self.net.now().await? };
-        c0.checks.push(CheckJson { name: "balance >= budget".into(), ok: bal >= self.opts.budget, detail: format!("{} >= {}", kas(bal), kas(self.opts.budget)) });
-        c0.checks.push(CheckJson { name: "fee rate >= 100 sompi/gram".into(), ok: rate.sompi_per_gram >= 100, detail: format!("normal bucket {} -> {} sompi/gram", rate.raw, rate.sompi_per_gram) });
+        c0.checks.push(CheckJson { name: "balance >= budget".into(), ok: bal >= self.opts.budget, detail: format!("{} >= {}", kas(bal), kas(self.opts.budget)), status: None });
+        c0.checks.push(CheckJson { name: "fee rate >= 100 sompi/gram".into(), ok: rate.sompi_per_gram >= 100, detail: format!("normal bucket {} -> {} sompi/gram", rate.raw, rate.sompi_per_gram), status: None });
         for k in &c0.checks {
             println!("  [{}] C0 {}: {}", if k.ok { "ok" } else { "FAIL" }, k.name, k.detail);
         }
@@ -1890,7 +1890,7 @@ impl<N: Net> Runner<N> {
             }
             println!("  C4: no winning holding in round {r} (retry {retry})");
         }
-        self.check(s, "claims from the wallet store", true, "not exercised: no winning holding after two extra rounds (A5 luck rule)").await
+        self.record(s, luck_check("claims from the wallet store", 0, String::new(), "not exercised: no winning holding after two extra rounds (A5 luck rule)".into())).await
     }
 
     /// C5: round 2 (m = 2) with the referral threshold, the withdrawals and the close.
@@ -2040,7 +2040,7 @@ impl<N: Net> Runner<N> {
         }
         self.set_var("c5c_round", r4);
         let n = self.claims(s, &format!("C5c/r{r4} index"), r4, ClaimFrom::Index, false, 1).await?;
-        self.check(s, &format!("one round-{r4} claim from the indexer store"), true, if n > 0 { "exercised".to_string() } else { format!("not exercised: no winning round-{r4} holding of ours (luck)") }).await
+        self.record(s, luck_check(&format!("one round-{r4} claim from the indexer store"), n, "exercised".to_string(), format!("not exercised: no winning round-{r4} holding of ours (luck)"))).await
     }
 
     /// C6: settle the carried requests; the next two rounds, plain (rounds 5 and 6 after
@@ -2254,9 +2254,10 @@ impl<N: Net> Runner<N> {
         // index of ours is claimed in this sitting, before the tickets' return_deposit_after
         // opens (T + D_RET), each with the dual build and comparison.
         let n = self.claims(s, &format!("C8/r{r}"), r, ClaimFrom::Both, false, usize::MAX).await?;
-        let how = |what: &str| if n > 0 { format!("exercised ({what}; see the dual-claim check)") } else { format!("not exercised: no winning round-{r} holding of ours (luck)") };
-        self.check(s, "A7: a claim from wallet-kept trees > 30 h later", true, how("built from the wallet store, identical to the submitted one")).await?;
-        self.check(s, "A7: a claim from the indexer copy", true, how("the indexer-built claim was submitted")).await?;
+        let how = |what: &str| format!("exercised ({what}; see the dual-claim check)");
+        let not = format!("not exercised: no winning round-{r} holding of ours (luck)");
+        self.record(s, luck_check("A7: a claim from wallet-kept trees > 30 h later", n, how("built from the wallet store, identical to the submitted one"), not.clone())).await?;
+        self.record(s, luck_check("A7: a claim from the indexer copy", n, how("the indexer-built claim was submitted"), not)).await?;
         if !self.done("C8/refresh ticket") {
             // The oldest live ticket of the soak round (bought at t0, idle since).
             // (min by creation DAA: a ticket' left by the claim above is new, not idle.)
@@ -2281,7 +2282,7 @@ impl<N: Net> Runner<N> {
         let detail = format!(
             "old block {} (DAA {}) -> new block {} (DAA {}) on {}; {} live instance UTXOs unchanged, no unknown instance-bound UTXO ({} node entries, {} not instance-bound); argument: {}",
             hex(&l.old_block),
-            l.old_daa,
+            l.old_daa_text(),
             hex(&l.new_block),
             l.new_daa,
             l.node,
@@ -2311,7 +2312,7 @@ impl<N: Net> Runner<N> {
                     "- after {} log lines: `{}` (DAA {}) -> `{}` (DAA {}) on {}, {} live instance UTXOs unchanged, wall {}\n",
                     r.at,
                     hex(&r.old_block),
-                    r.old_daa,
+                    r.old_daa_text(),
                     hex(&r.new_block),
                     r.new_daa,
                     r.node,
@@ -2324,7 +2325,8 @@ impl<N: Net> Runner<N> {
         for st in &self.c.steps {
             t.push_str(&format!("## {} (DAA {}, wall {})\n\n", st.id, st.daa, st.wall_time));
             for k in &st.checks {
-                t.push_str(&format!("- [{}] {}: {}\n", if k.ok { "x" } else { " " }, k.name, k.detail));
+                t.push_str(&check_line(k));
+                t.push('\n');
             }
             if !st.txids.is_empty() {
                 t.push_str(&format!("\n{} transactions:\n", st.txids.len()));
@@ -2371,9 +2373,26 @@ impl<N: Net> Runner<N> {
 /// The next round's deadline a close() with inputs created at `input_daas` writes:
 /// T' = max(T + round_len, own + d_min), own = the newest input's creation DAA
 /// (`controller.sil:473-484`, check 20).
-pub fn close_deadline(deadline: u64, round_len: u64, input_daas: impl IntoIterator<Item = u64>, d_min: u64) -> u64 {
-    let own = input_daas.into_iter().max().unwrap_or(0);
-    (deadline + round_len).max(own + d_min)
+/// A check under the A5 luck rule: a pass when `n` > 0 items were exercised, otherwise
+/// status `not_exercised` with that detail (M8 S5: not recorded as a pass).
+pub fn luck_check(name: &str, n: usize, exercised: String, not_exercised: String) -> CheckJson {
+    if n > 0 {
+        CheckJson { name: name.into(), ok: true, detail: exercised, status: None }
+    } else {
+        CheckJson { name: name.into(), ok: true, detail: not_exercised, status: Some(CheckStatus::NotExercised) }
+    }
+}
+
+/// One check as a `report.md` line (no newline): `[x]` pass, `[ ]` failure, `[-]` ... NOT
+/// EXERCISED.
+pub fn check_line(k: &CheckJson) -> String {
+    if !k.ok {
+        format!("- [ ] {}: {}", k.name, k.detail)
+    } else if k.not_exercised() {
+        format!("- [-] {} (NOT EXERCISED): {}", k.name, k.detail)
+    } else {
+        format!("- [x] {}: {}", k.name, k.detail)
+    }
 }
 
 /// `campaign status`: the step, the checks and the next soak sitting.
@@ -2386,9 +2405,13 @@ pub fn status(root: &Path, cov: Option<Hash>, mode: SoakMode) -> R<()> {
     println!("campaign {cov_hex}: next step {}", c.step);
     for s in &c.steps {
         let fails: Vec<&CheckJson> = s.checks.iter().filter(|k| !k.ok).collect();
-        println!("  {}: {} transactions, {} checks ({} failed), DAA {}, wall {}", s.id, s.txids.len(), s.checks.len(), fails.len(), s.daa, s.wall_time);
+        let ne: Vec<&CheckJson> = s.checks.iter().filter(|k| k.ok && k.not_exercised()).collect();
+        println!("  {}: {} transactions, {} checks ({} failed, {} not exercised), DAA {}, wall {}", s.id, s.txids.len(), s.checks.len(), fails.len(), ne.len(), s.daa, s.wall_time);
         for k in fails {
             println!("    FAIL {}: {}", k.name, k.detail);
+        }
+        for k in ne {
+            println!("    NOT EXERCISED {}: {}", k.name, k.detail);
         }
     }
     let t0 = c.vars.get("soak_t0").and_then(|v| v.parse().ok());
@@ -2403,6 +2426,7 @@ pub fn status(root: &Path, cov: Option<Hash>, mode: SoakMode) -> R<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lottery::close::close_deadline;
 
     #[test]
     fn refusal_reason_matching() {
@@ -2435,7 +2459,7 @@ mod tests {
         c.steps.push(StepJson {
             id: "C2".into(),
             txids: actions.iter().map(|(a, t)| TxRef { txid: [*t; 32], node: "n".into(), action: a.to_string() }).collect(),
-            checks: vec![CheckJson { name: "refused X".into(), ok: true, detail: String::new() }],
+            checks: vec![CheckJson { name: "refused X".into(), ok: true, detail: String::new(), status: None }],
             daa: 1,
             wall_time: 1,
         });
@@ -2480,6 +2504,41 @@ mod tests {
         assert!(fresh >= close_at + d_min / 2, "the guard in close() lets it through");
         // A timely close is unchanged in kind: T + round_len still wins when inputs are older.
         assert_eq!(close_deadline(t, len, [t - 100], d_min), t + len);
+        // M8 S5: the library guard the runner now calls refuses the S3b close and passes the
+        // one with a fresh input.
+        let guard = |daas: &[u64]| lottery::close::refuse_stale_inputs(t as i64, len as i64, d_min as i64, daas.iter().copied(), close_at);
+        assert!(guard(&[598_556_019, 598_552_725, 598_543_977]).unwrap_err().contains("stale inputs"));
+        assert_eq!(guard(&[598_556_019, close_at - 10]), Ok(fresh));
+    }
+
+    /// M8 S5 report honesty: a luck-rule check that did not run is recorded as
+    /// `not_exercised` in campaign/1 and report.md (not as a pass); an exercised one is a
+    /// plain pass; campaign/1 files written before the field still read (no status).
+    #[test]
+    fn not_exercised_checks_are_not_passes() {
+        let ne = luck_check("A7: a claim from the indexer copy", 0, "exercised".into(), "not exercised: no winning round-8 holding of ours (luck)".into());
+        let mut c = camp(&[]);
+        c.steps[0].checks = vec![ne.clone()];
+        let j = store::write(&c, store::CAMPAIGN).unwrap();
+        assert!(j.contains(r#""status": "not_exercised""#), "{j}");
+        assert!(ne.ok, "not a failure: the campaign's ok gates are unchanged");
+        let line = check_line(&ne);
+        assert!(!line.starts_with("- [x]"), "{line}");
+        assert!(line.starts_with("- [-]") && line.contains("NOT EXERCISED"), "{line}");
+        let ex = luck_check("A7: a claim from the indexer copy", 2, "exercised".into(), "not exercised".into());
+        c.steps[0].checks = vec![ex.clone()];
+        assert!(!store::write(&c, store::CAMPAIGN).unwrap().contains("status"), "an exercised check writes no status");
+        assert_eq!(check_line(&ex), "- [x] A7: a claim from the indexer copy: exercised");
+        let fail = CheckJson { ok: false, ..ex.clone() };
+        assert!(check_line(&fail).starts_with("- [ ]"));
+        // A campaign/1 file written before S5 (no status field) still reads, its checks as
+        // before; and the not-exercised record round-trips.
+        let back: Campaign = store::read(&j, store::CAMPAIGN).unwrap();
+        assert_eq!(back.steps[0].checks, vec![ne]);
+        let old = store::write(&camp(&[]), store::CAMPAIGN).unwrap();
+        assert!(!old.contains("status"));
+        let k = &store::read::<Campaign>(&old, store::CAMPAIGN).unwrap().steps[0].checks[0];
+        assert!(check_line(k).starts_with("- [x] refused X"));
     }
 
     #[test]

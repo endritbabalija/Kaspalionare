@@ -1,0 +1,17 @@
+# M8 S5 review tool (not part of the crates/ workspace): writes, for chosen campaign
+# transactions, the kascov preflight body and the cli-debugger test file and environment.
+# See ../README.md. Same pins as crates/ (rusty-kaspa v2.1.0 01b532e8, SilverScript v1.0.0).
+[package]
+name = "silx"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+lottery = { path = "../../../crates/lottery" }
+harness = { path = "../../../crates/harness" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+silverscript-abi = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }
+serde_json = "=1.0.151"
+blake3 = "1.8.5"
