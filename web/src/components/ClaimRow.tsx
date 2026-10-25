@@ -1,8 +1,11 @@
 // Claim row (spec 3 S2, 4, 7 "Claims"): one winning combination's claim. States: claimable, claiming,
 // claimed, accrued below P_MIN, fee exceeds prize. Every figure is the wasm's: the prize floor(slice / h), the
-// others it is shared with (h - 1, when h > 1), when it is paid (now; with the last claim when it accrues
-// below P_MIN, D56), the deposit paid with a last claim, the fee of the built claim (shown before signing),
-// the claim deadline as clock and DAA. The Claim button signs exactly the built claim these rows show.
+// others it is shared with (h - 1, when h > 1), when it is paid (now; when it accrues below P_MIN, D56: with
+// the last claim when the ticket's last claim will be FINAL, else with the deposit from the date
+// return_deposit() is valid: ticketCard's backWithLastClaim, F4 review S3), the deposit paid with a last claim,
+// the payout address when it is not the connected wallet's (F4 review S2), the fee of the built claim (shown
+// before signing), the claim deadline as clock and DAA. The Claim button signs exactly the built claim these
+// rows show.
 import type { ClaimFigures, ClaimView } from '@wasm/web.js';
 import { messageOf } from '@/lib/errors';
 import { Amount } from './Amount';
@@ -34,6 +37,12 @@ export interface ClaimRowProps {
   tx?: ClaimTx;
   /** A build or send failure: its one message. */
   error?: string;
+  /** The ticket's last claim will be FINAL (ticketCard's backWithLastClaim): an accrued prize is paid then. */
+  withLastClaim?: boolean;
+  /** Otherwise an accrued prize comes back with the deposit from this DAA score (ticketCard's returnFrom). */
+  returnFrom?: string;
+  /** The connected wallet's address: the payout is shown when the prize goes elsewhere. */
+  wallet?: string;
   disabled?: boolean;
   onClaim?: () => void;
   explorer?: string;
@@ -68,10 +77,24 @@ export function ClaimRow(p: ClaimRowProps) {
             </FigureRow>
           )}
           <FigureRow name="Paid" testId={`${p.testId}-paid-row`} part>
-            <span data-testid={`${p.testId}-paid`} data-value={c.mode}>
-              {c.mode === 'accrue' ? 'With last claim' : 'Now'}
-            </span>
+            {c.mode === 'accrue' && !p.withLastClaim && p.returnFrom && p.clock ? (
+              <Time
+                daa={p.returnFrom}
+                virtualDaa={p.clock.virtualDaa}
+                observedAt={p.clock.observedAt}
+                testId={`${p.testId}-paid`}
+              />
+            ) : (
+              <span data-testid={`${p.testId}-paid`} data-value={c.mode}>
+                {c.mode === 'accrue' ? 'With last claim' : 'Now'}
+              </span>
+            )}
           </FigureRow>
+          {f && p.wallet && f.payout !== p.wallet && (
+            <FigureRow name="Payout" testId={`${p.testId}-payout-row`}>
+              <HashOrAddress value={f.payout} kind="address" explorer={p.explorer} testId={`${p.testId}-payout`} />
+            </FigureRow>
+          )}
           {c.mode === 'final' && f && f.valueBack !== '0' && (
             <FigureRow name="Deposit back" testId={`${p.testId}-deposit-row`}>
               <Amount sompi={f.valueBack} testId={`${p.testId}-deposit`} />

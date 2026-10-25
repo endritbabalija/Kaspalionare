@@ -10,6 +10,11 @@
 // - the backup downloaded; J3 in another browser (the wallet's key imported, tickets found by payout through
 //   the API); a webstore/1 store migrated in place; a cleared browser refuses a corrupted backup, imports the
 //   real one and, with the API stopped, makes T1's last claim (A, shared, with the deposit), accepted.
+// F4 review: T3 = [A] is bought too (A held three times), and T2's A and T3's A are claimed at once from two
+// browsers with the same wallet: both claims spend the jackpot pool, so one is refused (its input taken) and
+// is pressed again on the pool's successor; both end accepted. A first test closes a round without drawing it
+// (`POST /close`, TEST-ONLY) and checks the closed copy against the live marker with the indexer API
+// hanging (no answer at all: the page's read times out).
 // return_deposit() cannot be reached on the simnet (its earliest lock time is 6.9 million DAA after a draw,
 // genesis floors): the handoff says how it is covered instead.
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -68,6 +73,12 @@ async function stopApi(ctx: BrowserContext) {
   await ctx.route(`${api.origin}/**`, (r) => r.abort('connectionrefused'));
 }
 
+/** The indexer API hanging: no request to it is ever answered (the page's read times out). */
+async function hangApi(ctx: BrowserContext) {
+  const api = new URL(devRun().api);
+  await ctx.route(`${api.origin}/**`, () => undefined);
+}
+
 function card(page: Page, txid: string): Locator {
   return page.locator(`article[data-key="${txid}:1"]`);
 }
@@ -103,6 +114,22 @@ async function claim(page: Page, txid: string, index: number) {
     .toBe(true);
 }
 
+/** The outcome of a claim row's last press: accepted (or the card ended claimed), or failed. */
+async function outcome(page: Page, txid: string, index: number): Promise<'accepted' | 'failed'> {
+  const until = Date.now() + 150_000;
+  while (Date.now() < until) {
+    const c = card(page, txid);
+    if ((await c.getAttribute('data-state')) === 'claimed') return 'accepted';
+    const p = c.getByTestId(new RegExp(`-claim-${index}-progress$`)).getByTestId('tx-progress');
+    if (await p.count()) {
+      if ((await p.getAttribute('data-step')) === 'accepted') return 'accepted';
+      if ((await p.getAttribute('data-failed')) === 'true') return 'failed';
+    }
+    await page.waitForTimeout(500);
+  }
+  throw new Error(`claim ${txid}#${index}: no outcome`);
+}
+
 async function quality(page: Page, label: string) {
   for (const width of [360, 430]) {
     await page.setViewportSize({ width, height: 844 });
@@ -124,6 +151,37 @@ async function quality(page: Page, label: string) {
 
 test.describe.configure({ mode: 'serial' });
 
+test('F4 review: a closed copy is checked against the live marker, with the indexer API hanging', async ({
+  browser,
+  request,
+}) => {
+  test.setTimeout(20 * 60_000);
+  const w = await fundedQuickWallet(browser);
+  const { page } = w;
+  const t0 = await buyTicket(page, [combinations().A]);
+  await ticketsUntil(page, async () => (await card(page, t0).count()) === 1);
+  const r = await request.post(`${faucetBase()}/close`, { timeout: 900_000 });
+  const body = await r.text();
+  expect(r.ok(), body).toBe(true);
+  console.log(`dev close: ${body}`);
+  // Copied again at the closed stage: the lists rebuild the live marker's frozen roots.
+  await ticketsUntil(
+    page,
+    async () => (await page.getByTestId('local-copy-status').getAttribute('data-state')) === 'complete',
+  );
+  await expect(card(page, t0)).toHaveAttribute('data-state', 'open');
+  // The API hanging: once its reads time out, the page works from the copy, still checked against the marker.
+  await hangApi(w.ctx);
+  await ticketsUntil(
+    page,
+    async () => (await page.getByTestId('tickets').getAttribute('data-api')) === 'down',
+    300_000,
+  );
+  await expect(page.getByTestId('local-copy-status')).toHaveAttribute('data-state', 'complete');
+  await page.screenshot({ path: path.join(shots, 'tickets-closed-api-hanging.png'), fullPage: true });
+  await w.ctx.close();
+});
+
 test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the local copy without the API; backup and import', async ({
   browser,
   request,
@@ -137,7 +195,8 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   const { A, B, C } = combinations();
   const t1 = await buyTicket(page, [B, A]);
   const t2 = await buyTicket(page, [C, A]);
-  console.log(`A ${A.main.join(' ')} + ${A.bonus}; T1 ${t1}; T2 ${t2}`);
+  const t3 = await buyTicket(page, [A]);
+  console.log(`A ${A.main.join(' ')} + ${A.bonus}; T1 ${t1}; T2 ${t2}; T3 ${t3}`);
 
   // Before the draw: two open cards, the copies taken while open (incomplete).
   await ticketsUntil(page, async () => (await card(page, t1).count()) === 1 && (await card(page, t2).count()) === 1);
@@ -162,7 +221,7 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   await expect(c2.getByTestId(/-tier-1$/)).toHaveText('5 + bonus');
   await expect(c2.getByTestId(/-balls-1-main-0$/)).toHaveAttribute('data-matched', 'true');
   await expect(c2.getByTestId(/-balls-0-bonus$/)).toHaveAttribute('data-matched', 'false');
-  await expect(c2.getByTestId(/-claim-1-shared$/)).toHaveAttribute('data-value', '1');
+  await expect(c2.getByTestId(/-claim-1-shared$/)).toHaveAttribute('data-value', '2');
   await expect(c2.getByTestId(/-claim-0-paid$/)).toHaveAttribute('data-value', 'pay');
   await expect(c2.getByTestId(/-claim-0-fee$/)).toHaveAttribute('data-sompi', /^\d+$/, { timeout: 60_000 });
   await expect(c2.getByTestId(/-claim-0-deadline$/)).toContainText('DAA');
@@ -176,8 +235,47 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   await expect(card(page, t2).getByTestId(/-claim-1-deposit$/)).toHaveAttribute('data-sompi', /^\d+$/, {
     timeout: 60_000,
   });
-  await claim(page, t2, 1);
+  // Two claimers on one pool: T2's A here and T3's A in another browser with the same wallet, pressed at once.
+  const two = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const p2 = await two.newPage();
+  await p2.goto('/#/wallet');
+  await p2.getByTestId('quick-import-input').fill(secret);
+  await p2.getByTestId('quick-import').click();
+  await expect(p2.getByTestId('wallet-status')).toHaveText('Quick wallet');
+  await ticketsUntil(p2, async () => (await card(p2, t3).getAttribute('data-state')) === 'win');
+  const b2 = card(page, t2).getByTestId(/-claim-1-button$/);
+  const b3 = card(p2, t3).getByTestId(/-claim-0-button$/);
+  await expect(b2).toBeEnabled({ timeout: 90_000 });
+  await expect(b3).toBeEnabled({ timeout: 90_000 });
+  await Promise.all([b2.click(), b3.click()]);
+  const first = await Promise.all([outcome(page, t2, 1), outcome(p2, t3, 0)]);
+  console.log(`two claimers on one pool: T2 ${first[0]}, T3 ${first[1]}`);
+  expect(first, 'both claims spent the pool: one is refused').toContain('failed');
+  expect(first, 'one of them is accepted').toContain('accepted');
+  // The refused one, pressed again once the accepted claim has settled (its card read again from the node: the
+  // pool's successor and the wallet's change are then in the node's UTXO set), is accepted. A player presses
+  // again on a refusal; up to three presses (one run saw a second refusal, an orphan, when the re-press was
+  // built while the other claim was still settling).
+  const won = first[0] === 'accepted' ? ([page, t2, 1] as const) : ([p2, t3, 0] as const);
+  await ticketsUntil(won[0], async () => (await card(won[0], won[1]).getAttribute('data-state')) === 'claimed');
+  for (const [p, t, i, o] of [
+    [page, t2, 1, first[0]],
+    [p2, t3, 0, first[1]],
+  ] as const) {
+    if (o === 'accepted') continue;
+    let last: 'accepted' | 'failed' = o;
+    for (let press = 0; press < 3 && last !== 'accepted'; press++) {
+      const button = () => card(p, t).getByTestId(new RegExp(`-claim-${i}-button$`));
+      await ticketsUntil(p, async () => await button().isEnabled());
+      await button().click();
+      last = await outcome(p, t, i);
+      console.log(`two claimers: re-press ${press + 1}: ${last}`);
+    }
+    expect(last).toBe('accepted');
+  }
   await ticketsUntil(page, async () => (await card(page, t2).getAttribute('data-state')) === 'claimed');
+  await ticketsUntil(p2, async () => (await card(p2, t3).getAttribute('data-state')) === 'claimed');
+  await two.close();
 
   // With the indexer API stopped: T1's B (below P_MIN, it accrues), from the local copy and a node only.
   await stopApi(w.ctx);
@@ -263,7 +361,7 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   await quality(pf, 'backup');
   await ticketsUntil(pf, async () => (await card(pf, t1).getAttribute('data-state')) === 'partly-claimed');
   await expect(pf.getByTestId('tickets')).toHaveAttribute('data-api', 'down');
-  await expect(card(pf, t1).getByTestId(/-claim-1-shared$/)).toHaveAttribute('data-value', '1');
+  await expect(card(pf, t1).getByTestId(/-claim-1-shared$/)).toHaveAttribute('data-value', '2');
   await claim(pf, t1, 1);
   await ticketsUntil(pf, async () => (await card(pf, t1).getAttribute('data-state')) === 'claimed');
   await pf.screenshot({ path: path.join(shots, 'tickets-imported-claimed.png'), fullPage: true });

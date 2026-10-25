@@ -1,7 +1,10 @@
 // Sending a claim or a deposit return (spec 6.2, S2): the same path as a purchase (buyFlow's
 // `signAndSubmit`: the wallet signs the listed inputs only, `assemble` checks what came back, only then the
 // node gets it; a lost answer is settled from the chain). "Accepted" is one of the transaction's own outputs
-// in the node's UTXO set (its entry read by outpoint, never from the indexer).
+// in the node's UTXO set (its entry read by outpoint, never from the indexer). Several outputs are watched
+// (F4 review S5): an output another party can spend at once (a pool's successor: claims on one tier compete
+// for its single pool, design 7.4; a ticket's successor: anyone may claim its other index) is never the only
+// evidence; the payout output and the change are watched too.
 import type { ApiObject, BuiltTx, Signed, Utxo } from '@wasm/web.js';
 import type { TxStep } from '@/components/TxProgress';
 import { PageError, unwrap } from '@/lib/errors';
@@ -59,21 +62,35 @@ function unknown(e: unknown): boolean {
   return e instanceof PageError && (e.code === 'node_unavailable' || e.code === 'worker_stopped');
 }
 
+/** The first of `watch` (in order) that the node holds, with its entry. */
+export async function firstLive(ctx: Ctx, id: string, watch: Watched[]): Promise<{ w: Watched; u: Utxo } | undefined> {
+  for (const w of watch) {
+    const u = await liveOutput(ctx, id, w).catch((e: unknown) => {
+      if (unknown(e)) return undefined;
+      throw e;
+    });
+    if (u) return { w, u };
+  }
+  return undefined;
+}
+
 /**
- * Sign, check, send `built`, then wait until `watch` (one of its outputs) is live on the node. A lost answer,
- * or an output that takes too long, is settled from the chain (`settleSubmit`: the same signed transaction
- * again); no answer at all is submit_unknown, never a second, different transaction.
+ * Sign, check, send `built`, then wait until one of `watch` (its own outputs) is live on the node. A lost
+ * answer, or outputs that take too long, are settled from the chain (`settleSubmit`: the same signed
+ * transaction again); no answer at all is submit_unknown, never a second, different transaction. `onSigned`
+ * keeps the signed transaction before it is sent (a pending record, settled on a later visit).
  */
 export async function sendAndWait(
   env: SendEnv,
   built: BuiltTx,
-  watch: Watched,
+  watch: Watched[],
   onEvent: (e: SendEvent) => void,
-): Promise<{ id: string; entry: Utxo }> {
+  onSigned?: (final: Signed) => Promise<void>,
+): Promise<{ id: string; entry: Utxo; watched: Watched }> {
   const { ctx } = env;
   const sleep = env.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const submit = env.submit ?? (async (s: Signed) => unwrap(await ctx.lottery.call('nodeSubmit', s)));
-  const landed = async () => (await liveOutput(ctx, built.id, watch)) !== undefined;
+  const landed = async () => (await firstLive(ctx, built.id, watch)) !== undefined;
   const onChecking = (on: boolean) => onEvent({ kind: 'checking', on });
   const settle = {
     landed,
@@ -91,18 +108,16 @@ export async function sendAndWait(
     (step) => onEvent({ kind: 'step', step }),
     undefined,
     settle,
+    onSigned,
   );
   const acceptMs = env.acceptMs ?? 120_000;
   for (let w = 0; w < 5; w++) {
     const until = Date.now() + acceptMs;
     while (Date.now() < until) {
-      const u = await liveOutput(ctx, id, watch).catch((e: unknown) => {
-        if (unknown(e)) return undefined;
-        throw e;
-      });
-      if (u) {
+      const hit = await firstLive(ctx, id, watch);
+      if (hit) {
         onEvent({ kind: 'step', step: 'accepted' });
-        return { id, entry: u };
+        return { id, entry: hit.u, watched: hit.w };
       }
       await sleep(env.pollMs ?? 1000);
     }

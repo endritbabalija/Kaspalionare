@@ -8,6 +8,7 @@ import { BallRow } from '@/components/BallRow';
 import { BonusTile, type BonusTileState } from '@/components/BonusTile';
 import { ClaimRow } from '@/components/ClaimRow';
 import { LocalCopyBox } from '@/components/LocalCopyBox';
+import { PendingPurchase } from '@/components/PendingPurchase';
 import { TicketCard } from '@/components/TicketCard';
 import { CostPanel } from '@/components/CostPanel';
 import { HashOrAddress } from '@/components/HashOrAddress';
@@ -18,7 +19,7 @@ import { Time } from '@/components/Time';
 import { TicketRow } from '@/components/TicketRow';
 import { TxProgress } from '@/components/TxProgress';
 import { RoundCardView } from '@/screens/play/RoundCard';
-import { claimView, SAMPLE_TX, sampleCard, sampleFigures, sampleStored } from './ticketSamples';
+import { claimView, SAMPLE_TX, sampleCard, sampleFigures, samplePending, sampleStored } from './ticketSamples';
 
 /** Searched for by scripts/check-bundle.mjs: present in development, absent from production bundles. */
 export const CATALOGUE_MARKER = 'KASPALIONARE_DEV_CATALOGUE';
@@ -163,9 +164,9 @@ function Sheet() {
           />
         </div>
       </Row>
-      <Row name="Ticket card: open · win · no win · partly claimed · fully claimed · void · deposit returnable · deposit returned">
+      <Row name="Ticket card: open · win · no win · partly claimed · fully claimed · void · deposit returnable · deposit returned · incomplete · expired and no pool · another payout">
         <div className="flex w-full flex-col gap-2">
-          {(['open', 'win', 'no-win', 'partly', 'void', 'returnable'] as const).map((k) => (
+          {(['open', 'win', 'no-win', 'partly', 'void', 'returnable', 'incomplete', 'expired'] as const).map((k) => (
             <TicketCard
               key={k}
               testId={`cat-ticket-${k}`}
@@ -186,6 +187,15 @@ function Sheet() {
               }}
             />
           ))}
+          <TicketCard
+            testId="cat-ticket-payout"
+            stored={sampleStored('12')}
+            status="drawn"
+            card={sampleCard('win')}
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+            claims={{ 0: { figures: sampleFigures(claimView('pay', '1240000000', '2'), '25019700') } }}
+            wallet="kaspatest:qr7wallet0another0address000000000000000000000000000000000"
+          />
           <TicketCard
             testId="cat-ticket-claimed"
             stored={sampleStored('11', {
@@ -208,6 +218,20 @@ function Sheet() {
             status="drawn"
             clock={{ virtualDaa: VDAA, observedAt: NOW }}
           />
+        </div>
+      </Row>
+      <Row name="Pending purchase: unknown · sending · failed">
+        <div className="flex w-full flex-col gap-2">
+          {(['unknown', 'sending', 'failed'] as const).map((s) => (
+            <PendingPurchase
+              key={s}
+              testId={`cat-pending-${s}`}
+              pending={samplePending()}
+              state={s}
+              error={s === 'failed' ? 'The node could not be reached.' : undefined}
+              onSend={() => undefined}
+            />
+          ))}
         </div>
       </Row>
       <Row name="Local-copy box: complete and verified · incomplete · mismatch · not needed">

@@ -5,7 +5,9 @@ import { useState } from 'react';
 import type { ClaimFigures, ReturnFigures, RoundStatus } from '@wasm/web.js';
 import { useSession } from '@/app/context';
 import { href } from '@/app/routes';
+import { FigureRow } from '@/components/FigureRow';
 import { LocalCopyBox } from '@/components/LocalCopyBox';
+import { PendingPurchase } from '@/components/PendingPurchase';
 import { TicketCard, type ActionView } from '@/components/TicketCard';
 import { saveText } from '@/lib/download';
 import { describe, messageOf } from '@/lib/errors';
@@ -15,7 +17,7 @@ import type { CardData } from '@/tickets/load';
 import { useWallet } from '@/wallet/context';
 import { useTickets } from './tickets/useTickets';
 
-/** The pill: the chain's stage of the ticket's round (void is the indexer's word, display only). */
+/** The pill: the chain's stage of the ticket's round (void: the indexer's word that neither the chain nor the copy contradicts). */
 function roundStatus(c: CardData): RoundStatus {
   if (c.void || c.card?.stage === 'void') return 'void';
   if (c.card?.stage === 'drawn' || c.stage === 'drawn') return 'drawn';
@@ -73,7 +75,7 @@ export function MyTickets() {
   return (
     <section
       data-testid="tickets"
-      data-state={d.cards.length ? 'ready' : 'empty'}
+      data-state={d.cards.length || d.stale.length ? 'ready' : 'empty'}
       data-api={d.apiDown ? 'down' : 'up'}
       aria-labelledby="tickets-title"
       className="flex flex-col gap-3.5"
@@ -86,17 +88,31 @@ export function MyTickets() {
           {messageOf('indexer_unavailable')}
         </p>
       )}
-      {!d.cards.length && (
+      {!d.cards.length && !d.stale.length && (
         <div
           data-testid="tickets-empty"
           className="flex flex-col gap-2 rounded-[14px] border border-rule bg-surface p-4"
         >
-          <span className="text-graphite">No tickets</span>
+          <FigureRow name="Tickets" testId="tickets-empty-count">
+            0
+          </FigureRow>
           <a href={href('play')} data-testid="tickets-play" className="flex min-h-11 items-center font-medium">
             Play
           </a>
         </div>
       )}
+      {d.stale.map((p, i) => (
+        <PendingPurchase
+          key={p.key}
+          testId={`pending-${i}`}
+          pending={p}
+          state={t.resends[p.key]?.state ?? 'unknown'}
+          error={t.resends[p.key]?.error}
+          disabled={t.busy}
+          onSend={() => t.onResend(p.key)}
+          explorer={ctx.config.explorerUrl}
+        />
+      ))}
       {d.cards.map((c, i) => (
         <TicketCard
           key={c.stored.key}
@@ -117,6 +133,7 @@ export function MyTickets() {
           onClaim={(index) => t.onClaim(c, index)}
           onReturn={() => t.onReturn(c)}
           explorer={ctx.config.explorerUrl}
+          wallet={wallet.address}
         />
       ))}
       {d.cards.some((c) => c.error) && (

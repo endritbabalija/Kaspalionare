@@ -1081,6 +1081,10 @@ fn a_self_referral_is_the_referral_row_paid_to_the_own_address() {
 /// wallet's coins), so the file must be the fixtures' current page JSON. It holds no key.
 const PAGE_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/src/test/fixtures/page-inputs.json");
 
+fn find_claim(name: &str) -> lottery::web::fixtures::Call {
+    lottery::web::fixtures::calls().unwrap().into_iter().chain(lottery::web::fixtures::claim_calls().unwrap()).find(|(n, _, _)| n == name).map(|(_, c, _)| c).unwrap()
+}
+
 fn page_fixtures() -> String {
     let mut m = serde_json::Map::new();
     for name in ["buy b=1 ref", "buy b=4", "close k=16", "claim k=4", "return after", "return with pool"] {
@@ -1091,6 +1095,14 @@ fn page_fixtures() -> String {
     for (name, call, _) in lottery::web::fixtures::claim_calls().expect("claim calls") {
         m.insert(name, common::input(&call).json());
     }
+    // F4 review M2: each claim round's marker and every pool its draw created (the drawn copy with
+    // the marker kept), for the page's copy tests.
+    let mut rounds = serde_json::Map::new();
+    for name in ["claim k=4", "claim pay h=2", "claim accrue", "claim final"] {
+        let common::Input::Claim(i) = common::input(&find_claim(name)) else { unreachable!() };
+        rounds.insert(name.into(), common::marked_round(&i));
+    }
+    m.insert("marked rounds".into(), serde_json::Value::Object(rounds));
     serde_json::to_string_pretty(&serde_json::Value::Object(m)).unwrap() + "\n"
 }
 

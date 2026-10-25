@@ -36,6 +36,7 @@ const BASE = [
   'backupWrite',
   'backupRead',
   'checkCopy',
+  'mergeCopy',
   'webstoreInfo',
   'parseIndexerStatus',
   'parseIndexerRounds',

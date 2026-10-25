@@ -2,10 +2,11 @@
 // ids, from sample figures shaped as the wasm returns them.
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claimView, sampleCard, sampleFigures, sampleStored, SAMPLE_TX } from '@/dev/ticketSamples';
+import { claimView, sampleCard, sampleFigures, samplePending, sampleStored, SAMPLE_TX } from '@/dev/ticketSamples';
 import { BallRow } from './BallRow';
 import { ClaimRow } from './ClaimRow';
 import { LocalCopyBox } from './LocalCopyBox';
+import { PendingPurchase } from './PendingPurchase';
 import { TicketCard } from './TicketCard';
 import { claimRowState, ticketCardState } from './ticketStates';
 
@@ -62,6 +63,23 @@ describe('ClaimRow', () => {
     rerender(<ClaimRow testId="c" claim={fin} figures={sampleFigures(fin, '6172000', '26000000')} />);
     expect(screen.getByTestId('c-deposit').dataset.sompi).toBe('26000000');
   });
+
+  it('an accrued prize is paid with the last claim only when that claim is FINAL; else with the deposit, from its date (F4 review S3)', () => {
+    const acc = claimView('accrue', '2240000');
+    const { rerender } = render(<ClaimRow testId="c" claim={acc} withLastClaim returnFrom="12109662" clock={clock} />);
+    expect(screen.getByTestId('c-paid').textContent).toBe('With last claim');
+    rerender(<ClaimRow testId="c" claim={acc} withLastClaim={false} returnFrom="12109662" clock={clock} />);
+    expect(screen.getByTestId('c-paid').textContent).toContain('DAA 12,109,662');
+  });
+
+  it('shows the payout when the prize goes to another address than the wallet`s (F4 review S2)', () => {
+    const pay = claimView('pay', '1240000000');
+    const f = sampleFigures(pay, '25019700');
+    const { rerender } = render(<ClaimRow testId="c" claim={pay} figures={f} wallet={f.payout} />);
+    expect(screen.queryByTestId('c-payout-row')).toBeNull();
+    rerender(<ClaimRow testId="c" claim={pay} figures={f} wallet="kaspatest:qother" />);
+    expect(screen.getByTestId('c-payout-row').textContent).toContain('Payout');
+  });
 });
 
 describe('TicketCard', () => {
@@ -81,6 +99,40 @@ describe('TicketCard', () => {
     expect(ticketCardState({ stored: ended('claimed') })).toBe('claimed');
     expect(ticketCardState({ stored: ended('returned') })).toBe('returned');
     expect(ticketCardState({ stored: s, spent: true })).toBe('spent');
+    expect(ticketCardState({ stored: s, card: sampleCard('incomplete') })).toBe('incomplete');
+    expect(ticketCardState({ stored: s, card: sampleCard('expired') })).toBe('returnable');
+  });
+
+  it('a won tier that pays nothing now says why; another payout is shown (F4 review M2, S2)', () => {
+    const { rerender } = render(
+      <TicketCard
+        testId="t"
+        stored={sampleStored('12')}
+        status="drawn"
+        card={sampleCard('incomplete')}
+        clock={clock}
+      />,
+    );
+    expect(screen.getByTestId('t-status').textContent).toBe('Incomplete');
+    expect(screen.getByTestId('t-combo-status-0').textContent).toBe('Unknown');
+    expect(screen.queryByTestId('t-claim-0')).toBeNull();
+    rerender(
+      <TicketCard testId="t" stored={sampleStored('12')} status="drawn" card={sampleCard('expired')} clock={clock} />,
+    );
+    expect(screen.getByTestId('t-combo-status-0').textContent).toBe('Expired');
+    expect(screen.getByTestId('t-combo-status-1').textContent).toBe('No pool');
+    expect(screen.queryByTestId('t-payout-row')).toBeNull();
+    rerender(
+      <TicketCard
+        testId="t"
+        stored={sampleStored('12')}
+        status="drawn"
+        card={sampleCard('expired')}
+        clock={clock}
+        wallet="kaspatest:qother"
+      />,
+    );
+    expect(screen.getByTestId('t-payout-row').textContent).toContain('Payout');
   });
 
   it('an open card shows the deadline; a void one says so; a returnable one offers Return deposit', () => {
@@ -115,6 +167,18 @@ describe('TicketCard', () => {
     );
     expect(screen.getByTestId('t-return-fee').dataset.sompi).toBe('5166400');
     expect((screen.getByTestId('t-return-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('PendingPurchase', () => {
+  it('waits for a press; Send is named and disabled while sending', () => {
+    const { rerender } = render(<PendingPurchase testId="p" pending={samplePending()} state="unknown" />);
+    expect(screen.getByTestId('p-status').textContent).toBe('Unknown');
+    expect((screen.getByTestId('p-send') as HTMLButtonElement).disabled).toBe(false);
+    rerender(<PendingPurchase testId="p" pending={samplePending()} state="sending" />);
+    expect((screen.getByTestId('p-send') as HTMLButtonElement).disabled).toBe(true);
+    rerender(<PendingPurchase testId="p" pending={samplePending()} state="failed" error="x" />);
+    expect(screen.getByTestId('p-error').getAttribute('role')).toBe('alert');
   });
 });
 

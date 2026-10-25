@@ -64,6 +64,15 @@ pub struct TicketCardInput {
     /// from the round result); empty before the draw, after a void, or once every pool is gone.
     #[serde(default)]
     pub pools: Vec<CovUtxo>,
+    /// The tiers whose pool the round copy lists and the chain shows absorbed: not live at its
+    /// script once its claim deadline has passed (`checkCopy`; F4 review M2). Only these make a
+    /// win `expired`.
+    #[serde(default)]
+    pub absorbed: Vec<u8>,
+    /// The round copy lists every pool `draw()` created (`checkCopy`: the round's marker kept);
+    /// a tier with no pool listed then has none (`noPool`), otherwise it is `unknown`.
+    #[serde(default)]
+    pub complete: bool,
     /// The round's purchase lists (all k, shard order, checked against the frozen roots): the
     /// counts behind h. Needed when a pool is given.
     #[serde(default)]
@@ -125,8 +134,16 @@ pub enum ComboStatus {
     Claimable,
     /// Claimed already (its bit is set in the ticket).
     Claimed,
-    /// It wins a tier, but no live pool of that tier is left (absorbed after the claim deadline).
+    /// It wins a tier whose pool the chain shows absorbed (listed in the copy, not live after its
+    /// claim deadline).
     Expired,
+    /// It wins a tier for which `draw()` created no pool (the slice was 0; the copy lists every
+    /// pool of the round, so this is known).
+    NoPool,
+    /// It wins a tier whose pool the copy does not show (not listed, or listed and not live
+    /// before its claim deadline): the copy is incomplete; it may still be claimable (F4 review
+    /// M2). Never shown as expired; the page copies the round again.
+    Unknown,
 }
 
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -181,11 +198,17 @@ pub struct TicketCard {
     pub combos: Vec<ComboCard>,
     /// Indices claimed so far.
     pub claimed: u32,
-    /// The value comes back with the last claim (an unclaimed index wins a tier with a live pool).
+    /// The value comes back with the last claim: drawn, and every unclaimed index is claimable
+    /// now (the last claim is FINAL only once every index is claimed, `game::claim_mode`; F4
+    /// review S3). Otherwise it comes back by `return_deposit()` from `return_from`.
     pub back_with_last_claim: bool,
     /// From this DAA score `return_deposit()` is valid: T + D_RET, or earlier with a pool of the
     /// round once its claim deadline has passed.
     pub return_from: Dec,
+    /// `return_deposit()` is valid now and forfeits nothing the page knows of: the round is drawn
+    /// (or void) and no unclaimed index is claimable or unknown (design 7.5: a return forfeits
+    /// the unclaimed winning indices; F4 review M1). A claimable index is claimed first (its
+    /// FINAL claim pays the value back anyway).
     pub returnable: Option<Returnable>,
 }
 
@@ -283,10 +306,12 @@ pub fn ticket_card(net: Net, i: &TicketCardInput) -> Result<TicketCard> {
         Some(p) => Some(purchase_lists(p)?),
         None => None,
     };
+    if i.absorbed.len() > 7 || i.absorbed.iter().any(|&tr| tr > 6 || pools.iter().any(|(_, p)| p.tier == tr)) {
+        return Err(Error::new(Code::InputRange, "absorbed tiers: at most the 7 tiers, none with a live pool"));
+    }
     let claimed_bits = t.claimed.first().copied().unwrap_or(0);
     let pool_objs: Vec<Obj> = pools.iter().map(|(o, _)| o.clone()).collect();
     let mut combos = vec![];
-    let mut back_with_last_claim = false;
     for idx in 0..t.b.clamp(0, 8) as usize {
         let combination = combination_at(&t, idx).ok_or_else(|| Error::new(Code::StateRange, format!("index {idx} outside the bundle")))?;
         let claimed = claimed_bits & (1u8 << idx) != 0;
@@ -305,10 +330,11 @@ pub fn ticket_card(net: Net, i: &TicketCardInput) -> Result<TicketCard> {
                         let lists = purchases.as_ref().ok_or_else(|| Error::new(Code::StoreIncomplete, "the round's purchase lists are needed for a claim"))?;
                         let (case, _) = cases::claim_case(&cov, &to, &pool_objs, lists, Some(idx as i64), &model_funds())?;
                         claim = Some(claim_view(&case.expected(), p));
-                        back_with_last_claim = true;
                         ComboStatus::Claimable
                     }
-                    None => ComboStatus::Expired,
+                    None if i.absorbed.contains(&tr) => ComboStatus::Expired,
+                    None if i.complete => ComboStatus::NoPool,
+                    None => ComboStatus::Unknown,
                 }
             } else {
                 ComboStatus::NoWin
@@ -318,11 +344,19 @@ pub fn ticket_card(net: Net, i: &TicketCardInput) -> Result<TicketCard> {
         }
         combos.push(ComboCard { index: idx as u32, combination, matched_main, bonus_matched, tier, tier_name: tier.and_then(tier_name), status, claim });
     }
+    let unclaimed: Vec<&ComboCard> = combos.iter().filter(|c| c.status != ComboStatus::Claimed).collect();
+    let back_with_last_claim = stage == CardStage::Drawn && !unclaimed.is_empty() && unclaimed.iter().all(|c| c.status == ComboStatus::Claimable);
+    // A return forfeits every unclaimed winning index (design 7.5): offered only when the result
+    // is known and nothing unclaimed could still be claimed.
+    let forfeits = unclaimed.iter().any(|c| matches!(c.status, ComboStatus::Claimable | ComboStatus::Unknown));
+    let known = matches!(stage, CardStage::Drawn | CardStage::Void);
     let alone = t.deadline.checked_add(D_RET).ok_or_else(|| Error::new(Code::Overflow, "T + D_RET"))?;
     let earliest_pool = pools.iter().min_by_key(|(_, p)| p.deadline);
     let return_from = earliest_pool.map(|(_, p)| p.deadline.min(alone)).unwrap_or(alone);
     // The node takes a transaction whose lock time is below its DAA score.
-    let returnable = if (alone as u64) < now {
+    let returnable = if !known || forfeits {
+        None
+    } else if (alone as u64) < now {
         Some(Returnable { path: ReturnPathName::Alone, pool: None })
     } else {
         earliest_pool

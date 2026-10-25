@@ -76,6 +76,8 @@ fn claim_figures_are_bound_to_the_transaction() {
             covenant_id: i.covenant_id.clone(),
             ticket: i.ticket.clone(),
             pools: i.pools.clone(),
+            absorbed: vec![],
+            complete: false,
             purchases: Some(i.purchases.clone()),
             winning: None,
             claim_deadline: None,
@@ -164,6 +166,8 @@ fn ticket_card_shows_what_the_chain_would_take() {
             covenant_id: i.covenant_id.clone(),
             ticket: i.ticket.clone(),
             pools,
+            absorbed: vec![],
+            complete: false,
             purchases: Some(i.purchases.clone()),
             winning,
             claim_deadline: None,
@@ -182,24 +186,25 @@ fn ticket_card_shows_what_the_chain_would_take() {
     let mm = c.combos[0].matched_main.unwrap();
     assert_eq!(mm.iter().filter(|x| **x).count(), 4, "tier 2: four main numbers match");
     assert_eq!(c.combos[0].bonus_matched, Some(true));
-    assert!(c.back_with_last_claim);
+    // Index 1 wins nothing, so it is never claimed and no claim of this ticket is FINAL: the value
+    // comes back by return_deposit(), not "with the last claim" (F4 review S3).
+    assert!(!c.back_with_last_claim);
     assert_eq!(c.claim_deadline.as_deref(), Some(pool.deadline.as_str()));
     assert_eq!(c.return_from, deadline.min(alone).to_string());
     assert!(c.returnable.is_none(), "before the claim deadline nothing returns the deposit");
-    // Past the pool's claim deadline: path a with that pool.
-    let c = card(i.pools.clone(), deadline + 1, None, false).unwrap();
-    let r = c.returnable.expect("path a");
-    assert_eq!(r.path, ReturnPathName::WithPool);
-    assert_eq!(r.pool.as_ref(), Some(&i.pools[0]));
-    // From T + D_RET: path b alone.
+    // Past the pool's claim deadline (path a valid on chain) index 0 is still claimable: no return
+    // is offered, it would forfeit the prize (F4 review M1; the paths: f4_review.rs).
+    assert!(card(i.pools.clone(), deadline + 1, None, false).unwrap().returnable.is_none());
+    // From T + D_RET with the result unknown here: nothing offered either.
     let c = card(vec![], alone + 1, None, false).unwrap();
     assert_eq!(c.stage, CardStage::Open);
-    assert_eq!(c.returnable.map(|r| r.path), Some(ReturnPathName::Alone));
+    assert!(c.returnable.is_none());
     assert_eq!(c.return_from, alone.to_string());
-    // Drawn, pools gone: the winning combination is expired; nothing to claim.
+    // Drawn, the pool not given and no evidence it was absorbed: unknown, never expired (F4
+    // review M2; expired with the evidence: f4_review.rs).
     let win = Combination { main: [3, 7, 12, 19, 28], bonus: 4 };
     let c = card(vec![], deadline + 1, Some(win), false).unwrap();
-    assert_eq!(c.combos[0].status, ComboStatus::Expired);
+    assert_eq!(c.combos[0].status, ComboStatus::Unknown);
     assert!(!c.back_with_last_claim);
     // Stored numbers that are not the pools' are refused.
     let other = Combination { main: [1, 2, 3, 4, 5], bonus: 1 };
@@ -218,6 +223,8 @@ fn ticket_card_shows_what_the_chain_would_take() {
         covenant_id: i.covenant_id.clone(),
         ticket: i.ticket.clone(),
         pools: i.pools.clone(),
+        absorbed: vec![],
+        complete: false,
         purchases: None,
         winning: None,
         claim_deadline: None,
@@ -234,6 +241,8 @@ fn ticket_card_shows_what_the_chain_would_take() {
         covenant_id: i.covenant_id.clone(),
         ticket: i.ticket.clone(),
         pools: i.pools.clone(),
+        absorbed: vec![],
+        complete: false,
         purchases: Some(lists),
         winning: None,
         claim_deadline: None,
@@ -279,6 +288,8 @@ fn records() -> (String, StoredTicket, StoredRound) {
         covenant_id: cov.clone(),
         ticket: i.ticket.clone(),
         pools: i.pools.clone(),
+        absorbed: vec![],
+        complete: false,
         purchases: Some(i.purchases.clone()),
         winning: None,
         claim_deadline: None,
@@ -297,6 +308,7 @@ fn records() -> (String, StoredTicket, StoredRound) {
         payout: card.payout.clone(),
         buy: None,
         ended: None,
+        pending: None,
         saved_ms: "1".into(),
     };
     let roots = web::api::check_roots(&RootsInput { covenant_id: cov.clone(), against: i.pools[0].clone(), purchases: i.purchases.clone() }).unwrap();
@@ -313,13 +325,14 @@ fn records() -> (String, StoredTicket, StoredRound) {
         roots: Some(roots.roots),
         against: Some(po.clone()),
         result: Some(StoredResult { winning: card.winning.unwrap(), claim_deadline: pool.deadline.clone(), pools: vec![po] }),
+        marker: None,
         checked_ms: "1".into(),
     };
     (cov, ticket, round)
 }
 
 fn write(cov: &str, t: &StoredTicket, r: &StoredRound) -> String {
-    backup::backup_write(N, &BackupWriteInput { covenant_id: cov.into(), created_ms: "7".into(), tickets: vec![t.clone()], rounds: vec![r.clone()], pending: vec![] }).unwrap()
+    backup::backup_write(N, &BackupWriteInput { covenant_id: cov.into(), created_ms: "7".into(), tickets: vec![t.clone()], rounds: vec![r.clone()], pending: vec![] }).unwrap().text
 }
 
 fn read(cov: &str, text: &str) -> lottery::web::Result<backup::BackupContents> {
@@ -398,10 +411,12 @@ fn backups_round_trip_and_damaged_or_doctored_files_are_refused() {
     }
     // A wrong page instance refuses an honest file too.
     assert_eq!(read(&"ab".repeat(32), &text).unwrap_err().code, Code::BackupInvalid);
-    // The writer refuses records it would not read back.
+    // The writer leaves out (and names) a record it would not read back (F4 review note).
     let mut bad = r.clone();
     bad.purchases[0] = "zz".into();
-    assert!(backup::backup_write(N, &BackupWriteInput { covenant_id: cov.clone(), created_ms: "1".into(), tickets: vec![], rounds: vec![bad], pending: vec![] }).is_err());
+    let w = backup::backup_write(N, &BackupWriteInput { covenant_id: cov.clone(), created_ms: "1".into(), tickets: vec![], rounds: vec![bad.clone()], pending: vec![] }).unwrap();
+    assert_eq!(w.skipped, vec![bad.key]);
+    assert!(read(&cov, &w.text).unwrap().rounds.is_empty());
 }
 
 #[test]
@@ -409,24 +424,28 @@ fn a_kept_copy_is_checked_against_the_live_pool() {
     let (cov, _, r) = records();
     let (_, i) = claim_inputs().into_iter().find(|(n, _)| n == "claim k=4").unwrap();
     let live = vec![i.pools[0].utxo.clone()];
-    let c = backup::check_copy(&CopyCheckInput { covenant_id: cov.clone(), round: r.clone(), live: live.clone() }).unwrap();
+    let c = backup::check_copy(N, &CopyCheckInput { covenant_id: cov.clone(), round: r.clone(), live: live.clone(), virtual_daa_score: None }).unwrap();
     assert_eq!(c.status, CopyStatus::Verified);
     assert_eq!(c.pools, i.pools);
-    // The pool gone: nothing left to claim.
-    let c = backup::check_copy(&CopyCheckInput { covenant_id: cov.clone(), round: r.clone(), live: vec![] }).unwrap();
-    assert_eq!(c.status, CopyStatus::Gone);
+    // The pool gone after its claim deadline: absorbed, nothing left to claim; with no clock (or
+    // before the deadline) its absence is unexplained: incomplete (F4 review M2).
+    let dl: u64 = r.result.as_ref().unwrap().claim_deadline.parse().unwrap();
+    let gone = |now: Option<u64>| backup::check_copy(N, &CopyCheckInput { covenant_id: cov.clone(), round: r.clone(), live: vec![], virtual_daa_score: now.map(|n| n.to_string()) }).unwrap();
+    assert_eq!(gone(Some(dl + 1)).status, CopyStatus::Gone);
+    assert_eq!(gone(Some(dl)).status, CopyStatus::Incomplete);
+    assert_eq!(gone(None).status, CopyStatus::Incomplete);
     // Lists that do not rebuild the live pool's roots.
     let mut doctored = r.clone();
     let n = doctored.purchases.iter().position(|l| l.len() >= 12).unwrap();
     doctored.purchases[n] = doctored.purchases[n][12..].to_string();
-    let e = backup::check_copy(&CopyCheckInput { covenant_id: cov.clone(), round: doctored, live: live.clone() }).unwrap_err();
+    let e = backup::check_copy(N, &CopyCheckInput { covenant_id: cov.clone(), round: doctored, live: live.clone(), virtual_daa_score: None }).unwrap_err();
     assert_eq!(e.code, Code::CopyMismatch, "{e}");
     // A live entry at the pool's script of another instance.
     let mut other = live[0].clone();
     other.covenant_id = Some("ab".repeat(32));
-    assert_eq!(backup::check_copy(&CopyCheckInput { covenant_id: cov.clone(), round: r.clone(), live: vec![other] }).unwrap_err().code, Code::CopyMismatch);
+    assert_eq!(backup::check_copy(N, &CopyCheckInput { covenant_id: cov.clone(), round: r.clone(), live: vec![other], virtual_daa_score: None }).unwrap_err().code, Code::CopyMismatch);
     // An open copy is not checked against frozen roots.
     let mut open = r.clone();
     open.stage = RoundCopyStage::Open;
-    assert_eq!(backup::check_copy(&CopyCheckInput { covenant_id: cov, round: open, live }).unwrap().status, CopyStatus::Open);
+    assert_eq!(backup::check_copy(N, &CopyCheckInput { covenant_id: cov, round: open, live, virtual_daa_score: None }).unwrap().status, CopyStatus::Open);
 }

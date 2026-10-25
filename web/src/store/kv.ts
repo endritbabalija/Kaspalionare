@@ -1,7 +1,9 @@
 // A small key-value layer over IndexedDB (the local store, spec 6.3, and the quick wallet's key store).
 // Records are structured-cloned as they are (every 64-bit figure is already a decimal string, so nothing is
 // lost). `MemoryKV` is the same interface in memory, for unit tests; the e2e suite reads the real IndexedDB.
-// Any IndexedDB failure is storage_unavailable.
+// Any IndexedDB failure is storage_unavailable. When a newer page upgrades the database, this (older) tab
+// closes its connection at once, so it never blocks the upgrade, and reloads to run the newer page (F4 review
+// note: `onversionchange`).
 import { PageError } from '@/lib/errors';
 
 export interface KV {
@@ -30,6 +32,9 @@ export class IdbKV implements KV {
     readonly name: string,
     readonly version: number,
     readonly stores: readonly string[],
+    private readonly onVersionChange: () => void = () => {
+      if (typeof location !== 'undefined') location.reload();
+    },
   ) {}
 
   private open(): Promise<IDBDatabase> {
@@ -44,7 +49,15 @@ export class IdbKV implements KV {
       r.onupgradeneeded = () => {
         for (const s of this.stores) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s);
       };
-      r.onsuccess = () => resolve(r.result);
+      r.onsuccess = () => {
+        const db = r.result;
+        db.onversionchange = () => {
+          db.close();
+          this.db = null;
+          this.onVersionChange();
+        };
+        resolve(db);
+      };
       r.onerror = () => reject(new PageError('storage_unavailable', String(r.error)));
       r.onblocked = () => reject(new PageError('storage_unavailable', `${this.name}: open blocked`));
     }).catch((e: unknown) => {

@@ -197,8 +197,8 @@ pub fn return_figures(#[wasm_bindgen(unchecked_param_type = "ReturnFiguresInput"
     out(net().and_then(|n| crate::tickets::return_figures(n, &parse("input", input)?)))
 }
 
-/// Spec S8: the backup file of the store's records (text).
-#[wasm_bindgen(js_name = backupWrite, unchecked_return_type = "Outcome<string>")]
+/// Spec S8: the backup file of the store's records (its text, and the records left out).
+#[wasm_bindgen(js_name = backupWrite, unchecked_return_type = "Outcome<BackupWritten>")]
 pub fn backup_write(#[wasm_bindgen(unchecked_param_type = "BackupWriteInput")] input: JsValue) -> JsValue {
     out(net().and_then(|n| crate::backup::backup_write(n, &parse("input", input)?)))
 }
@@ -212,7 +212,14 @@ pub fn backup_read(#[wasm_bindgen(unchecked_param_type = "BackupReadInput")] inp
 /// Spec 6.3, S2: a kept round copy against the node's live entries at its objects' scripts.
 #[wasm_bindgen(js_name = checkCopy, unchecked_return_type = "Outcome<CopyCheck>")]
 pub fn check_copy(#[wasm_bindgen(unchecked_param_type = "CopyCheckInput")] input: JsValue) -> JsValue {
-    out(net().and_then(|_| crate::backup::check_copy(&parse("input", input)?)))
+    out(net().and_then(|n| crate::backup::check_copy(n, &parse("input", input)?)))
+}
+
+/// Spec 6.3 (F4 review M2): the round copy to keep from a newly checked one and the stored one
+/// (never a stage back, never fewer pools; with the marker kept, every pool of the draw).
+#[wasm_bindgen(js_name = mergeCopy, unchecked_return_type = "Outcome<MergedCopy>")]
+pub fn merge_copy(#[wasm_bindgen(unchecked_param_type = "MergeCopyInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::backup::merge_copy(n, &parse("input", input)?)))
 }
 
 /// The local store's format (spec 6.3, `webstore/2`): its name, version and object stores.

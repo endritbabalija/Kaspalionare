@@ -56,9 +56,10 @@ pub type Spent = Arc<Mutex<(HashSet<Op>, usize)>>;
 /// F4 (TEST-ONLY dev tool, simnet binary only): a request to run the dev instance's rounds forward so
 /// that the page's combination `target` wins: the closing round is drawn, the open round closed, its
 /// anchor ground for `target` (the jackpot) and drawn (`dev.rs`, `advance`).
+/// With `target` none (`POST /close`, F4 review e2e): the closing round is drawn and the open round
+/// closed, and nothing more, so the page sees a round closing with its marker live.
 pub struct DevRound {
-    pub main: [u8; 5],
-    pub bonus: u8,
+    pub target: Option<([u8; 5], u8)>,
     pub reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
 }
 
@@ -127,7 +128,8 @@ async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
             return;
         }
     };
-    let resp = match (method, target.split_once('?')) {
+    // A path with no query (`POST /close`) reads as one with an empty query.
+    let resp = match (method, Some(target.split_once('?').unwrap_or((target, "")))) {
         ("OPTIONS", _) => reply("204 No Content", origin, ""),
         ("POST", Some(("/faucet", q))) => match q.split('&').find_map(|kv| kv.strip_prefix("address=")) {
             Some(a) => match pay(&st, &a.replace("%3A", ":").replace("%3a", ":")).await {
@@ -139,12 +141,12 @@ async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
             },
             None => err("400 Bad Request", origin, "address= is required"),
         },
-        ("POST", Some(("/round", q))) => match (&st.rounds, parse_round(q)) {
+        ("POST", Some(("/round", q))) | ("POST", Some(("/close", q))) => match (&st.rounds, if target.starts_with("/close") { Ok(None) } else { parse_round(q).map(Some) }) {
             (None, _) => err("404 Not Found", origin, "no dev rounds in this run"),
             (_, Err(e)) => err("400 Bad Request", origin, &e),
-            (Some(tx), Ok((main, bonus))) => {
+            (Some(tx), Ok(target)) => {
                 let (back, rx) = tokio::sync::oneshot::channel();
-                if tx.send(DevRound { main, bonus, reply: back }).await.is_err() {
+                if tx.send(DevRound { target, reply: back }).await.is_err() {
                     err("503 Service Unavailable", origin, "the dev loop stopped")
                 } else {
                     match rx.await {

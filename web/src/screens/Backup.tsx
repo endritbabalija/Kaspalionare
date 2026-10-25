@@ -22,8 +22,8 @@ import { storeOf } from '@/store/session';
 const stageName = { open: 'Open', closed: 'Closed', drawn: 'Drawn' } as const;
 const outcomeName: Record<RoundOutcome, string> = {
   kept: 'Kept',
-  open: 'Open: not kept',
-  gone: 'Nothing on chain',
+  open: 'Not kept',
+  gone: 'Gone',
   absent: 'No copy',
 };
 
@@ -164,9 +164,11 @@ export function Backup() {
         >
           {status.kind === 'busy' && <span className="font-mono text-graphite">Checking</span>}
           {status.kind === 'imported' && (
-            <span data-testid="backup-imported" className="font-mono">
-              Imported: {status.report.ticketsKept} tickets
-            </span>
+            <FigureRow name="Tickets kept" testId="backup-imported-row">
+              <span data-testid="backup-imported" data-value={status.report.ticketsKept}>
+                {status.report.ticketsKept}
+              </span>
+            </FigureRow>
           )}
         </div>
         {status.kind === 'error' && (
@@ -194,9 +196,9 @@ export function Backup() {
         ) : rows.length ? (
           <RoundRows rows={rows} testId="backup-rounds" />
         ) : (
-          <span data-testid="backup-empty" className="text-graphite">
-            No rounds
-          </span>
+          <FigureRow name="Rounds" testId="backup-empty">
+            0
+          </FigureRow>
         )}
       </section>
     </section>

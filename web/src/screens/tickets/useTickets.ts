@@ -17,7 +17,8 @@ import {
   type PreparedClaim,
   type PreparedReturn,
 } from '@/tickets/claimFlow';
-import { loadTickets, type CardData, type TicketsData } from '@/tickets/load';
+import { loadTickets, resendPending, type CardData, type TicketsData } from '@/tickets/load';
+import type { PendingPurchaseState } from '@/components/PendingPurchase';
 import type { SendEvent } from '@/tickets/send';
 import type { WalletSession } from '@/wallet/context';
 
@@ -42,6 +43,8 @@ export function useTickets(ctx: Ctx, wallet: WalletSession) {
   // Each row's view holds the very build its figures come from (`prep`), so a press signs what is shown.
   const [views, setViews] = useState<Record<string, View>>({});
   const [busy, setBusy] = useState(false);
+  // Pending purchases sent again by a press (tickets/load.ts RESEND_MS): their state per transaction ID.
+  const [resends, setResends] = useState<Record<string, { state: PendingPurchaseState; error?: string }>>({});
   const busyRef = useRef(false);
   const gen = useRef(0);
   const address = wallet.address;
@@ -145,8 +148,32 @@ export function useTickets(ctx: Ctx, wallet: WalletSession) {
     [adapter, address, ctx, reload, wallet, views],
   );
 
+  const resend = useCallback(
+    async (key: string) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      setResends((x) => ({ ...x, [key]: { state: 'sending' } }));
+      try {
+        await resendPending(ctx, await storeOf(ctx), key);
+        setResends((x) => ({ ...x, [key]: { state: 'unknown' } }));
+      } catch (e) {
+        const d = describe(e);
+        if (d.detail) console.warn(`pending ${key}: ${d.code ?? 'error'}: ${d.detail}`);
+        setResends((x) => ({ ...x, [key]: { state: 'failed', error: d.message } }));
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
+        void reload();
+      }
+    },
+    [ctx, reload],
+  );
+
   return {
     load,
+    resends,
+    onResend: (key: string) => void resend(key),
     busy,
     views,
     claimKey,

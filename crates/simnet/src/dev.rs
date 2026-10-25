@@ -272,9 +272,10 @@ async fn draw_round(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Tem
 
 /// F4 (`POST /round` on the dev faucet; TEST-ONLY, simnet only): the closing round is drawn, the open
 /// round mined past its deadline, closed, its anchor ground so that the page's combination `target`
-/// wins the jackpot, and drawn. The faucet's lock is held throughout, so the faucet and this never
-/// spend one coin of the dev wallet.
-async fn advance(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templates>, starts: &Starts, spent: &crate::faucet::Spent, target: Combo) -> Result<serde_json::Value, String> {
+/// wins the jackpot, and drawn. With no `target` (`POST /close`) it stops once the open round is closed
+/// (the next call draws that round honestly first). The faucet's lock is held throughout, so the faucet
+/// and this never spend one coin of the dev wallet.
+async fn advance(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templates>, starts: &Starts, spent: &crate::faucet::Spent, target: Option<Combo>) -> Result<serde_json::Value, String> {
     let g = spent.lock().await;
     let vdaa = c.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
     let mut coins: Vec<Utxo> = w.spendable(c, vdaa).await?.into_iter().filter(|u| !g.0.contains(&u.op)).collect();
@@ -291,6 +292,10 @@ async fn advance(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templa
     let open = live_where(x, |s| matches!(s, State::Controller(cc) if cc.drawn == 1)).find_map(|l| if let Some(State::Controller(cc)) = &l.state { Some(cc.round) } else { None }).ok_or("no open round whose predecessor is drawn")?;
     fund = close(c, w, x, t, open, fund).await?;
     note_closes(x, starts);
+    let Some(target) = target else {
+        drop(g);
+        return Ok(serde_json::json!({ "drawn": drawn, "round": open.to_string(), "closed": true }));
+    };
     let (_, win) = draw_round(c, w, x, t, open, Some(target), fund).await?;
     note_closes(x, starts);
     drop(g);
@@ -510,8 +515,11 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
             _ = &mut stop => { println!("dev: Ctrl-C; stopping"); break; }
             _ = tokio::time::sleep(Duration::from_millis(o.block_ms)) => {}
             Some(req) = round_rx.recv() => {
-                let target = Combo::new(req.main, req.bonus);
-                println!("dev round: the page's combination {:?}+{} to win", req.main, req.bonus);
+                let target = req.target.map(|(main, bonus)| Combo::new(main, bonus));
+                match &target {
+                    Some(tc) => println!("dev round: the page's combination {:?}+{} to win", tc.main, tc.bonus),
+                    None => println!("dev round: close the open round only"),
+                }
                 let r = advance(&c, &w, &mut x, &t, &starts, &spent, target).await;
                 if let Err(e) = &r {
                     eprintln!("dev round: {e}");

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { StoredRound, StoredTicket, WebstoreInfo } from '@wasm/web.js';
 import { MemoryKV } from './kv';
-import { laterStage, roundKey, ticketKey, WebStore } from './webstore';
+import { roundKey, ticketKey, WebStore } from './webstore';
 
 const info: WebstoreInfo = {
   format: 'webstore/2',
@@ -93,11 +93,18 @@ describe('local store webstore/2 (spec 6.3)', () => {
     expect(await s.pending('aa')).toEqual([]);
   });
 
-  it('a round copy never moves back a stage', () => {
-    expect(laterStage(undefined, round('aa', 'open'))).toBe(true);
-    expect(laterStage(round('aa', 'open'), round('aa', 'closed'))).toBe(true);
-    expect(laterStage(round('aa', 'drawn'), round('aa', 'drawn'))).toBe(true);
-    expect(laterStage(round('aa', 'drawn'), round('aa', 'closed'))).toBe(false);
-    expect(laterStage(round('aa', 'closed'), round('aa', 'open'))).toBe(false);
+  it('marks F3 copies past the open stage open, so they are copied again (F4 review note)', async () => {
+    const kv = new MemoryKV();
+    await kv.put('meta', 'format', { format: 'webstore/1', createdMs: '5' });
+    const closed = { ...round('aa', 'closed'), key: roundKey('aa', '4'), round: '4' };
+    const drawn = { ...round('aa', 'drawn'), key: roundKey('aa', '5'), round: '5' };
+    const marker = { role: 'marker' as const, state: '00', scriptPublicKey: '0000aa' };
+    const kept = { ...round('aa', 'closed'), key: roundKey('aa', '6'), round: '6', against: marker };
+    for (const r of [closed, drawn, kept]) await kv.put('rounds', r.key, r);
+    const s = new WebStore(info, kv);
+    expect((await s.round('aa', '4'))?.stage).toBe('open');
+    expect((await s.round('aa', '5'))?.stage).toBe('open');
+    expect((await s.round('aa', '6'))?.stage).toBe('closed');
+    expect((await s.round('aa', '4'))?.purchases).toHaveLength(16);
   });
 });

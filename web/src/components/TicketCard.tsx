@@ -1,6 +1,9 @@
 // Ticket card (spec 3 S2, 4; mock-up board 3). States: open, drawn (win, no win, partly claimed, fully
-// claimed), void, deposit returnable, deposit returned. One row per combination with its balls (matched ones
-// marked, also for screen readers), its tier or "No win", and a claim row for each winning one; then the
+// claimed), void, deposit returnable, deposit returned; and incomplete (a winning tier whose pool the copy does
+// not show, F4 review M2). One row per combination with its balls (matched ones marked, also for screen
+// readers), its tier or "No win", its status when a won tier pays nothing now (Expired, No pool, Unknown),
+// and a claim row for each winning one; the payout row when the ticket pays another address than the
+// connected wallet (F4 review S2); then the
 // ticket's figures: what it holds (its deposits and accrued prizes), when that comes back (with the last
 // claim, or the date return_deposit() is valid: the real date for this ticket after the draw), the sales
 // deadline while open, and Return deposit when it is valid. Every figure is the wasm's (ticketCard,
@@ -46,7 +49,15 @@ export interface TicketCardProps {
   onClaim?: (index: number) => void;
   onReturn?: () => void;
   explorer?: string;
+  /** The connected wallet's address (the payout row shows when the ticket pays elsewhere). */
+  wallet?: string;
 }
+
+const comboStatus: Partial<Record<ComboCard['status'], string>> = {
+  expired: 'Expired',
+  noPool: 'No pool',
+  unknown: 'Unknown',
+};
 
 const label: Record<TicketCardState, string> = {
   open: 'Open',
@@ -57,7 +68,8 @@ const label: Record<TicketCardState, string> = {
   void: 'No draw: void',
   returnable: 'Deposit returnable',
   returned: 'Deposit returned',
-  spent: 'Not on chain',
+  spent: 'Spent',
+  incomplete: 'Incomplete',
 };
 
 export function TicketCard(p: TicketCardProps) {
@@ -111,6 +123,11 @@ export function TicketCard(p: TicketCardProps) {
                     {cc.tierName ?? 'No win'}
                   </span>
                 )}
+                {cc && comboStatus[cc.status] && (
+                  <span data-testid={`${t}-combo-status-${c.index}`} className="font-mono text-[13px] text-amber">
+                    {comboStatus[cc.status]}
+                  </span>
+                )}
               </div>
               {cc && (cc.status === 'claimable' || cc.status === 'claimed') && cc.tier !== undefined && (
                 <ClaimRow
@@ -126,6 +143,9 @@ export function TicketCard(p: TicketCardProps) {
                   disabled={p.busy}
                   onClaim={() => p.onClaim?.(c.index)}
                   explorer={p.explorer}
+                  withLastClaim={card?.backWithLastClaim}
+                  returnFrom={card?.returnFrom}
+                  wallet={p.wallet}
                 />
               )}
             </li>
@@ -134,6 +154,11 @@ export function TicketCard(p: TicketCardProps) {
       </ul>
       {card && !stored.ended && (
         <>
+          {p.wallet && card.payout !== p.wallet && (
+            <FigureRow name="Payout" testId={`${t}-payout-row`}>
+              <HashOrAddress value={card.payout} kind="address" explorer={p.explorer} testId={`${t}-payout`} />
+            </FigureRow>
+          )}
           <FigureRow name="Held" testId={`${t}-value-row`}>
             <Amount sompi={card.value} testId={`${t}-value`} />
           </FigureRow>

@@ -57,9 +57,26 @@ pub struct Limits {
     pub purchases: u32,
     /// `GET /v1/tickets`, `/v1/vault`, `/v1/positions`, `/v1/requests`.
     pub objects: u32,
+    /// The most objects one `nodeEntries` call reads (and one list response returns): the page
+    /// asks in batches of at most this many (F4 review S7).
+    pub node_objects: u32,
+    /// The largest backup file (`backup::BACKUP_MAX`).
+    pub backup: u32,
+    /// The page's cap on one worker call's arguments as JSON (`backup::WORKER_ARGS_MAX`; equal to
+    /// `ARGS_MAX_BYTES` in `web/src/worker/client.ts`, pinned by a Vitest).
+    pub worker_args: u32,
 }
 
-pub const LIMITS: Limits = Limits { instance: 4 << 20, small: 64 << 10, round: 1 << 20, purchases: 8 << 20, objects: 4 << 20 };
+pub const LIMITS: Limits = Limits {
+    instance: 4 << 20,
+    small: 64 << 10,
+    round: 1 << 20,
+    purchases: 8 << 20,
+    objects: 4 << 20,
+    node_objects: OBJECTS_MAX,
+    backup: crate::backup::BACKUP_MAX as u32,
+    worker_args: crate::backup::WORKER_ARGS_MAX as u32,
+};
 
 /// The most rounds one `GET /v1/rounds` returns (newest first; `?before=r` pages back).
 pub const ROUNDS_PAGE: u32 = 200;
@@ -515,6 +532,13 @@ pub struct CheckedRound {
     /// The winning numbers from the anchor proof (`final` against the pools, `provisional`
     /// against the node's anchor block), when a proof was given.
     pub winning: Option<WinningOut>,
+    /// The indexer says void and the chain supports it as far as the chain can (F4 review S1):
+    /// the live drawer served is past round r (the round was drawn or voided), and no live
+    /// object of round r that a void cannot leave was served (its marker, a pool, its controller
+    /// or a shard). The chain cannot show a void positively (a void leaves nothing of the round;
+    /// a draw's pools are found only by their scripts, which need the winning numbers), so the
+    /// page also refuses "void" when its own copy shows the marker live or holds the result.
+    pub void_supported: bool,
 }
 
 fn dec_of(what: &str, s: &str) -> Result<i64> {
@@ -571,7 +595,9 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
     let open_controller = controller.as_ref().is_some_and(|(_, c)| c.round == r);
     let shown = if marker.is_some() {
         Some(RoundStatus::Closing)
-    } else if !pools.is_empty() || record.is_some() {
+    } else if !pools.is_empty() || (record.is_some() && a.status != RoundStatus::Void) {
+        // A void with pending vault requests also leaves a settlement record of the round, so a
+        // record alone does not tell a draw from a void.
         Some(RoundStatus::Drawn)
     } else if !shards.is_empty() || open_controller {
         Some(RoundStatus::Open)
@@ -699,7 +725,9 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
             winning = Some(w);
         }
     }
+    let void_supported = a.status == RoundStatus::Void && shown.is_none() && drawer.as_ref().is_some_and(|(_, d)| d.round > r);
     Ok(CheckedRound {
+        void_supported,
         round: r.to_string(),
         status: shown.unwrap_or(a.status),
         status_checked: shown.is_some(),

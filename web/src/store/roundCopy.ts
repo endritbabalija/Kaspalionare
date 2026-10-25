@@ -5,13 +5,15 @@
 // 0..k-1; once closed, against the marker's or a pool's frozen roots. The stage comes from the chain's
 // objects only (statusChecked). F4: a closed copy keeps the marker it was checked against, a drawn copy the
 // round result (the winning numbers, the claim deadline and every live pool's state), so a claim can later be
-// built from the copy alone, finding each pool on a node by its script. A copy never moves back a stage.
+// built from the copy alone, finding each pool on a node by its script. What is kept is `mergeCopy`'s (F4
+// review M2): never a stage back, never fewer pools than the stored copy, the closed copy's marker kept into
+// the drawn copy, and with it every pool its draw created.
 // Right after a purchase the API may not have seen it yet (its shard's old outpoint is then spent on the
 // node, a chain_mismatch), so the copy retries.
 import type { CheckedObject, RoundCopyStage, StoredObject, StoredResult, StoredRound } from '@wasm/web.js';
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
-import { laterStage, roundKey, type WebStore } from './webstore';
+import { roundKey, type WebStore } from './webstore';
 
 function stored(o: CheckedObject): StoredObject {
   return { role: o.role, state: o.object.state, scriptPublicKey: o.object.utxo.scriptPublicKey };
@@ -65,10 +67,15 @@ export async function copyRound(
     result,
     checkedMs: String(now()),
   };
-  const prev = await store.round(ctx.config.covenantId, checked.round);
-  if (!laterStage(prev, rec)) return prev as StoredRound;
-  await store.putRound(rec);
-  return rec;
+  return keepCopy(ctx, store, rec);
+}
+
+/** Keep a checked copy as `mergeCopy` says (never a stage back, never fewer pools); returns what is kept. */
+export async function keepCopy(ctx: Ctx, store: WebStore, next: StoredRound): Promise<StoredRound> {
+  const prev = await store.round(ctx.config.covenantId, next.round);
+  const m = unwrap(await ctx.lottery.call('mergeCopy', { covenantId: ctx.config.covenantId, prev, next }));
+  if (m.changed) await store.putRound(m.round);
+  return m.round;
 }
 
 /** `copyRound`, retried while the API catches up with the chain (each failure is logged, the last thrown). */

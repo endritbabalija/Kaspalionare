@@ -387,3 +387,83 @@ pub fn verify_native(v: &Verify) -> String {
         Verify::Winning(i) => outcome_json(web::api::winning_numbers(i)),
     }
 }
+
+// ------------------------------------------------------------------ F4 review: a round's marker
+
+/// A marker for a fixture claim's round (F4 review M2): the pool's round, m, k and roots, and
+/// sales and shares chosen so that `draw()`'s pool set holds the pool's tier at its slice
+/// (B_1 = muldiv(sales, 1,000) = 125 x slice) and the four other lower tiers. Nobody holds the
+/// winning numbers, so there is no jackpot or second-prize pool.
+pub fn marker_for(p: &lottery::state::PoolState) -> lottery::state::MarkerState {
+    assert_eq!(p.tier, lottery::state::TIER_LOWER0, "the fixture claims are tier 4 + bonus");
+    let mut mk = lottery::state::MarkerState {
+        round: p.round,
+        k: p.k,
+        roots: p.roots.clone(),
+        sales: p.slice * 1_250,
+        ref_paid: 0,
+        m: p.m,
+        jackpot: 50 * lottery::buy::KAS as i64,
+        j_boost: 0,
+        g2: 5 * lottery::buy::KAS as i64,
+        s_f: 0,
+        s_r: 0,
+        s_c: 0,
+        s_d: 0,
+        st: [1_000, 500, 500, 500, 500],
+        funder_class: 0,
+        funder_key: [0; 33],
+    };
+    mk.set_funder(&Payout::Schnorr(lottery::params::xonly(&lottery::buy::FUNDING_SK)));
+    mk
+}
+
+/// A state as a stored chain object (role, state bytes, script).
+pub fn stored_object(s: &lottery::index::State) -> web::webstore::StoredObject {
+    use lottery::web::verify;
+    web::webstore::StoredObject {
+        role: RoleName::of(s.role()),
+        state: hex(&verify::state_bytes(s).unwrap()),
+        script_public_key: web::convert::spk_hex(&verify::state_spk(s).unwrap()),
+    }
+}
+
+/// A live UTXO of the instance `cov` holding the state `s` (value `amount`), at `<byte x 32>:index`.
+pub fn live_utxo(cov: &str, s: &lottery::index::State, byte: u8, index: u32, amount: u64) -> CovUtxo {
+    use lottery::web::verify;
+    CovUtxo {
+        utxo: Utxo {
+            transaction_id: hex(&[byte; 32]),
+            index,
+            amount: amount.to_string(),
+            script_public_key: web::convert::spk_hex(&verify::state_spk(s).unwrap()),
+            block_daa_score: "2000000".into(),
+            is_coinbase: false,
+            covenant_id: Some(cov.to_string()),
+        },
+        state: hex(&verify::state_bytes(s).unwrap()),
+    }
+}
+
+/// A fixture claim round's marker (`marker_for`) and every pool its draw created, as live UTXOs
+/// (the claim's own pool is its fixture UTXO): the page tests' drawn copy with the marker kept.
+pub fn marked_round(i: &ClaimInput) -> serde_json::Value {
+    use lottery::index::{Role, State};
+    use lottery::web::verify;
+    let own = &i.pools[0];
+    let State::Pool(p) = verify::decode_state(Role::Pool, &web::convert::unhex("state", &own.state).unwrap()).unwrap() else { unreachable!() };
+    let mk = marker_for(&p);
+    let lists: Vec<Vec<u8>> = i.purchases.iter().map(|x| web::convert::unhex("p", x).unwrap()).collect();
+    let set = web::backup::round_pools(&mk, &p, &lists).unwrap();
+    let pools: Vec<CovUtxo> = set
+        .iter()
+        .enumerate()
+        .map(|(n, x)| if x == &p { own.clone() } else { live_utxo(&i.covenant_id, &State::Pool(x.clone()), 0x60 + n as u8, n as u32, 2 * lottery::buy::KAS) })
+        .collect();
+    let marker = State::Marker(mk);
+    serde_json::json!({
+        "marker": stored_object(&marker),
+        "markerUtxo": live_utxo(&i.covenant_id, &marker, 0x4d, 0, 5 * lottery::buy::KAS),
+        "pools": pools,
+    })
+}

@@ -19,7 +19,16 @@ export function claimRowState(p: {
 }
 
 export type TicketCardState =
-  'open' | 'win' | 'no-win' | 'partly-claimed' | 'claimed' | 'void' | 'returnable' | 'returned' | 'spent';
+  | 'open'
+  | 'win'
+  | 'no-win'
+  | 'partly-claimed'
+  | 'claimed'
+  | 'void'
+  | 'returnable'
+  | 'returned'
+  | 'spent'
+  | 'incomplete';
 
 export function ticketCardState(p: { stored: StoredTicket; card?: TicketCard; spent?: boolean }): TicketCardState {
   const { stored, card } = p;
@@ -29,6 +38,8 @@ export function ticketCardState(p: { stored: StoredTicket; card?: TicketCard; sp
   if (card.stage === 'void') return 'void';
   if (card.stage === 'open') return 'open';
   const winning = card.combos.some((c) => c.status === 'claimable');
+  // A winning tier whose pool the copy does not show: neither "no win" nor "claimed" can be said (F4 review M2).
+  if (!winning && card.combos.some((c) => c.status === 'unknown')) return 'incomplete';
   if (card.claimed > 0) return winning ? 'partly-claimed' : 'claimed';
   return winning ? 'win' : 'no-win';
 }

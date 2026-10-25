@@ -135,7 +135,55 @@ pub struct StoredTicket {
     /// The claim or return that consumed the ticket, once one did.
     #[serde(default)]
     pub ended: Option<TicketEnd>,
+    /// A signed claim or return of this ticket whose outcome the page has not learnt yet (F4
+    /// review S6): the next visit settles it from the chain (its successor or payout output
+    /// live), so the successor stays reachable without the indexer API. Never in a backup.
+    #[serde(default)]
+    pub pending: Option<StoredAction>,
     /// Unix milliseconds.
+    pub saved_ms: Dec,
+}
+
+/// What a pending claim or return is (F4 review S6).
+#[derive(Tsify, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ActionKind {
+    Claim,
+    Return,
+}
+
+/// One output of a pending action's transaction that pays the ticket's payout (plain script).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PaidOut {
+    pub index: u32,
+    /// Sompi.
+    pub value: Dec,
+    pub script_public_key: Hex,
+}
+
+/// A signed claim or `return_deposit()` of a ticket, kept from the moment it is signed until
+/// the chain shows its outcome (F4 review S6): the signed transaction (sent again only within a
+/// short window after signing, `buyFlow` RESEND rule), the ticket's successor (PAY, ACCRUE:
+/// output 1 of `signed.id`) and the payout output (FINAL, PAY, a return).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredAction {
+    pub kind: ActionKind,
+    /// The claimed index (a claim).
+    #[serde(default)]
+    pub index: Option<u32>,
+    pub signed: Signed,
+    /// The ticket after a PAY or ACCRUE claim (output 1).
+    #[serde(default)]
+    pub successor: Option<TicketOut>,
+    /// Its value (sompi): the ticket's value, plus the prize after an ACCRUE claim.
+    #[serde(default)]
+    pub successor_value: Option<Dec>,
+    /// The output paying the ticket's payout (FINAL, PAY, a return), if any.
+    #[serde(default)]
+    pub paid: Option<PaidOut>,
+    /// Unix milliseconds of the signature.
     pub saved_ms: Dec,
 }
 
@@ -185,8 +233,10 @@ pub struct StoredObject {
 }
 
 /// The round result (`draw()`'s pools), kept once the round is drawn (spec 6.3): the winning
-/// numbers, the claim deadline and every live pool's state, checked against the pools' UTXOs
-/// when it was taken.
+/// numbers, the claim deadline and the pools' states: each checked against its live UTXO when it
+/// was taken, or, with the round's marker kept, the whole set `draw()` created (F4 review M2).
+/// Pools are only ever added to a kept result, never dropped (an absorbed pool stays listed: its
+/// absence from the chain after its claim deadline is what shows a win expired).
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredResult {
@@ -222,6 +272,12 @@ pub struct StoredRound {
     /// The round result (`drawn`), F4.
     #[serde(default)]
     pub result: Option<StoredResult>,
+    /// The round's marker as it was live when the copy was `closed` (F4 review M2): its
+    /// jackpot, G2, sales and shares fix `draw()`'s whole pool set (`game::pool_set`), so a
+    /// drawn copy that keeps it lists every pool the draw created (`backup::merge_copy`). The
+    /// chain no longer holds it after `draw()`, so a copy taken first when drawn has none.
+    #[serde(default)]
+    pub marker: Option<StoredObject>,
     /// Unix milliseconds of the last check against the chain.
     pub checked_ms: Dec,
 }

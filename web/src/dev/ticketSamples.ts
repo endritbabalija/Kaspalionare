@@ -1,6 +1,6 @@
 // DEV ONLY (the catalogue): sample ticket cards and claim figures in every state of spec 4. Sample values,
 // shaped as the wasm returns them (the generated types); no lottery arithmetic.
-import type { ClaimFigures, ClaimView, ComboCard, StoredTicket, TicketCard } from '@wasm/web.js';
+import type { ClaimFigures, ClaimView, ComboCard, StoredPending, StoredTicket, TicketCard } from '@wasm/web.js';
 
 const COV = '9f3c0a11223344556677889900aabbccddeeff00112233445566778899b71e21';
 const PAYOUT = 'kaspatest:qqdasdj3abcdefghijklmnopqrstuvwxyz0123456789abcdefghijphyfvu';
@@ -56,7 +56,16 @@ const combo = (index: number, status: ComboCard['status'], claim?: ClaimView): C
   claim,
 });
 
-export function sampleCard(kind: 'open' | 'win' | 'no-win' | 'partly' | 'void' | 'returnable'): TicketCard {
+/** A tier won whose pool pays nothing now (expired, no pool) or is not shown (unknown). */
+const won = (index: number, status: ComboCard['status']): ComboCard => ({
+  ...combo(index, status),
+  tier: 1,
+  tierName: '5',
+});
+
+export function sampleCard(
+  kind: 'open' | 'win' | 'no-win' | 'partly' | 'void' | 'returnable' | 'incomplete' | 'expired',
+): TicketCard {
   const base: TicketCard = {
     round: '12',
     deadline: '13662',
@@ -86,7 +95,6 @@ export function sampleCard(kind: 'open' | 'win' | 'no-win' | 'partly' | 'void' |
       return {
         ...base,
         combos: [combo(0, 'claimable', claimView('pay', '1240000000', '2')), combo(1, 'noWin')],
-        backWithLastClaim: true,
       };
     case 'no-win':
       return { ...base, combos: [combo(0, 'noWin'), combo(1, 'noWin')] };
@@ -115,8 +123,38 @@ export function sampleCard(kind: 'open' | 'win' | 'no-win' | 'partly' | 'void' |
         combos: [combo(0, 'noWin'), combo(1, 'noWin')],
         returnable: { path: 'alone', pool: undefined },
       };
+    case 'incomplete':
+      return { ...base, combos: [won(0, 'unknown'), combo(1, 'noWin')] };
+    case 'expired':
+      return {
+        ...base,
+        combos: [won(0, 'expired'), won(1, 'noPool')],
+        returnable: { path: 'alone', pool: undefined },
+      };
   }
 }
+
+/** A signed purchase whose outcome is unknown and that waits for a press (S2, F4 review note). */
+export const samplePending = (): StoredPending => ({
+  key: TX,
+  covenantId: COV,
+  network: 'testnet-10',
+  round: '13',
+  shardIndex: 3,
+  ticket: { index: 1, state: '00', scriptPublicKey: '0000aa', address: PAYOUT },
+  bundle: [{ main: [3, 7, 12, 19, 28], bonus: 2 }],
+  payout: PAYOUT,
+  buy: {
+    transactionId: TX,
+    price: '100000000',
+    deposit: '13000000',
+    depositBack: '12109662',
+    fee: '25019700',
+    referral: { amount: '0', paid: false, address: undefined },
+  },
+  signed: { transaction: '{}', id: TX },
+  savedMs: '1',
+});
 
 export function sampleFigures(c: ClaimView, fee: string, valueBack = '0'): ClaimFigures {
   const prize = BigInt(c.prize);

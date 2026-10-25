@@ -4,7 +4,9 @@
 // and drawn), and the purchases whose outcome the page has not learnt yet (`pending`). The record types and
 // the database layout come from crates/web (src/webstore.rs, `webstoreInfo`): no hand-written copy.
 // Migration (F4): a webstore/1 store (F3) reads as webstore/2 unchanged (the new fields are optional); the
-// database upgrade adds the `pending` store and the meta record's format is rewritten in place.
+// database upgrade adds the `pending` store and the meta record's format is rewritten in place. An F3 copy
+// at the closed or drawn stage has no marker or round result (F4 fields): the migration marks it open, so it
+// is taken again from the chain (F4 review note); its lists are kept.
 import type { StoreMeta, StoredPending, StoredRound, StoredTicket, WebstoreInfo } from '@wasm/web.js';
 import { PageError } from '@/lib/errors';
 import { IdbKV, type KV } from './kv';
@@ -27,18 +29,33 @@ export class WebStore {
    * migrated in place; any other format is refused (store_format).
    */
   private ensure(): Promise<void> {
+    let migrated = false;
     this.ready ??= this.kv
       .update<StoreMeta>('meta', 'format', (m) => {
         if (!m) return { format: this.info.format, createdMs: String(this.now()) };
         if (m.format === this.info.format) return m;
-        if (this.info.reads.includes(m.format)) return { ...m, format: this.info.format };
+        if (this.info.reads.includes(m.format)) {
+          migrated = true;
+          return { ...m, format: this.info.format };
+        }
         throw new PageError('store_format', `the local store is ${m.format}, this page reads ${this.info.format}`);
+      })
+      .then(async () => {
+        if (migrated) await this.migrateRounds();
       })
       .catch((e: unknown) => {
         this.ready = null;
         throw e;
       });
     return this.ready;
+  }
+
+  /** F3 copies past the open stage lack what F4 checks them with: marked open, so they are copied again. */
+  private async migrateRounds(): Promise<void> {
+    for (const r of await this.kv.all<StoredRound>('rounds')) {
+      const lacks = (r.stage === 'closed' && !r.against) || (r.stage === 'drawn' && !r.result);
+      if (lacks) await this.kv.put('rounds', r.key, { ...r, stage: 'open' });
+    }
   }
 
   async format(): Promise<string | undefined> {
@@ -98,11 +115,4 @@ export function ticketKey(transactionId: string, index: number): string {
 
 export function roundKey(covenantId: string, round: string): string {
   return `${covenantId}:${round}`;
-}
-
-const STAGE_ORDER = { open: 0, closed: 1, drawn: 2 } as const;
-
-/** Whether `next` is a later stage of a round's copy than `prev` (a copy never moves back). */
-export function laterStage(prev: StoredRound | undefined, next: StoredRound): boolean {
-  return !prev || STAGE_ORDER[next.stage] >= STAGE_ORDER[prev.stage];
 }

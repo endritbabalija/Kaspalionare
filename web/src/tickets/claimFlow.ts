@@ -11,17 +11,20 @@ import type {
   ClaimFigures,
   ClaimInput,
   CovUtxo,
+  PaidOut,
   ReturnFigures,
   ReturnInput,
+  Signed,
+  StoredAction,
   StoredTicket,
   TicketCard,
 } from '@wasm/web.js';
-import { unwrap } from '@/lib/errors';
+import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { coinsFor } from '@/play/buyFlow';
 import type { WebStore } from '@/store/webstore';
 import type { WalletAdapter } from '@/wallet/types';
-import { sendAndWait, type SendEnv, type SendEvent } from './send';
+import { sendAndWait, type SendEnv, type SendEvent, type Watched } from './send';
 
 /** What a claim or a return is built from: the ticket's live entry and the round's chain objects. */
 export interface TicketChain {
@@ -111,6 +114,140 @@ export async function prepareReturn(env: ActEnv, t: TicketChain): Promise<Prepar
   return { kind: 'return', input, built, figures };
 }
 
+/** A plain output of `built` (a payout or the change) to watch, or nothing when it is a covenant output. */
+async function plainOutput(env: ActEnv, built: BuiltTx, index: number): Promise<Watched | undefined> {
+  const o = built.summary.outputs[index];
+  if (!o?.address || o.covenant) return undefined;
+  const scriptPublicKey = unwrap(await env.ctx.lottery.call('scriptOf', o.address));
+  return { index, amount: o.value, scriptPublicKey, role: 'ticket' };
+}
+
+/** The wallet's change outputs from `from` on (evidence the transaction went through, F4 review S5). */
+async function changeOutputs(env: ActEnv, built: BuiltTx, from: number): Promise<Watched[]> {
+  const out: Watched[] = [];
+  for (const o of built.summary.outputs.slice(from)) {
+    if (!o.toWallet) continue;
+    const w = await plainOutput(env, built, o.index);
+    if (w) out.push(w);
+  }
+  return out;
+}
+
+/** What a claim or return leaves for the ticket: its successor (PAY, ACCRUE) and its payout output. */
+async function actionOf(
+  env: ActEnv,
+  kind: StoredAction['kind'],
+  built: BuiltTx,
+  successor: ClaimFigures['ticketNext'],
+  paidAt: number | undefined,
+  index?: number,
+): Promise<{ action: (s: Signed) => StoredAction; watch: Watched[] }> {
+  const watch: Watched[] = [];
+  if (successor) {
+    watch.push({
+      index: successor.index,
+      amount: built.summary.outputs[successor.index]?.value ?? '0',
+      scriptPublicKey: successor.scriptPublicKey,
+      state: successor.state,
+      role: 'ticket',
+    });
+  }
+  const pw = paidAt === undefined ? undefined : await plainOutput(env, built, paidAt);
+  if (pw) watch.push(pw);
+  watch.push(...(await changeOutputs(env, built, (paidAt ?? successor?.index ?? 0) + 1)));
+  const paid: PaidOut | undefined = pw
+    ? { index: pw.index, value: pw.amount, scriptPublicKey: pw.scriptPublicKey }
+    : undefined;
+  return {
+    watch,
+    action: (signed) => ({
+      kind,
+      index,
+      signed,
+      successor: successor ?? undefined,
+      successorValue: successor ? built.summary.outputs[successor.index]?.value : undefined,
+      paid,
+      savedMs: String(Date.now()),
+    }),
+  };
+}
+
+/**
+ * A ticket record after its claim or return went through (`id` accepted): the successor (PAY, ACCRUE; with
+ * the node's entry when it is still live, else as built: another claimer may have spent it already) or the
+ * ticket's end (FINAL, a return). Also settles a pending action on a later visit (load.ts).
+ */
+export function settledTicket(
+  stored: StoredTicket,
+  a: StoredAction,
+  live?: { index: number; entry: CovUtxo['utxo'] },
+): StoredTicket {
+  const id = a.signed.id;
+  const now = String(Date.now());
+  if (a.successor) {
+    const s = a.successor;
+    const utxo =
+      live && live.index === s.index
+        ? live.entry
+        : {
+            transactionId: id,
+            index: s.index,
+            amount: a.successorValue ?? stored.ticket.utxo.amount,
+            scriptPublicKey: s.scriptPublicKey,
+            blockDaaScore: '0',
+            isCoinbase: false,
+            covenantId: stored.covenantId,
+          };
+    return { ...stored, ticket: { utxo, state: s.state }, pending: undefined, savedMs: now };
+  }
+  return {
+    ...stored,
+    pending: undefined,
+    ended: {
+      kind: a.kind === 'claim' ? 'claimed' : 'returned',
+      transactionId: id,
+      amount: a.paid?.value ?? '0',
+      endedMs: now,
+    },
+  };
+}
+
+/**
+ * Send a prepared claim or return (F4 review S6): the signed transaction is kept with the ticket before it
+ * is sent (`pending`), so an outcome the page does not learn is settled on the next visit and the successor
+ * stays reachable without the indexer API; then the ticket's successor or its end is kept.
+ */
+async function sendAction(
+  env: ActEnv & Omit<SendEnv, 'ctx' | 'wallet'>,
+  store: WebStore | undefined,
+  t: TicketChain,
+  built: BuiltTx,
+  plan: { action: (s: Signed) => StoredAction; watch: Watched[] },
+  onEvent: (e: SendEvent) => void,
+): Promise<string> {
+  let action: StoredAction | undefined;
+  const onSigned = async (final: Signed) => {
+    action = plan.action(final);
+    if (store) await store.putTicket({ ...t.stored, pending: action });
+  };
+  try {
+    const { id, entry, watched } = await sendAndWait(
+      { ...env, ctx: env.ctx, wallet: env.wallet },
+      built,
+      plan.watch,
+      onEvent,
+      onSigned,
+    );
+    if (store && action) await store.putTicket(settledTicket(t.stored, action, { index: watched.index, entry }));
+    return id;
+  } catch (e) {
+    // A transaction known not to have gone through (refused, or its input taken: node_conflict) leaves no
+    // pending record; an unknown outcome keeps it for the next visit.
+    if (store && action && !(e instanceof PageError && e.code === 'submit_unknown')) await store.putTicket(t.stored);
+    throw e;
+  }
+}
+
 /** Send a prepared claim; then keep the ticket's successor (PAY, ACCRUE) or its end (FINAL). */
 export async function sendClaim(
   env: ActEnv & Omit<SendEnv, 'ctx' | 'wallet'>,
@@ -120,30 +257,10 @@ export async function sendClaim(
   onEvent: (e: SendEvent) => void,
 ): Promise<string> {
   const f = p.figures;
-  const next = f.ticketNext;
-  const watch = next
-    ? {
-        index: next.index,
-        amount: p.built.summary.outputs[next.index]?.value ?? '0',
-        scriptPublicKey: next.scriptPublicKey,
-        state: next.state,
-        role: 'ticket' as const,
-      }
-    : {
-        index: f.poolNext.index,
-        amount: f.poolNext.value,
-        scriptPublicKey: f.poolNext.scriptPublicKey,
-        state: f.poolNext.state,
-        role: 'pool' as const,
-      };
-  const { id, entry } = await sendAndWait({ ...env, ctx: env.ctx, wallet: env.wallet }, p.built, watch, onEvent);
-  if (store) {
-    const updated: StoredTicket = next
-      ? { ...t.stored, ticket: { utxo: entry, state: next.state }, savedMs: String(Date.now()) }
-      : { ...t.stored, ended: { kind: 'claimed', transactionId: id, amount: f.paidNow, endedMs: String(Date.now()) } };
-    await store.putTicket(updated);
-  }
-  return id;
+  // FINAL pays at output 1, PAY at output 2 (design 7.4); ACCRUE pays nothing now.
+  const paidAt = f.claim.mode === 'final' ? 1 : f.claim.mode === 'pay' ? 2 : undefined;
+  const plan = await actionOf(env, 'claim', p.built, f.ticketNext, paidAt, f.index);
+  return sendAction(env, store, t, p.built, plan, onEvent);
 }
 
 /** Send a prepared return; then keep the ticket's end. */
@@ -154,16 +271,6 @@ export async function sendReturn(
   p: PreparedReturn,
   onEvent: (e: SendEvent) => void,
 ): Promise<string> {
-  const at = p.input.pool ? 1 : 0;
-  const out = p.built.summary.outputs[at];
-  const spk = unwrap(await env.ctx.lottery.call('scriptOf', p.figures.payout));
-  const watch = { index: at, amount: out?.value ?? p.figures.amount, scriptPublicKey: spk, role: 'ticket' as const };
-  const { id } = await sendAndWait({ ...env, ctx: env.ctx, wallet: env.wallet }, p.built, watch, onEvent);
-  if (store) {
-    await store.putTicket({
-      ...t.stored,
-      ended: { kind: 'returned', transactionId: id, amount: p.figures.amount, endedMs: String(Date.now()) },
-    });
-  }
-  return id;
+  const plan = await actionOf(env, 'return', p.built, undefined, p.input.pool ? 1 : 0);
+  return sendAction(env, store, t, p.built, plan, onEvent);
 }
