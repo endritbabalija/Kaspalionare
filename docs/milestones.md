@@ -6,7 +6,7 @@ Every covenant milestone checks value conservation for its transitions (5.5). It
 
 Proposals in `docs/DECISIONS.md` marked "confirm in spec Mx" are settled in that milestone's spec before any code.
 
-Out of scope until later: economic tuning beyond the starting values, ticket transfer, any front end, mainnet.
+Out of scope until later: economic tuning beyond the starting values, ticket transfer, mainnet. A front end is a testnet-only track since D129 (`docs/specs/frontend.md`); a mainnet front end stays out of scope.
 
 Seed: the seed source is the anchor block's hash (M7); the miner-withholding bias is OPEN on the release gate (D100, amended 2026-10-13). The on-chain-only search ended with a theorem (D110) and the owner reopened the delay path (D126, 2026-10-14): a fresh session picks between the refereed sequential delay (D111) and the ZK segmented VDF, then a seed milestone follows; the 1.5 floor is in (D113) and D112 says what it can return to.
 
@@ -217,6 +217,19 @@ Done when:
 - testnet-10 inclusion latency of near-full transactions (single, 3- and 7-hop chains, k at once; floor, 2×, 10×) is in `docs/tn10-mass-check.md`, and k = 5 false claims are refuted on testnet;
 - the flood table (k = 5, 50, 500) and W_c from the outline formula are in `docs/costs.md` "Spike RSD";
 - the verdict (S3), s, N, W_c and fees per round are DECISIONS rows and update outline 5.1; `covenant-reviewer` has checked the probes and tests.
+
+## Track — Web front end, testnet-10 beta (alongside M8)
+Status: spec approved 2026-10-25 (`docs/specs/frontend.md`, D129–D137); not started. Implementation in a fresh chat, stages F0–F6, each a fresh agent, handoff `docs/specs/frontend-handoff.md`.
+
+A phone-first web app, Kaspalionare: play, my tickets and claims, rounds with in-browser verification, run-the-round, the backer vault, how it works. The `lottery` builders run in the browser as wasm (`crates/web`); a read-only, untrusted indexer API (`crates/indexer-api`); wallet signing (KasWare, Kaspire) plus a quick testnet wallet. No covenant change. Testnet only.
+
+Done when (spec section 8):
+- F0's wallet experiment is recorded, and the beta is live on Vercel against a testnet-10 instance and the indexer API;
+- journeys J1–J7 have passed on testnet-10 with logged transaction IDs;
+- the wasm builder is byte-identical to the native one for every M1–M8 fixture shape, and no decoder panics on untrusted bytes;
+- the post-sign check, untrusted-API and local-copy attack tests and the simnet end-to-end suite pass;
+- the copy pass (rule 6) and the DX/AX checks (spec 1.1) pass; `covenant-reviewer` and a security review have no open must-fix;
+- build decisions are DECISIONS rows.
 
 ## M8 — Testnet-10 end to end
 Status: in progress (spec `docs/specs/8.md` approved 2026-10-13 in a design session; implementation in a fresh session, stages S1–S5 with the handoff `docs/specs/8-handoff.md`; S1 is the margin-floor change below (D109); adds a private simnet for the forced jackpot cases (D114, D125) and backer checks (D124))
