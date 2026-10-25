@@ -155,11 +155,20 @@ impl Tree {
 
     /// Increment the count of `bonus` (1-based) under `rank`.
     pub fn increment(&mut self, rank: u32, bonus: u8) {
+        self.try_increment(rank, bonus).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `increment` with an error instead of a panic (front-end F1 part B): a bonus outside
+    /// 1..=m or a count already at COUNT_MAX.
+    pub fn try_increment(&mut self, rank: u32, bonus: u8) -> Result<(), String> {
         let mut c = self.counts(rank);
-        let slot = &mut c[bonus as usize - 1];
-        assert!(*slot < COUNT_MAX, "count overflow");
+        let slot = c.get_mut((bonus as usize).wrapping_sub(1)).ok_or_else(|| format!("bonus {bonus} outside 1..={}", self.m))?;
+        if *slot >= COUNT_MAX {
+            return Err("count overflow".into());
+        }
         *slot += 1;
         self.set(rank, c);
+        Ok(())
     }
 }
 

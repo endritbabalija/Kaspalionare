@@ -40,7 +40,7 @@ Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this f
 | Stage | Status | Notes |
 |---|---|---|
 | F0 wallet experiment | part A done, waiting for owner | Probe `tn10 wallet-probe` built and self-tested on testnet-10 (stand-in signer). Part B (the owner's clicks, KasWare only; Kaspire not available, untested) is scheduled for 2026-10-26: see "F0 part B: owner steps". |
-| F1 builder refactor for wasm | part A done | Templates embedded (W2), compiler behind `compiler`, one rusty-kaspa version (vendored `silverscript-abi` on v2.1.0, no encoding change, proven by golden digests), wasm cdylib links with no extra flag (5.43 MB at O3, 5.01 MB at Os). Part B: the `crates/web` API, `Result` everywhere and W3, the signing split per case, W1, W4. See "F1 part A". |
+| F1 builder refactor for wasm | parts A and B done; part C next | A: templates embedded (W2), compiler behind `compiler`, one rusty-kaspa version (vendored `silverscript-abi` on v2.1.0, no encoding change, proven by golden digests), wasm cdylib links with no extra flag (5.43 MB at O3, 5.01 MB at Os). B: the page-facing layer `lottery::web` (decode, verify, the 8 unsigned builders, the signing split for every case including owner inputs, the post-sign check moved from tn10, 26 typed error codes), no panic on untrusted input (W3 property test, 3 panics found and fixed), `.gitattributes` for the byte-pinned files; native bytes unchanged (golden digests). C: the wasm-bindgen API in `crates/web`, W1, W4, `.d.ts`, size. See "F1 part A" and "F1 part B". |
 | F2 indexer API | not started | |
 | F3 web shell and Play | not started | |
 | F4 My tickets, claims, backup | not started | |
@@ -502,3 +502,239 @@ This part needs no coding and takes about 20-30 minutes. Everything uses testnet
 - `cargo test -j 1 --release -p tn10`: `25 passed; 0 failed`.
 - `cargo check -p web --features mainnet --target wasm32-unknown-unknown`: `Finished`.
 - Not built: `simnet` (RocksDB, about 14 min). It uses `lottery` with default features, whose API is unchanged except the additions.
+
+## F1 part B (stage agent, 2026-10-25)
+
+### What was done
+
+1. **The page-facing layer `lottery::web`** (new, `crates/lottery/src/web/`). Everything a browser page reaches goes through it, and every function returns `Result<_, web::Error>`. Part C wraps it with wasm-bindgen; nothing in it is wasm-specific.
+   - `web::verify`: decoders, chain checks and ranges.
+     - Decoders: `decode_state(role, bytes)` (all 11 roles, the indexer API's and `bundle/1`'s form, re-encoding checked), `decode_redeem`, `state_bytes`, `state_spk`, `anchor_proof`, and the store readers `read_wallet` (`wallet/1`), `read_index_log` and `read_index_snapshot` (`index/1`), `read_bundle` (`bundle/1`, verified with `bundle::verify`).
+     - Chain checks (spec 6.3): `verify_state(role, bytes, utxo_spk)` (`chain_mismatch` = "the indexer's copy does not match the chain"); `rebuild_tree(m, purchases)` and `rebuild_tree_bytes` (compact six-byte purchases in shard order, canonical and count-checked); `check_roots(trees, roots, k)` (`tree_mismatch`); `check_anchor(proof, d)`; `winning_numbers` and `winning_numbers_from_anchor` (the D42/D94 seed mapping recomputed from the anchor's X.hash).
+     - Ranges: `check_shard`, `check_ticket`, `check_pool`, `check_controller`, `check_params`, `check_marker`, `check_drawer`, `check_vault`, `check_position`, `check_request`, `check_record`. Each mirrors the covenant's own range checks on its state (the `.sil` lines are cited in the code). No chain-valid state fails one, because each covenant refuses to create such a state. The builders apply them before any arithmetic, so the Rust reference never leaves its domain.
+   - `web::build`: one unsigned builder per entry point: `buy`, `claim` (and `claim_from_store`), `return_deposit` (both paths), `close`, `draw` (with an anchor proof; the void without one) and `draw_from_store`, `request_deposit`, `request_withdraw`, `settle`; plus `fee_of`, `with_fee` (the tn10 fee loop, same caps: 1,000 sompi/gram, 5 KAS per transaction) and `w_min`. Each takes the entry point's `*Case`, the covenant inputs' outpoints and `Funds` (the wallet's coins, its change script, the fee). Then:
+     1. It checks the funds (1 to 8 confirmed, zero-ID Schnorr P2PK coins; a standard change script; the fee within the cap) and every case field the builder reads (the ranges above, the reference's preconditions, the fixture-only knobs at their defaults).
+     2. It builds with the library's own builder (`build_with`, the native code path), the funding and change on a placeholder key.
+     3. It puts the wallet's coins and change script in place (`bind`) and refuses the transaction if the placeholder key's script is left anywhere.
+     4. It returns `sign::unsigned`.
+   - `web::sign`: the signing split.
+     - `unsigned(&Built)` returns `Unsigned`: the transaction as sent to the wallet (the inputs to sign with an empty signature script, every covenant signature script final, the budgets and storage-mass commit of the signed transaction), the entries, `sign: Vec<SignInput>` (index and the owner each input's script names), the masses of the signed transaction, the fee and the units. Every covenant input runs in the engine under its committed budget first (`engine` otherwise), as the F0 probe required.
+     - `post_sign` is the spec 6.2 check, moved here from `tn10/src/pskt.rs` with the same refusal texts. It is generalized to owner inputs: the form is checked per input (Schnorr or ECDSA `OP_DATA_65 <64-byte sig> SIG_HASH_ALL`; P2SH that push followed by `OP_DATA_34 <the position's redeem>`).
+     - `assemble(&Unsigned, returned, returned_entries)` builds the final transaction: the check, then OUR transaction with only the listed inputs' signature scripts taken from the wallet's, then the masses compared with the built ones, then the engine on every listed input against our entries. The output is ready to submit.
+     - `signers_for` gives the tn10 F0 probe its forms. `blanked` and `with_signatures` are the plain helpers.
+   - `web::Code` and `web::Error { code, detail }`: 26 stable codes (list below), each with a number, a snake-case name and one message (spec 1.1 AX).
+2. **The signing split for every case** (`crates/lottery/src/buy.rs`).
+   - `Built::finish_unsigned()` now covers owner inputs; F0's refusal is gone. The new `InKind::OwnerPub(OwnerPub)` is an owner input whose owner signs outside the library: the public side of a D67 key (`Schnorr(x-only)`, `Ecdsa(33 bytes)`, `P2sh(x-only of the wrapped Schnorr redeem)`). `finish()` refuses it. An `InKind::Owner(OwnerKey)` input counts as its public side in `finish_unsigned`.
+   - `Built::external_signers()` lists the inputs to sign: funding inputs, whose script must be a Schnorr P2PK, and owner inputs.
+   - `finish()` and `finish_unsigned()` share `try_finish_inner(sign)`: the old body, with `?` where it panicked. On success it computes exactly what it did before; `finish()` unwraps it with the same panic text.
+   - The owner-input budget is designed and proven below.
+3. **No panics on untrusted input** (spec 6.1, W3).
+   - New fallible primitives, each with the old function as a thin wrapper (same bytes, same panic on failure):
+     - `Template::try_from_artifact` (the embedded templates load through it), `try_state_bytes`, `try_redeem`;
+     - `try_entry_sigscript`, `try_planned_sig_script`, `try_push_redeem`;
+     - `harness::try_budget_for` and `try_masses`;
+     - `Final::try_fee`, `DrawCase::try_expected`, `Tree::try_increment`;
+     - `State::try_redeem`, `try_state_bytes`, `from_values`.
+   - The decoders' re-encoding (`State::decode`, `State::from_state_bytes`) now uses `try_redeem`: a value the decoder accepts but the encoder refuses is an error.
+   - Fixed in place (each was found by the audit or by W3):
+     - `ClaimCase::comb()` computed `6 * idx` unchecked (W3: an idx near i64::MAX overflowed).
+     - The pinned storage-mass calculator divides by every output value and by input values on its relaxed path, and sums input values unchecked (rusty-kaspa v2.1.0 `consensus/core/src/mass/mod.rs:458-466, 489-494, 502-503`; W3: a zero-value output divided by zero). `try_masses` refuses a zero-value output and an input total above u64 (neither ever gave a mass), and `sign::unsigned` refuses a zero-value input (no such UTXO exists on chain).
+     - `DrawCase::fix_lock_time` no longer panics when D + draw_window >= DAA_MAX (`try_expected` refuses at check 19).
+     - `DrawCase::from_store` uses `try_expected`, so it no longer relies on `index::model`'s `catch_unwind`.
+     - `bundle::verify` uses `Templates::try_get` (a file B_MAX other than the embedded one is an error without the compiler) and bounds K <= K_MAX before it sizes the genesis case.
+     - `ResultJson::result` bounds k, the roots and m before `RoundResult::pool_state` packs them.
+     - `Wallet::shard_tree` uses `try_increment` (32,768 updates of one combination overflowed the count).
+     - `Wallet::trees` uses `get(i)` for the frozen roots.
+     - `Wallet::apply_claim` bounds the claimed index before the shift and uses `first()` and `get()` for the inputs and the claimed byte.
+4. **W3** (`crates/lottery/tests/f1_w3.rs`): the property test, a seeded deterministic fuzz loop. Coverage is in the list below.
+5. **Line endings.**
+   - `.gitattributes` (new) sets `-text` on `crates/lottery/templates/**` and `crates/lottery/tests/fixtures/f1_digests.txt`: no end-of-line conversion for them, `core.autocrlf` included, so a Windows clone holds the committed LF bytes.
+   - `git check-attr` reports `text: unset` for them, and `git ls-files --eol` shows `i/lf w/lf attr/-text` for all 13 files.
+   - Byte sensitivity: `include_str!`'s JSON is whitespace-insensitive, `embedded_file` and `regen-templates` normalize CRLF, and `f1_bytes` compares with `str::lines()`. So the tests already tolerated CRLF, which the experiment below shows. The attribute pins the embedded bytes anyway.
+6. **tn10** keeps its Safe JSON. `pskt::post_sign`, `Check` and `blanked` now call `lottery::web::sign`, with identical refusal texts; `pskt::assemble` is unchanged.
+7. **CLAUDE.md**: one command line for the F1 tests.
+8. **No covenant change.** No `covenants/*.sil`, no template, no golden digest touched.
+
+### The owner-input budget: design and proof
+
+- **The problem.** `finish()` budgets an owner input (D67) at one signature check (P2PK_UNITS = 100,000), signs it, runs it, and re-budgets it if the signed run needs a larger budget, which a P2SH owner might. Without the key there is no signed run.
+- **The design** (`buy::owner_signed_units`). An owner input's script is a P2PK Schnorr, a P2PK ECDSA, or a P2SH-wrapped Schnorr P2PK. It reads no other input or output, and its pushes have fixed sizes (a 65-byte signature push, a 32- or 33-byte key, a 34-byte redeem). So the signed run's script units are a constant of the class, independent of the key, the signature and the surrounding transaction.
+  - The library measures each class once, by signing a one-input throwaway transaction with a fixed stand-in key of that class and running it.
+  - `finish_unsigned` then applies `finish()`'s own rule: the measured units if their budget exceeds one signature check's, else P2PK_UNITS. That is exactly where `finish()`'s re-run loop ends, and the placeholder has the signed script's size.
+- **The proof** (`tests/f1_unsigned.rs`).
+  - `owner_budget_depends_on_the_class_only` uses 24 random keys of each class, all 72 valid. For each it checks that the signed run's units equal the class constant, that `finish()` and `finish_unsigned()` commit the same budget, and that the budget follows the rule. Measured:
+    - Schnorr: 100,001 units;
+    - ECDSA: 100,001 units;
+    - P2SH: 100,102 units.
+
+    All three commit budget 10, the budget of one signature check, which covers up to 109,999 units. So the signed path never re-budgets an owner input, and the unsigned budget equals it for every key.
+  - `every_web_case_builds_unsigned_and_equals_the_signed_path` covers buy b = 1 and b = 4 with referral and 2 funding inputs, claim PAY K = 4 and FINAL K = 1, return_deposit both paths, close K = 4 and K = 16, draw and void K = 4, request_deposit, request_withdraw for each owner class (partial, whole, and owner second among 2 plain inputs), and settle deposit and withdrawal. For each it checks:
+    - the inputs to sign are exactly the funding and owner inputs;
+    - every byte except their signature scripts is `finish()`'s (header, outputs, outpoints, sequences, compute budgets, storage-mass commit, covenant signature scripts);
+    - the placeholders have the signed sizes;
+    - the transaction ids, entries, units and masses are equal;
+    - signed externally (SIG_HASH_ALL, as a wallet signs), every input passes the engine under its committed budget.
+  - `owner_pub_cannot_be_signed_here`: an `OwnerPub` input builds unsigned (the same transaction as with the key held here), and `finish()` refuses it.
+- **What a wallet must do for a P2SH owner:** return the signature push followed by the 34-byte redeem push. KasWare signs P2PK only. A P2SH owner therefore needs the quick testnet wallet (part C or F3), or a wallet that returns the full signature script. `post_sign` checks the redeem byte for byte.
+
+### Error codes (`lottery::web::Code`; number, name: message)
+
+| # | name | message |
+|---|---|---|
+| 1 | bytes_length | The data has the wrong length. |
+| 2 | not_template | The data is not a lottery object of the expected kind. |
+| 3 | not_canonical | The data is not in its canonical encoding. |
+| 4 | state_range | A lottery object holds a value its covenant does not accept. |
+| 5 | chain_mismatch | The indexer's copy does not match the chain. |
+| 6 | tree_mismatch | The purchases do not match the chain's frozen record. |
+| 7 | purchase_invalid | A purchase is not a valid combination for this round. |
+| 8 | store_format | The file is not a valid lottery file. |
+| 9 | store_incomplete | The saved data lacks what this transaction needs. |
+| 10 | anchor_invalid | The anchor proof does not fit this round. |
+| 11 | input_range | A value is outside its allowed range. |
+| 12 | funding_short | The wallet's coins do not cover this transaction. |
+| 13 | wallet_script | A wallet coin or address is not a standard wallet script. |
+| 14 | coin_unconfirmed | A wallet coin is not confirmed yet. |
+| 15 | overflow | An amount is out of range. |
+| 16 | refused | The lottery rules refuse this transaction. |
+| 17 | policy | A safety rule of the builder refuses this transaction. |
+| 18 | encode | The transaction could not be encoded. |
+| 19 | mass | The transaction's mass cannot be computed. |
+| 20 | engine | The local script check rejects this transaction. |
+| 21 | templates | The built-in lottery templates are unavailable. |
+| 22 | fee_rate | The fee is outside the accepted range. |
+| 23 | signed_changed | The wallet changed the transaction. |
+| 24 | signed_missing | The wallet did not sign every input it was asked to. |
+| 25 | signature_form | A signature is not in the expected form. |
+| 26 | signature_invalid | A signature does not verify. |
+
+`tests/f1_web.rs::error_codes_are_stable` pins the numbers and names and checks the messages are distinct. New codes are appended; a number never changes meaning. The messages are a first draft for the copy pass (spec 8), so wording changes there are free.
+
+### W3 coverage (`tests/f1_w3.rs`, debug build, default iterations)
+
+The calls marked OK passed every check and built; the rest returned a typed error. None panicked or aborted. `F1_W3_ITERS=5` (5x) also passes.
+
+| Target | Inputs | Calls | OK |
+|---|---|---|---|
+| `decode_state` (11 roles), `decode_redeem`, `verify_state` | each fixture state's bytes and redeem truncated, extended, bit-flipped, byte-replaced, spliced, or random; random roles; random scripts | 10,500 | 800 |
+| `anchor_proof`, `check_anchor`, `sim_from_proof`, `winning_numbers(_from_anchor)` | the 272-byte proof mutated; random D, m, round, X.hash | 3,632 | 1,098 |
+| `rebuild_tree(_bytes)`, `check_roots`, `payout_of_spk` | random purchases (canonical and not), random m including out of range, random roots and k; 32,768 purchases of one combination (count overflow, `purchase_invalid`) | 817 | 17 |
+| `read_wallet` + `claim_from_store` | a fixture `wallet/1` that claims, its JSON mutated structurally (a node replaced by an edge number, hex, text, null, bool, empty array; array elements duplicated or removed; keys removed) or as text (truncated, flipped); claims built from every wallet that reads, with fuzzed funds | 487 | 127 (40 claims built) |
+| `read_index_log`, `read_index_snapshot` | a fixture log line and a snapshot with all 11 states, mutated the same way | 500 | 127 |
+| `read_bundle` | a fixture K = 4 launch bundle, mutated the same way | 150 | 27 |
+| `buy` | shard state fields (any field, any type, removed), reserve, DAA, tree, bundle (0-6 combinations, canonical or not), referral, payouts, b_max; funds (coin count 0-10, value, DAA, script, covenant ID, coinbase flag, change script, fee) | 300 | 63 |
+| `claim` | ticket and pool fields, values, idx, trees (0-17, random m), DAAs, lock time; funds | 250 | 33 |
+| `return_deposit` (both paths) | ticket and pool fields, values, path switched, pool outpoint dropped; funds | 300 | 88 |
+| `close` (K = 4) | controller, params and shard fields, pot, DAAs, shard count 0-17, funder, outpoint count, `now`; funds | 150 | 5 |
+| `draw` and void (K = 4) | drawer, marker, vault and controller fields, pot, DAAs, trees, a mutated proof, draw/void switched, absorbed pools added (mutated); outpoint count; funds | 240 | 21 |
+| `request_deposit`, `w_min` | vault fields, reserve, d, owner; funds | 400 | 253 |
+| `request_withdraw` (3 owner classes) | vault and position fields, w, reserve, the owner key, the owner coin (value, script, DAA, coinbase), extra funding; funds | 300 | 81 |
+| `settle` (both kinds) | request and record fields, values; funds | 240 | 76 |
+| `with_fee` | random rates 0-1,999 | 30 | 15 |
+| `post_sign`, `assemble`, `with_signatures`, `blanked`, `signers_for` | the returned transaction: inputs and outputs truncated, signature scripts mutated or replaced by well-formed random signatures, inputs duplicated, values, payload, lock time; partial or missing entries; random index lists | 2,400 | 635 |
+
+- **How W3 detects a panic.** Each call runs under `catch_unwind`, and an unwind fails the test with the input that caused it. A wasm page would have aborted on the same panic. The test hook silences only those caught panics, so a bug in the test itself still prints.
+- **What it found, fixed above:**
+  - the `ClaimCase::comb` overflow;
+  - the storage-mass division by zero;
+  - an allocation abort from the test's own random tree (a mutated `m` sized a count vector). The builders check `m` before they touch a tree. A memory-allocation failure is an abort that `catch_unwind` cannot catch, so see "Open questions" for API response sizes.
+
+### Commands run (outputs)
+
+- `cargo test -j 2 -p lottery --release --test f1_templates --test f1_bytes` with all 13 pinned files converted to CRLF (`sed 's/$/\r/'`), then restored, after which `git status` was clean: `w2_* ... ok` ×4, `f1_encoding_and_transactions_unchanged ... ok`.
+- `cargo test -j 2 -p lottery --release --lib --test f1_bytes --test f0_unsigned --test f1_templates`, after the refactor: lib `46 passed`, `f0_unsigned` `2 passed`, `f1_bytes` `1 passed; 1 ignored` (the 77 golden lines are equal), `f1_templates` `4 passed`.
+- `cargo test -j 2 -p lottery --release --test f1_unsigned -- --nocapture --test-threads=1`: `3 passed`. The 23 cases each print "equal to finish() but the signatures", and the owner table is above.
+- `cargo test -j 2 -p lottery --release --test f1_web -- --nocapture --test-threads=1`: `6 passed`.
+  - `web_builders_equal_native_and_assemble` covers buy, claim, both returns, close, draw, void, request_deposit, 12 request_withdraw variants and both settles. For each: "web = native", a stand-in wallet signs, `assemble` passes, and every input passes the engine.
+  - Draw with `sim_from_proof` equals the native build on the fabricated chain byte for byte.
+- `cargo test -j 2 -p lottery --test f1_w3 -- --nocapture --test-threads=1` (debug): `4 passed`, with the counts in the table above. With `F1_W3_ITERS=5`: `4 passed`.
+- `cargo test -j 2 -p tn10 --release pskt`: `3 passed` against the moved check.
+- `cargo check -p lottery --no-default-features --target wasm32-unknown-unknown` (with the CC and AR variables), `--no-default-features --features mainnet`, and `--no-default-features`: all `Finished` with no warnings.
+- Suite: see "Suite at the end of F1 part B".
+
+### Files changed (F1 part B)
+
+- New:
+  - `crates/lottery/src/web/mod.rs`, `web/verify.rs`, `web/build.rs`, `web/sign.rs`;
+  - `crates/lottery/tests/f1_unsigned.rs`, `f1_web.rs`, `f1_w3.rs`;
+  - `.gitattributes`.
+- `crates/lottery/src/buy.rs`:
+  - `Template::try_from_artifact`, `try_state_bytes`, `try_redeem`;
+  - `OwnerPub`, `InKind::OwnerPub`, `OwnerKey::public`, `OwnerKey::sign` public, `owner_signed_units`;
+  - `try_entry_sigscript`, `try_planned_sig_script`, `try_push_redeem`;
+  - `Built::external_signers`, `try_finish_inner` (shared by `finish` and `finish_unsigned`), `Final::try_fee`.
+- `crates/lottery/src/draw.rs`: `try_expected`; `fix_lock_time` without a panic; `from_store` uses `try_expected`.
+- `crates/lottery/src/claim.rs`: `comb()` with checked bounds.
+- `crates/lottery/src/index.rs`: `State::try_redeem`, `try_state_bytes`, `from_values`; the decoders re-encode with `try_redeem`; `typed` is `pub(crate)`.
+- `crates/lottery/src/smt.rs`: `Tree::try_increment`.
+- `crates/lottery/src/store.rs`: the `wallet/1` reader bounds (`ResultJson::result`, `shard_tree`, `trees`, `apply_claim`).
+- `crates/lottery/src/bundle.rs`: `Templates::try_get`; K bounded.
+- `crates/lottery/src/lib.rs`: `pub mod web`.
+- `crates/harness/src/lib.rs`: `try_budget_for`, `try_masses`; `budget_for` and `masses` wrap them.
+- `crates/tn10/src/pskt.rs`: `post_sign`, `Check` and `blanked` delegate to `lottery::web::sign`.
+- `CLAUDE.md`: the F1 test command.
+- No change to `covenants/`, `crates/lottery/templates/`, `tests/fixtures/f1_digests.txt` or `crates/web`.
+
+### Proposed DECISIONS rows (for the orchestrator)
+
+- (a) **The signing split covers every case.** `Built::finish_unsigned` lists the funding and owner inputs (D67) to sign; F0's owner refusal is removed. An owner input signed outside the library is `InKind::OwnerPub` (its public key only). `finish()` refuses it.
+- (b) **The owner-input budget without the key** is `owner_signed_units` of the class, measured by signing a throwaway transaction with a stand-in key of that class. It is proven equal to `finish()`'s signed re-run for 72 random keys. All three classes commit budget 10, one signature check: 100,001 / 100,001 / 100,102 units.
+- (c) **The post-sign check moves to `lottery::web::sign`**; tn10 delegates.
+  - It is generalized to owner inputs: the exact P2SH redeem push is required.
+  - `assemble` also requires the signed masses to equal the built ones and runs the engine on every listed input against our entries.
+  - F0's row (d) stands: storage-mass and entry differences are notes.
+- (d) **`lottery::web` is the page-facing layer**, with typed errors: 26 stable codes, each with a number, a name and one message, plus a detail string for logs. The detail is never page copy.
+- (e) **Web builders: guard, native build, bind.**
+  - The guard mirrors each covenant's own state ranges and the reference's preconditions; a refusal is a typed error.
+  - The build is the native builder on a placeholder key.
+  - The bind puts in the wallet's coins and change; a transaction with a placeholder script left is refused.
+  - Every covenant input is run in the engine before the transaction goes to a wallet.
+  - Proven byte-identical to the native builder for every entry point (`f1_web`).
+- (f) **The draw's dry run in the web build** uses a one-block `ChainSim` built from the proof's X (`sim_from_proof`; P's hash is a placeholder because the proof omits it); a void uses a trivial sim. The bytes equal the native build's.
+- (g) **The pinned storage-mass calculator's panics are refused up front:**
+  - `harness::try_masses` refuses a zero-value output and an input total above u64;
+  - `web::sign::unsigned` refuses a zero-value input.
+- (h) **Draw guard: G2 × (m − 1) must fit an i64.** This is conservative: it refuses only G2 above about 1.9 × 10^17 sompi (about 1.9 billion KAS). Otherwise `game::pool_set`'s checked product would panic where the drawer's checked multiplication rejects.
+- (i) **`.gitattributes`: `-text`** for the embedded templates and the golden digests.
+- (j) **`Template::try_from_artifact` requires exactly one contract.** All templates have one; `harness` already asserted it elsewhere.
+- (k) **The indexer (`index::Rebuild`, `RoundResult::from_tx`) stays native-only.** Its `index::model` catch_unwind guards are not wasm-safe. If it ever runs in a browser, they must become `Result` paths first.
+
+### What part C must do
+
+- **The wasm-bindgen API in `crates/web`.** Replace `f1_link_probe` with wrappers over `lottery::web`:
+  - decode: `decode_state`, `decode_redeem`, the store readers;
+  - build: the 8 builders and `claim_from_store`;
+  - verify: `verify_state`, `rebuild_tree`, `check_roots`, `winning_numbers_from_anchor`;
+  - estimate: `fee_of`, `with_fee`, `w_min`;
+  - sign: `unsigned`'s result out, `assemble` in.
+
+  Each returns `{ok}` or `{error: {code, number, message, detail}}`. Generate the `.d.ts` (the `Code` list becomes a TS union; no hand-written mirror). Add `wasm-bindgen` at the version Cargo.lock already has.
+- **Safe JSON in the browser.** The wallet's format is `kaspa-consensus-client`'s `SerializableTransaction` (tn10 `pskt.rs`). Check it builds for wasm32 with our feature set, or use rusty-kaspa's own wasm binding for the JSON step. `post_sign` and `assemble` take parsed `Transaction`s.
+- **W1:** run `lottery::digest::all_lines()` in wasm and compare it with `tests/fixtures/f1_digests.txt`. Also run the `f1_web` cases in wasm and compare their `Unsigned` bytes with native (the JS host needs `crypto` for getrandom).
+- **W4:** a `mainnet` build of `crates/web` refuses to start and has no quick-wallet symbol.
+- **Size:** measure and record it again with `lottery::web` reachable, which it is not yet: the link probe does not call it.
+- **The anchor proof's source:** the wRPC client in wasm, or the indexer API's unverified copy (spec 6.1). `build::draw` checks the proof off-chain (`check_anchor`), and the chain checks it in `draw()`.
+- **Notes for the page logic** (F3+):
+  - Before building, filter out unconfirmed coins (DAA `u64::MAX`); the builders refuse them (`coin_unconfirmed`).
+  - Set `with_ref` only when r >= M_REF (spec 7). The builder refuses a requested referral below M_REF (`refused`) instead of dropping it.
+  - `close()` needs `now` (the virtual DAA) for the D24 guard.
+  - A withdrawal's owner coin is a coin at the position owner's address, and `OwnerCoin.owner` is the wallet's public key; KasWare gives the x-only key.
+
+### Open questions
+
+- **None need the owner now.** No money, trust or covenant question came up. The stop-and-ask rule was not triggered: every native transaction is byte-identical (the 77 golden digest lines), and the web transactions equal the native ones.
+- **Allocation aborts.** A failed allocation aborts in wasm as in native, and `catch_unwind` cannot catch it.
+  - The decoders cap their byte inputs at 1 MiB (`verify::INPUT_MAX`), and the builders check every size-giving field (m, k, b, counts) before they allocate.
+  - The JSON readers allocate in proportion to their input, so the page (F3) should cap the size of what it fetches from the indexer API and of an imported backup file. A few MB is far above any real store: 10,000 combinations are about 60 KB compact.
+- **`draw_from_store` is not covered by W3** (it needs a built index). The page path is `build::draw` with a `DrawCase` from verified states, which W3 covers. `draw_from_store` serves a host that holds an index (tn10, the indexer API).
+- **Part B wrote the primitive refactor before the property test.** The test-first rule held for the builders' attack lists: the spec 8 post-sign list and the guard refusals were written as tests and passed against the layer. W3 then found 3 panics, fixed above, and is green.
+
+### Suite at the end of F1 part B
+
+- `cargo test -j 2 --no-fail-fast` (from `crates/`, debug; default members `harness` and `lottery`): 53 binaries ran, 1,101 passed, 0 failed, 2 ignored (`f1_bytes::write_golden` and the old `m4_mutants` one).
+  - This includes `f1_w3` 4/4, `f1_web` 6/6, `f1_unsigned` 3/3, `f1_bytes` 1/1, `f0_unsigned` 2/2, `f1_templates` 4/4 and `m7_seed` 15/15 (the SP12 seed gate: `mainnet,test-seed` fails, `mainnet` builds, and the short-void symbols disappear under `mainnet`).
+  - As before F1 (D113), `spike_vdf` overflowed its stack in debug (STATUS_STACK_OVERFLOW).
+- `cargo test -j 2 -p lottery --release --test spike_vdf`: `14 passed; 0 failed` (366 s).
+- `cargo test -j 1 --release -p tn10`: `25 passed; 0 failed` (the 3 `pskt` tests run against the moved check).
+- `cargo check -j 2 -p lottery --no-default-features --target wasm32-unknown-unknown`, with `--features mainnet`, and without the compiler: `Finished`, no warnings.
+- Not run: the `crates/web` wasm link (part A's link probe is unchanged and does not reach `lottery::web`; part C builds it with the API) and `simnet` (RocksDB, about 14 min; it uses `lottery`'s default features, whose API only gained additions).

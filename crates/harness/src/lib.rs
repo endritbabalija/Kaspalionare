@@ -157,7 +157,14 @@ fn execute_with(
 
 /// Smallest compute budget covering `script_units` beyond the free per-input allowance.
 pub fn budget_for(script_units: u64) -> u16 {
-    ComputeBudget::checked_covering_script_units(ScriptUnits(script_units)).expect("budget fits u16").value()
+    try_budget_for(script_units).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `budget_for` with an error instead of a panic (front-end F1 part B).
+pub fn try_budget_for(script_units: u64) -> Result<u16, String> {
+    ComputeBudget::checked_covering_script_units(ScriptUnits(script_units))
+        .map(|b| b.value())
+        .ok_or_else(|| format!("{script_units} script units need a compute budget above u16::MAX"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,12 +179,32 @@ pub struct Masses {
 
 /// Masses of `tx` under mainnet consensus parameters.
 pub fn masses(tx: &Transaction, entries: &[UtxoEntry]) -> Masses {
+    try_masses(tx, entries).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `masses` with an error instead of a panic (front-end F1 part B): a different number of
+/// entries and inputs, or a storage mass the calculator cannot compute (a zero-value output,
+/// an overflow).
+pub fn try_masses(tx: &Transaction, entries: &[UtxoEntry]) -> Result<Masses, String> {
+    if entries.len() != tx.inputs.len() {
+        return Err(format!("{} UTXO entries for {} inputs", entries.len(), tx.inputs.len()));
+    }
+    // The pinned calculator divides by every output value and sums the input values
+    // unchecked (rusty-kaspa v2.1.0 `consensus/core/src/mass/mod.rs:458-466, 502-503`): a
+    // zero-value output (consensus-invalid) or an input total above u64 would panic there.
+    // Neither case ever gave a mass, so refusing them changes no result.
+    if tx.outputs.iter().any(|o| o.value == 0) {
+        return Err("storage mass computable: no (a zero-value output)".into());
+    }
+    if entries.iter().try_fold(0u64, |a, e| a.checked_add(e.amount)).is_none() {
+        return Err("storage mass computable: no (the input values overflow u64)".into());
+    }
     let mc = MassCalculator::new_with_consensus_params(&MAINNET_PARAMS);
     let nc = mc.calc_non_contextual_masses(tx);
     let populated = PopulatedTransaction::new(tx, entries.to_vec());
-    let st = mc.calc_contextual_masses(&populated).expect("storage mass computable");
+    let st = mc.calc_contextual_masses(&populated).ok_or("storage mass computable: no (a zero-value output or an overflow)")?;
     let priority = Mass::new(nc, st).normalized_max(&MAINNET_PARAMS.block_mass_limits.cofactors());
-    Masses { compute: nc.compute_mass, transient: nc.transient_mass, storage: st.storage_mass, priority }
+    Ok(Masses { compute: nc.compute_mass, transient: nc.transient_mass, storage: st.storage_mass, priority })
 }
 
 /// Write the storage-mass commitment consensus checks (tx_validation_in_utxo_context.rs:126-133).

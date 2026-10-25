@@ -287,7 +287,9 @@ pub fn verify(b: &Bundle) -> Result<Verified, String> {
     // it: 1 ..= TICKET_B_MAX (the claim reference's and the ticket script's bound,
     // `game::claim_mode`); anything else would not compile or would compile without end.
     let b_max = crate::store::checked_b_max(b.toolchain.b_max).map_err(|e| format!("toolchain {e}"))?;
-    let t = Templates::get(b_max);
+    // F1 part B: `try_get`, so a B_MAX without embedded templates (no compiler in the web
+    // build) is an error, not a panic.
+    let t = Templates::try_get(b_max)?;
     if b.templates.len() != ROLES.len() {
         return Err(format!("{} templates, expected {}", b.templates.len(), ROLES.len()));
     }
@@ -319,6 +321,10 @@ pub fn verify(b: &Bundle) -> Result<Verified, String> {
         return Err(format!("{n} authorized outputs"));
     }
     let k = n - 5;
+    // F1 part B: K is bounded before it sizes the genesis case (no panic on a file's K).
+    if k > crate::state::K_MAX {
+        return Err(format!("{n} authorized outputs: K = {k} above K_MAX = {}", crate::state::K_MAX));
+    }
     let cov = Hash::from_bytes(b.covenant_id);
     for (i, a) in b.authorized_outputs.iter().enumerate() {
         let o = &tx.outputs[i];

@@ -29,3 +29,4 @@ pub mod smt;
 pub mod state;
 pub mod store;
 pub mod vault;
+pub mod web;

@@ -352,6 +352,14 @@ impl ResultJson {
         if self.funder_class > 2 {
             return Err(format!("round result: funder class {}", self.funder_class));
         }
+        // F1 part B (no panic on a file's values): k and the roots bound what
+        // `RoundResult::pool_state` packs into the K_MAX-root field, m what the pools carry.
+        if !(1..=crate::state::K_MAX as i64).contains(&self.k) || self.roots.len() as i64 != self.k {
+            return Err(format!("round result: k = {} with {} roots", self.k, self.roots.len()));
+        }
+        if !(2..=crate::game::M_HARD).contains(&self.m) || self.pools.iter().any(|p| p.tier > 6) {
+            return Err(format!("round result: m = {} or a pool tier above 6", self.m));
+        }
         let record = match &self.record {
             None => None,
             Some(x) => match State::decode(t, &x.redeem)? {
@@ -863,11 +871,11 @@ impl Wallet {
         }
         let mut tree = Tree::new(self.m as usize);
         for (n, u) in self.shards.get(i).ok_or_else(|| format!("wallet: no shard {i}"))?.iter().enumerate() {
-            let c = Combo::new(u.combo[..5].try_into().unwrap(), u.combo[5]);
+            let c = Combo::new([u.combo[0], u.combo[1], u.combo[2], u.combo[3], u.combo[4]], u.combo[5]);
             if !c.is_canonical(self.m as u8) {
                 return Err(format!("wallet shard {i} update {n}: combination not canonical"));
             }
-            tree.increment(c.rank(), c.bonus);
+            tree.try_increment(c.rank(), c.bonus).map_err(|e| format!("wallet shard {i} update {n}: {e}"))?;
             if tree.counts(c.rank())[c.bonus as usize - 1] != u.count_after || tree.root() != u.root_after {
                 return Err(format!("wallet shard {i} update {n}: count or root differs from the replay"));
             }
@@ -954,8 +962,10 @@ impl Wallet {
     /// (FINAL).
     pub fn apply_claim(&mut self, t: &Templates, tx: &Transaction, daa: u64) -> Result<(), String> {
         let c = parse_claim(tx, t)?;
-        let top: OutpointJson = tx.inputs[0].previous_outpoint.into();
-        let pop: OutpointJson = tx.inputs[1].previous_outpoint.into();
+        // F1 part B: the claimed index is the transaction's argument; bounded before the shift.
+        let bit = u32::try_from(c.idx).ok().and_then(|i| 1u8.checked_shl(i)).ok_or_else(|| format!("claim: index {} outside 0..8", c.idx))?;
+        let top: OutpointJson = tx.inputs.first().ok_or("claim: no input 0")?.previous_outpoint.into();
+        let pop: OutpointJson = tx.inputs.get(1).ok_or("claim: no input 1")?.previous_outpoint.into();
         let ti = self.tickets.iter().position(|x| x.outpoint == top).ok_or("wallet: the claimed ticket is not the wallet's")?;
         let pi = self.pools.iter().position(|x| x.outpoint == pop).ok_or("wallet: the claimed pool is not known")?;
         let p0 = tx.outputs.first().ok_or("claim: no output 0")?;
@@ -965,7 +975,7 @@ impl Wallet {
         match tx.outputs.get(1).filter(|o| o.covenant.is_some()) {
             Some(o) => {
                 let tk = &mut self.tickets[ti];
-                tk.claimed[0] |= 1u8 << c.idx;
+                *tk.claimed.first_mut().ok_or("wallet: a ticket without a claimed byte")? |= bit;
                 tk.outpoint = TransactionOutpoint::new(tx.id(), 1).into();
                 tk.value = o.value;
                 tk.daa = daa;
@@ -1156,7 +1166,7 @@ impl ClaimStore for Wallet {
         (0..self.shards.len())
             .map(|i| {
                 let tree = self.shard_tree(i)?;
-                if tree.root() != self.frozen_roots[i] {
+                if Some(&tree.root()) != self.frozen_roots.get(i) {
                     return Err(format!("round {round} is incomplete in the wallet: shard {i}'s root differs from the frozen root"));
                 }
                 Ok(tree)

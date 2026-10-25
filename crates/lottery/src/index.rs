@@ -141,6 +141,23 @@ impl State {
         template_of(t, self.role()).redeem(&self.values())
     }
 
+    /// `redeem` with the encoder's error instead of a panic (front-end F1 part B).
+    pub fn try_redeem(&self, t: &Templates) -> Result<Vec<u8>, String> {
+        template_of(t, self.role()).try_redeem(&self.values())
+    }
+
+    /// The state of `role` with these field values (the inverse of `values`; the `role`
+    /// byte is not read). Front-end F1 part B: the W3 property test mutates one field of any
+    /// state through it.
+    pub fn from_values(role: Role, v: &BTreeMap<String, ArtifactValue>) -> Result<State, String> {
+        typed(role, v)
+    }
+
+    /// `state_bytes` with the encoder's error instead of a panic (front-end F1 part B).
+    pub fn try_state_bytes(&self, t: &Templates) -> Result<Vec<u8>, String> {
+        template_of(t, self.role()).try_state_bytes(&self.values())
+    }
+
     /// The encoded state alone, without the template's prefix and suffix (M8 `bundle/1`).
     pub fn state_bytes(&self, t: &Templates) -> Vec<u8> {
         template_of(t, self.role()).state_bytes(&self.values())
@@ -158,7 +175,8 @@ impl State {
         let redeem = [tpl.prefix.as_slice(), bytes, &tpl.suffix].concat();
         let v = state_values(tpl, &redeem)?;
         let s = typed(role, &v)?;
-        if s.redeem(t) != redeem {
+        // F1 part B: a value the decoder accepts but the encoder refuses is an error.
+        if s.try_redeem(t)? != redeem {
             return Err(format!("{role:?} state bytes do not re-encode to themselves"));
         }
         Ok((s, redeem))
@@ -177,7 +195,7 @@ impl State {
             let tpl = template_of(t, role);
             let Ok(v) = state_values(tpl, redeem) else { continue };
             let s = typed(role, &v)?;
-            if s.redeem(t) != redeem {
+            if s.try_redeem(t)? != redeem {
                 return Err(format!("{role:?} state does not re-encode to its redeem script"));
             }
             return Ok(s);
@@ -210,7 +228,7 @@ fn st(v: &BTreeMap<String, ArtifactValue>) -> Result<[i64; 5], String> {
 }
 
 /// The typed state of decoded fields (the inverse of each state's `values()`).
-fn typed(role: Role, v: &BTreeMap<String, ArtifactValue>) -> Result<State, String> {
+pub(crate) fn typed(role: Role, v: &BTreeMap<String, ArtifactValue>) -> Result<State, String> {
     Ok(match role {
         Role::Controller => State::Controller(ControllerState {
             round: int(v, "round")?,

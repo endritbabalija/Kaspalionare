@@ -1,0 +1,7 @@
+# Front-end F1 part B: byte-pinned build inputs. These files are compiled into the binary
+# (`include_str!`/`include!` in crates/lottery/src/embedded.rs) or compared line by line
+# (crates/lottery/tests/f1_bytes.rs), and are committed with LF endings. `-text` turns off
+# every end-of-line conversion for them (core.autocrlf included), so a Windows checkout
+# holds the committed bytes exactly.
+crates/lottery/templates/** -text
+crates/lottery/tests/fixtures/f1_digests.txt -text

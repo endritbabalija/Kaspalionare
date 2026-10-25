@@ -368,11 +368,13 @@ impl ClaimCase {
 
     /// The combination at index `idx` (zero bytes if idx is outside the bundle).
     pub fn comb(&self) -> [u8; 6] {
+        // F1 part B: the slice bounds in checked arithmetic (an idx near i64::MAX overflowed
+        // 6 x idx; W3). The same bytes for every idx that fits.
         let b = &self.ticket.bundle;
-        if self.idx >= 0 && (6 * self.idx as usize + 6) <= b.len() {
-            b[6 * self.idx as usize..6 * self.idx as usize + 6].try_into().unwrap()
-        } else {
-            [0; 6]
+        let at = usize::try_from(self.idx).ok().and_then(|i| i.checked_mul(6)).filter(|&s| s.checked_add(6).is_some_and(|e| e <= b.len()));
+        match at {
+            Some(s) => [b[s], b[s + 1], b[s + 2], b[s + 3], b[s + 4], b[s + 5]],
+            None => [0; 6],
         }
     }
 

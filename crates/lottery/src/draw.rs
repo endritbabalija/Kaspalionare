@@ -568,7 +568,9 @@ impl DrawCase {
     /// deadlines) for a void (D51, spec M7 check 7).
     pub fn fix_lock_time(&mut self) {
         let d = self.d();
-        let mut l = if self.void { void_lock(d, self.drawer.draw_window).expect("D + draw_window < DAA_MAX") } else { d };
+        // F1 part B: out of range (D + draw_window >= DAA_MAX), i64::MAX, which `try_expected`
+        // refuses at check 19 (D_claim) before anything is built; no panic in `from_store`.
+        let mut l = if self.void { void_lock(d, self.drawer.draw_window).unwrap_or(i64::MAX) } else { d };
         for p in &self.absorbed {
             l = l.max(p.state.deadline);
         }
@@ -612,6 +614,14 @@ impl DrawCase {
     /// conversion and J(r+1) as in a draw. The caller output is the remainder, so the M3 A4
     /// identity holds with H moved from V' to O'.
     pub fn expected(&self) -> DrawExpected {
+        self.try_expected().unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `expected` with an error where the reference rejects (front-end F1 part B; the same
+    /// values when it succeeds): V' < 0 (check 14), an O' guard (check 15), the T_F guard
+    /// (check 16), D_claim >= DAA_MAX (check 19), an output value outside i64, or funding that
+    /// does not cover the draw.
+    pub fn try_expected(&self) -> Result<DrawExpected, String> {
         let mk = &self.marker;
         let ctrl = &self.controller;
         let void = self.void;
@@ -629,10 +639,10 @@ impl DrawCase {
             counts = vec![];
             (h_j, n2) = self.lie.void_pools.or(self.lie.counts).unwrap_or((0, 0));
             pools = if self.lie.void_pools.is_some() { pool_set(h_j, n2, mk.jackpot, mk.g2, &amounts.b, mk.m) } else { void_pool_set(&amounts.b, mk.m) };
-            v_prime = vault_settle(self.vault.total_assets, 0, j_house, pools.jp, mk.g2, n2, pools.sp).expect("V' >= 0 (check 14)") + self.lie.v_delta;
+            v_prime = vault_settle(self.vault.total_assets, 0, j_house, pools.jp, mk.g2, n2, pools.sp).ok_or("V' >= 0 (check 14)")? + self.lie.v_delta;
             o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, pools.jp, &amounts.b, &pools.lp, &q)
                 .and_then(|o| guarded_add(o, amounts.h))
-                .expect("O' guards (check 15)")
+                .ok_or("O' guards (check 15)")?
                 + self.lie.o_delta;
         } else {
             rank = self.lie.rank.unwrap_or(seed.rank);
@@ -642,12 +652,12 @@ impl DrawCase {
             counts = self.trees.iter().map(|t| t.counts(rank)).collect::<Vec<Vec<u16>>>();
             (h_j, n2) = self.lie.counts.unwrap_or_else(|| win_counts(&counts, bonus, mk.m));
             pools = pool_set(h_j, n2, mk.jackpot, mk.g2, &amounts.b, mk.m);
-            v_prime = vault_settle(self.vault.total_assets, amounts.h, j_house, pools.jp, mk.g2, n2, pools.sp).expect("V' >= 0 (check 14)")
+            v_prime = vault_settle(self.vault.total_assets, amounts.h, j_house, pools.jp, mk.g2, n2, pools.sp).ok_or("V' >= 0 (check 14)")?
                 + self.lie.v_delta;
-            o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, pools.jp, &amounts.b, &pools.lp, &q).expect("O' guards (check 15)")
+            o_prime = boost_after(self.pot as i64, amounts.b_r, mk.j_boost, pools.jp, &amounts.b, &pools.lp, &q).ok_or("O' guards (check 15)")?
                 + self.lie.o_delta;
         }
-        let mut fee = fee_split(ctrl.acc, amounts.f, self.drawer.f_min).expect("T_F guard (check 16)");
+        let mut fee = fee_split(ctrl.acc, amounts.f, self.drawer.f_min).ok_or("T_F guard (check 16)")?;
         if let Some(p) = self.lie.paid {
             fee.paid = p;
             fee.a_next = if p { 0 } else { fee.t_f };
@@ -665,7 +675,7 @@ impl DrawCase {
         };
         let mk_daa = self.lie.mk_daa.unwrap_or(self.marker_daa as i64);
         let d = anchor_daa(mk_daa, ctrl.seed_offset);
-        let d_claim = claim_deadline(d, self.drawer.draw_window, self.drawer.claim_window).expect("D_claim < DAA_MAX (check 19)");
+        let d_claim = claim_deadline(d, self.drawer.draw_window, self.drawer.claim_window).ok_or("D_claim < DAA_MAX (check 19)")?;
 
         let drawer = DrawerState { round: self.drawer.round + 1, ..self.drawer.clone() };
         // Spec M5 A5 C1-C3 (D65, D69, D71): convert the pending totals at V'.
@@ -731,7 +741,9 @@ impl DrawCase {
 
         let r = self.reserve();
         // vault' = total_assets' + R (pend_dep' = 0, spec M5 A5 check 20).
-        let mut values = vec![r, (total_assets as i128 + r as i128) as u64, (o_prime + fee.a_next) as u64 + r];
+        // F1 part B: O' + A' formed in checked arithmetic (the same value when it fits).
+        let ctrl_out = o_prime.checked_add(fee.a_next).ok_or("O' + A' overflows")?;
+        let mut values = vec![r, (total_assets as i128 + r as i128) as u64, ctrl_out as u64 + r];
         values.extend(pools.pools.iter().map(|p| p.value as u64 + r));
         if rec {
             // The record: out_c + (D - D_c) + R (C3).
@@ -749,10 +761,12 @@ impl DrawCase {
             + (0..self.a()).map(|i| self.pool_value(i) as i128).sum::<i128>()
             + self.funding_total() as i128;
         let caller = total_in - values.iter().map(|&v| v as i128).sum::<i128>() - self.fee as i128;
-        assert!(caller > 0, "funding does not cover the draw: caller output {caller}");
+        if caller <= 0 {
+            return Err(format!("funding does not cover the draw: caller output {caller}"));
+        }
         values.push(caller as u64);
 
-        DrawExpected {
+        Ok(DrawExpected {
             seed,
             rank,
             bonus,
@@ -785,7 +799,7 @@ impl DrawCase {
             record,
             values,
             a: self.a(),
-        }
+        })
     }
 
     /// The conversion of this draw's vault at V' with L' (spec M5 A5 C1-C2, `game::convert`),
@@ -1079,7 +1093,9 @@ impl DrawCase {
         c.funder = funder;
         c.funding_sk = payer.funding_sk;
         c.fee = payer.fee;
-        crate::index::model("draw", || c.expected())?;
+        // F1 part B: `try_expected` returns the reference's refusal as an error (no panic to
+        // catch: `model`'s catch_unwind does nothing under wasm's panic = "abort").
+        crate::index::model("draw", || c.try_expected())??;
         let mut ops = vec![dl.outpoint, ml.outpoint, vl.outpoint, cl.outpoint];
         ops.extend_from_slice(absorb);
         ops.extend(funding.iter().map(|f| f.outpoint));

@@ -40,13 +40,9 @@ use kaspa_txscript::extract_script_pub_key_address;
 type R<T> = Result<T, String>;
 
 /// `tx` with the signature scripts of `blank` emptied: the transaction as sent to the wallet.
+/// (F1 part B: moved to `lottery::web::sign::blanked`.)
 pub fn blanked(tx: &Transaction, blank: &[usize]) -> R<Transaction> {
-    let mut t = tx.clone();
-    for &i in blank {
-        t.inputs.get_mut(i).ok_or(format!("blank input {i} out of range"))?.signature_script = vec![];
-    }
-    t.finalize();
-    Ok(t)
+    lottery::web::sign::blanked(tx, blank).map_err(|e| e.to_string())
 }
 
 /// The Safe JSON of `tx` with `entries`, the signature scripts of `blank` emptied.
@@ -79,134 +75,20 @@ pub fn reserialize(tx: &Transaction, entries: &[UtxoEntry]) -> R<String> {
     to_safe_json(tx, entries, &[])
 }
 
-/// The outcome of the post-sign check.
-#[derive(Debug, Default, Clone, serde::Serialize)]
-pub struct Check {
-    /// Every difference that refuses the transaction (empty = pass).
-    pub refusals: Vec<String>,
-    /// Inputs whose signature script was empty when sent and is not now.
-    pub gained: Vec<usize>,
-    /// Inputs whose signature script was non-empty when sent and is empty now.
-    pub lost: Vec<usize>,
-    /// Differences in fields never taken from the wallet (storage-mass commit, UTXO entries).
-    pub notes: Vec<String>,
-}
-
-impl Check {
-    pub fn pass(&self) -> bool {
-        self.refusals.is_empty()
-    }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
+/// The outcome of the post-sign check (F1 part B: moved to `lottery::web::sign`, so the
+/// web crate runs the same check; each refusal now also has a typed code).
+pub use lottery::web::sign::Check;
 
 /// Compare the returned transaction `got` (with its stated entries) against `ours`, the
 /// transaction exactly as sent to the wallet (`blanked`: covenant sigscripts final, the
 /// inputs to sign empty), with `entries`; `sign` lists the inputs the wallet was asked to
-/// sign. Every input not listed must come back with the signature script it was sent with.
+/// sign, each a P2PK input of the key its entry's script names. The check itself is
+/// `lottery::web::sign::post_sign` (spec 6.2).
 pub fn post_sign(ours: &Transaction, entries: &[UtxoEntry], sign: &[usize], got: &Transaction, got_entries: &[Option<UtxoEntry>]) -> Check {
-    let mut c = Check::default();
-    let mut notes = vec![];
-    let mut r = |s: String| c.refusals.push(s);
-    if got.version != ours.version {
-        r(format!("version: built {}, returned {}", ours.version, got.version));
+    match lottery::web::sign::signers_for(entries, sign) {
+        Ok(s) => lottery::web::sign::post_sign(ours, entries, &s, got, got_entries),
+        Err(e) => Check { refusals: vec![e.to_string()], codes: vec![e.code], ..Default::default() },
     }
-    if got.lock_time != ours.lock_time {
-        r(format!("lock time: built {}, returned {}", ours.lock_time, got.lock_time));
-    }
-    if got.subnetwork_id != ours.subnetwork_id {
-        r(format!("subnetwork: built {}, returned {}", ours.subnetwork_id, got.subnetwork_id));
-    }
-    if got.gas != ours.gas {
-        r(format!("gas: built {}, returned {}", ours.gas, got.gas));
-    }
-    if got.payload != ours.payload {
-        r(format!("payload: built {} B `{}`, returned {} B `{}`", ours.payload.len(), hex(&ours.payload), got.payload.len(), hex(&got.payload)));
-    }
-    if got.storage_mass() != ours.storage_mass() {
-        notes.push(format!("storage-mass commit: built {}, returned {} (ours is sent)", ours.storage_mass(), got.storage_mass()));
-    }
-    if got.outputs.len() != ours.outputs.len() {
-        r(format!("output count: built {}, returned {}", ours.outputs.len(), got.outputs.len()));
-    }
-    for (i, (a, b)) in ours.outputs.iter().zip(&got.outputs).enumerate() {
-        if a.value != b.value {
-            r(format!("output {i} value: built {}, returned {}", a.value, b.value));
-        }
-        if a.script_public_key != b.script_public_key {
-            r(format!(
-                "output {i} script: built v{} `{}`, returned v{} `{}`",
-                a.script_public_key.version(),
-                hex(a.script_public_key.script()),
-                b.script_public_key.version(),
-                hex(b.script_public_key.script())
-            ));
-        }
-        if a.covenant != b.covenant {
-            r(format!("output {i} covenant binding: built {:?}, returned {:?}", a.covenant, b.covenant));
-        }
-    }
-    for (i, b) in got.outputs.iter().enumerate().skip(ours.outputs.len()) {
-        r(format!("output {i} extra: value {}, script `{}`", b.value, hex(b.script_public_key.script())));
-    }
-    if got.inputs.len() != ours.inputs.len() {
-        r(format!("input count: built {}, returned {}", ours.inputs.len(), got.inputs.len()));
-    }
-    for (i, (a, b)) in ours.inputs.iter().zip(&got.inputs).enumerate() {
-        if a.previous_outpoint != b.previous_outpoint {
-            r(format!("input {i} outpoint: built {}, returned {}", a.previous_outpoint, b.previous_outpoint));
-        }
-        if a.sequence != b.sequence {
-            r(format!("input {i} sequence: built {}, returned {}", a.sequence, b.sequence));
-        }
-        if a.compute_commit != b.compute_commit {
-            r(format!("input {i} compute commit (sig-op count / budget): built {:?}, returned {:?}", a.compute_commit, b.compute_commit));
-        }
-        let listed = sign.contains(&i);
-        let sent_empty = a.signature_script.is_empty();
-        let now_empty = b.signature_script.is_empty();
-        if sent_empty && !now_empty {
-            c.gained.push(i);
-        }
-        if !sent_empty && now_empty {
-            c.lost.push(i);
-        }
-        if listed {
-            if now_empty {
-                r(format!("input {i}: listed for signing but returned unsigned"));
-            } else if b.signature_script.len() != 66 || b.signature_script[0] != 65 || b.signature_script[65] != 1 {
-                r(format!("input {i}: signature script is not OP_DATA_65 <64-byte Schnorr sig || SIG_HASH_ALL>: {} B `{}`", b.signature_script.len(), hex(&b.signature_script)));
-            }
-        } else if a.signature_script != b.signature_script {
-            r(format!(
-                "input {i} (not listed{}): signature script changed: built {} B (blake2b {}), returned {} B (blake2b {})",
-                if entries.get(i).and_then(|e| e.covenant_id).is_some() { ", covenant" } else { "" },
-                a.signature_script.len(),
-                short_hash(&a.signature_script),
-                b.signature_script.len(),
-                short_hash(&b.signature_script)
-            ));
-        }
-        match got_entries.get(i) {
-            Some(Some(e)) => {
-                if Some(e) != entries.get(i) {
-                    notes.push(format!("input {i} UTXO entry: built {:?}, returned {e:?} (ours is used)", entries.get(i)));
-                }
-            }
-            _ => notes.push(format!("input {i}: UTXO entry missing in the returned transaction (ours is used)")),
-        }
-    }
-    for (i, _) in got.inputs.iter().enumerate().skip(ours.inputs.len()) {
-        r(format!("input {i} extra"));
-    }
-    c.notes = notes;
-    c
-}
-
-fn short_hash(b: &[u8]) -> String {
-    hex(&blake2b_simd::Params::new().hash_length(8).hash(b).as_bytes()[..8])
 }
 
 /// The transaction to send after a passing check: `ours` (as sent), with the listed inputs'
@@ -225,6 +107,10 @@ mod tests {
     use super::*;
     use kaspa_consensus_core::{hashing::sighash_type::SIG_HASH_ALL, sign::sign_input, tx::PopulatedTransaction};
     use lottery::buy::{BuyCase, FUNDING_SK, b_max};
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
 
     /// A stand-in wallet: parse the JSON as kaspa-wasm would, sign `idx` (or, with `None`,
     /// every input whose script is our P2PK) with `sk`, return Safe JSON.

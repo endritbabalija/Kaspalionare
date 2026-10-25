@@ -56,26 +56,48 @@ impl Template {
     /// Public since M7 Stage 1b: SA10 (`tests/m7_attacks.rs`) compiles the pre-M7 marker
     /// (with `seed_ref`) from a test fixture to build a marker output under the old template.
     pub fn from(art: SilAbiArtifact) -> Self {
-        let c = &art.contracts.values().next().unwrap().compiled;
-        let (p, _, s) = c.script_parts(&c.bytecode).expect("state span");
+        Self::try_from_artifact(art).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `from` with an error instead of a panic (front-end F1 part B: the embedded templates
+    /// are loaded through this in every build, so a wasm page never aborts on them).
+    pub fn try_from_artifact(art: SilAbiArtifact) -> Result<Self, String> {
+        if art.contracts.len() != 1 {
+            return Err(format!("template artifact with {} contracts, expected 1", art.contracts.len()));
+        }
+        let c = &art.contracts.values().next().ok_or("template artifact without a contract")?.compiled;
+        let (p, _, s) = c.script_parts(&c.bytecode).ok_or("template has no state span")?;
         let (prefix, suffix, hash) = (p.to_vec(), s.to_vec(), c.template_hash);
-        assert_eq!(silverscript_abi::template_hash(&prefix, &suffix), hash);
-        Self { art, prefix, suffix, hash }
+        if silverscript_abi::template_hash(&prefix, &suffix) != hash {
+            return Err("template hash differs from the hash of its prefix and suffix".into());
+        }
+        Ok(Self { art, prefix, suffix, hash })
     }
 
     pub fn name(&self) -> &str {
-        self.art.contracts.keys().next().unwrap()
+        // `try_from_artifact` checked there is exactly one contract.
+        self.art.contracts.keys().next().map(String::as_str).unwrap_or("")
     }
 
     /// The encoded state alone (the bytes between prefix and suffix; M8 `bundle/1`).
     pub fn state_bytes(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Vec<u8> {
-        let c = self.art.contracts.values().next().unwrap();
-        encode_runtime_state_script(&self.art, &c.runtime_state, values).unwrap_or_else(|e| panic!("encode state: {e}"))
+        self.try_state_bytes(values).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `state_bytes`, with the encoder's error instead of a panic (F1 part B).
+    pub fn try_state_bytes(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Result<Vec<u8>, String> {
+        let c = self.art.contracts.values().next().ok_or("template artifact without a contract")?;
+        encode_runtime_state_script(&self.art, &c.runtime_state, values).map_err(|e| format!("encode state: {e}"))
     }
 
     /// Redeem script for a state: prefix || encoded state || suffix.
     pub fn redeem(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Vec<u8> {
         [self.prefix.as_slice(), &self.state_bytes(values), &self.suffix].concat()
+    }
+
+    /// `redeem`, with the encoder's error instead of a panic (F1 part B).
+    pub fn try_redeem(&self, values: &std::collections::BTreeMap<String, ArtifactValue>) -> Result<Vec<u8>, String> {
+        Ok([self.prefix.as_slice(), &self.try_state_bytes(values)?, &self.suffix].concat())
     }
 }
 
@@ -332,7 +354,7 @@ impl Templates {
         let e = crate::embedded::artifacts()?;
         let tpl = |name: &str| -> Result<Arc<Template>, String> {
             let art = e.get(name).ok_or_else(|| format!("embedded template `{name}` missing"))?.clone();
-            Ok(Arc::new(Template::from(art)))
+            Ok(Arc::new(Template::try_from_artifact(art).map_err(|e| format!("embedded template `{name}`: {e}"))?))
         };
         Ok(Self {
             b_max: crate::embedded::B_MAX,
@@ -823,6 +845,104 @@ pub enum InKind {
     /// scriptPubKey is the owner's D11 script (`request_withdraw` check 5). It may also fund
     /// the transaction. Signed in `Built::finish` with the owner's key.
     Owner(OwnerKey),
+    /// Front-end F1 part B: the same owner input when the owner signs outside this library
+    /// (a browser wallet). Only its public script is known; `Built::finish_unsigned` budgets
+    /// it as `finish()` budgets the `Owner` input of the same key (`owner_signed_units`) and
+    /// lists it for signing. `finish()` cannot sign it and refuses it.
+    OwnerPub(OwnerPub),
+}
+
+/// The public side of an owner key (front-end F1 part B, spec M5 D67): the owner's D11
+/// script without the secret. `P2sh` holds the x-only key of the wrapped Schnorr P2PK redeem
+/// script (the only P2SH owner class D67 defines).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnerPub {
+    Schnorr([u8; 32]),
+    Ecdsa([u8; 33]),
+    P2sh([u8; 32]),
+}
+
+impl OwnerPub {
+    /// The P2SH redeem script (Schnorr P2PK of the key); `None` for the P2PK classes.
+    pub fn redeem(&self) -> Option<Vec<u8>> {
+        match self {
+            OwnerPub::P2sh(x) => Some(Payout::Schnorr(*x).script()),
+            _ => None,
+        }
+    }
+
+    /// The owner's D11 payout (a position's owner_class and owner_key).
+    pub fn payout(&self) -> Payout {
+        match self {
+            OwnerPub::Schnorr(x) => Payout::Schnorr(*x),
+            OwnerPub::Ecdsa(k) => Payout::Ecdsa(*k),
+            OwnerPub::P2sh(x) => {
+                let spk = pay_to_script_hash_script(&Payout::Schnorr(*x).script());
+                // OP_BLAKE2B OP_DATA_32 <hash> OP_EQUAL: the hash is bytes 2..34 of the 35.
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&spk.script()[2..34]);
+                Payout::P2sh(h)
+            }
+        }
+    }
+
+    pub fn spk(&self) -> ScriptPublicKey {
+        self.payout().spk()
+    }
+
+    /// A placeholder sigscript of the final size (as `OwnerKey::placeholder`).
+    pub fn placeholder(&self) -> Vec<u8> {
+        match self {
+            OwnerPub::Schnorr(_) | OwnerPub::Ecdsa(_) => vec![0; P2PK_SIG_LEN],
+            OwnerPub::P2sh(x) => {
+                let mut v = vec![0; P2PK_SIG_LEN];
+                // The redeem is 34 bytes: OP_DATA_34 <redeem>, never a failing push.
+                v.push(34);
+                v.extend_from_slice(&Payout::Schnorr(*x).script());
+                v
+            }
+        }
+    }
+
+    /// The class index (0 Schnorr, 1 ECDSA, 2 P2SH), as the D11 payout class.
+    pub fn class(&self) -> u8 {
+        self.payout().class()
+    }
+}
+
+impl OwnerKey {
+    /// The public side of this key (what a browser wallet's owner input is).
+    pub fn public(&self) -> OwnerPub {
+        match (self, self.payout()) {
+            (OwnerKey::Schnorr(_), Payout::Schnorr(x)) => OwnerPub::Schnorr(x),
+            (OwnerKey::Ecdsa(_), Payout::Ecdsa(k)) => OwnerPub::Ecdsa(k),
+            _ => OwnerPub::P2sh(self.keypair().x_only_public_key().0.serialize()),
+        }
+    }
+}
+
+/// The script units of a signed owner input of `o`'s class, measured once per class by
+/// signing a one-input transaction with a stand-in key of that class and running it
+/// (front-end F1 part B). An owner input's script (P2PK Schnorr, P2PK ECDSA, or a P2SH-wrapped
+/// Schnorr P2PK) reads no other input or output and its data pushes have fixed sizes (a
+/// 65-byte signature push, a 32- or 33-byte key, a 34-byte redeem), so its units depend on
+/// the class alone, not on the key, the signature or the transaction around it.
+/// `tests/f1_unsigned.rs` checks that `finish()` (which signs with the real key and re-runs)
+/// commits the same budget for many keys of every class.
+pub fn owner_signed_units(o: &OwnerPub) -> Result<u64, String> {
+    static UNITS: OnceLock<[Result<u64, String>; 3]> = OnceLock::new();
+    let all = UNITS.get_or_init(|| {
+        // Any valid secret key; it signs a throwaway transaction and nothing else.
+        const STAND_IN: [u8; 32] = [0x5a; 32];
+        [OwnerKey::Schnorr(STAND_IN), OwnerKey::Ecdsa(STAND_IN), OwnerKey::P2sh(STAND_IN)].map(|k| {
+            let entry = UtxoEntry::new(KAS, k.spk(), 0, false, None);
+            let input = TransactionInput::new_with_compute_budget(outpoint(0), vec![], 0, u16::MAX);
+            let mut tx = Transaction::new(1, vec![input], vec![TransactionOutput::new(KAS / 2, k.spk())], 0, Default::default(), 0, vec![]);
+            tx.inputs[0].signature_script = k.sign(&PopulatedTransaction::new(&tx, vec![entry.clone()]), 0);
+            execute(&tx, &[entry], 0, false).map_err(|e| format!("owner units of class {}: {e}", k.payout().class()))
+        })
+    });
+    all[o.class().min(2) as usize].clone()
 }
 
 /// The key behind a D11 owner script (spec M5 D67): P2PK Schnorr, P2PK ECDSA, or P2SH whose
@@ -877,8 +997,9 @@ impl OwnerKey {
     /// ECDSA: OP_DATA_65 <compact sig || type> over the ECDSA sighash (rusty-kaspa v2.1.0
     /// consensus/core/src/hashing/sighash.rs:282-293, crypto/txscript/src/opcodes/mod.rs:804
     /// OpCheckSigECDSA, crypto/txscript/src/lib.rs:885-892 `Signature::from_compact`); P2SH:
-    /// the Schnorr signature push, then the redeem script push.
-    fn sign(&self, tx: &PopulatedTransaction, i: usize) -> Vec<u8> {
+    /// the Schnorr signature push, then the redeem script push. Public since F1 part B: the
+    /// tests sign an unsigned withdrawal's owner input with it, as a wallet would.
+    pub fn sign(&self, tx: &PopulatedTransaction, i: usize) -> Vec<u8> {
         let sk = self.keypair().secret_bytes();
         match self {
             OwnerKey::Schnorr(_) => sign_input(tx, i, &sk, SIG_HASH_ALL),
@@ -933,13 +1054,18 @@ pub struct Built {
     pub sim: Option<Arc<ChainSim>>,
 }
 
-pub fn push_redeem(mut sig: Vec<u8>, redeem: &[u8]) -> Vec<u8> {
-    sig.extend_from_slice(&ScriptBuilder::new().add_data(redeem).expect("push redeem").drain());
-    sig
+pub fn push_redeem(sig: Vec<u8>, redeem: &[u8]) -> Vec<u8> {
+    try_push_redeem(sig, redeem).unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn buy_sigscript(t: &Templates, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8> {
-    entry_sigscript(&t.shard, "buy", args, redeem)
+/// `push_redeem` with an error instead of a panic (F1 part B).
+pub fn try_push_redeem(mut sig: Vec<u8>, redeem: &[u8]) -> Result<Vec<u8>, String> {
+    sig.extend_from_slice(&ScriptBuilder::new().add_data(redeem).map_err(|e| format!("push redeem: {e}"))?.drain());
+    Ok(sig)
+}
+
+fn try_buy_sigscript(t: &Templates, args: &[ArtifactValue], redeem: &[u8]) -> Result<Vec<u8>, String> {
+    try_entry_sigscript(&t.shard, "buy", args, redeem)
 }
 
 /// Sigscript calling `entry` of `template` with `args`, followed by the redeem script.
@@ -951,27 +1077,29 @@ fn buy_sigscript(t: &Templates, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8
 /// signature drifts from the builder's fails loudly); an entry the template does not have
 /// yet is encoded by hand (`planned_sig_script`), so the script rejects it at dispatch.
 pub fn entry_sigscript(template: &Template, entry: &str, args: &[ArtifactValue], redeem: &[u8]) -> Vec<u8> {
+    try_entry_sigscript(template, entry, args, redeem).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `entry_sigscript` with an error instead of a panic (F1 part B); the same bytes when it
+/// succeeds.
+pub fn try_entry_sigscript(template: &Template, entry: &str, args: &[ArtifactValue], redeem: &[u8]) -> Result<Vec<u8>, String> {
     let Some(open) = entry.find('(') else {
         let sig = encode_contract_entry_sig_script(&template.art, template.name(), entry, args)
-            .unwrap_or_else(|e| panic!("encode {}.{entry} args: {e}", template.name()));
-        return push_redeem(sig, redeem);
+            .map_err(|e| format!("encode {}.{entry} args: {e}", template.name()))?;
+        return try_push_redeem(sig, redeem);
     };
     let name = &entry[..open];
-    let contract = template.art.contracts.values().next().unwrap();
+    let contract = template.art.contracts.values().next().ok_or("template artifact without a contract")?;
     let sig = match contract.entries.get(name) {
         Some(e) => {
-            assert_eq!(
-                e.dispatch_tag.as_bytes(),
-                &dispatch_tag(entry),
-                "{}.{name}: the compiled entry's signature differs from the builder's `{entry}`",
-                template.name()
-            );
-            encode_contract_entry_sig_script(&template.art, template.name(), name, args)
-                .unwrap_or_else(|e| panic!("encode {}.{name} args: {e}", template.name()))
+            if e.dispatch_tag.as_bytes() != &dispatch_tag(entry) {
+                return Err(format!("{}.{name}: the compiled entry's signature differs from the builder's `{entry}`", template.name()));
+            }
+            encode_contract_entry_sig_script(&template.art, template.name(), name, args).map_err(|e| format!("encode {}.{name} args: {e}", template.name()))?
         }
-        None => planned_sig_script(entry, args),
+        None => try_planned_sig_script(entry, args)?,
     };
-    push_redeem(sig, redeem)
+    try_push_redeem(sig, redeem)
 }
 
 /// SilverScript v1.0.0 dispatch tag of an entry signature `name(type,...)`: the first 4
@@ -986,26 +1114,34 @@ pub fn dispatch_tag(signature: &str) -> [u8; 4] {
 /// pushed in order (int and bool with `add_i64`, byte with a 1-byte push, bytes with
 /// `add_data`), then the dispatch tag. Without the redeem push.
 pub fn planned_sig_script(signature: &str, args: &[ArtifactValue]) -> Vec<u8> {
+    try_planned_sig_script(signature, args).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `planned_sig_script` with an error instead of a panic (F1 part B).
+pub fn try_planned_sig_script(signature: &str, args: &[ArtifactValue]) -> Result<Vec<u8>, String> {
     let mut b = ScriptBuilder::new();
+    fn e(what: &'static str) -> impl Fn(kaspa_txscript::script_builder::ScriptBuilderError) -> String {
+        move |err| format!("planned_sig_script: push {what}: {err}")
+    }
     for a in args {
         match a {
             ArtifactValue::Int(x) => {
-                b.add_i64(*x).expect("push int");
+                b.add_i64(*x).map_err(e("int"))?;
             }
             ArtifactValue::Bool(x) => {
-                b.add_i64(*x as i64).expect("push bool");
+                b.add_i64(*x as i64).map_err(e("bool"))?;
             }
             ArtifactValue::Byte(x) => {
-                b.add_data(&[*x]).expect("push byte");
+                b.add_data(&[*x]).map_err(e("byte"))?;
             }
             ArtifactValue::Bytes(x) => {
-                b.add_data(x).expect("push bytes");
+                b.add_data(x).map_err(e("bytes"))?;
             }
-            other => panic!("planned_sig_script: unsupported argument {other:?}"),
+            other => return Err(format!("planned_sig_script: unsupported argument {other:?}")),
         }
     }
-    b.add_data(&dispatch_tag(signature)).expect("push tag");
-    b.drain()
+    b.add_data(&dispatch_tag(signature)).map_err(e("tag"))?;
+    Ok(b.drain())
 }
 
 pub struct Final {
@@ -1075,21 +1211,26 @@ impl Built {
         self.outpoints.get(n).copied().unwrap_or_else(|| outpoint(n as u32))
     }
 
-    fn sigscripts(&self) -> Vec<Vec<u8>> {
+    fn try_sigscripts(&self) -> Result<Vec<Vec<u8>>, String> {
         self.inputs
             .iter()
             .map(|i| match &i.kind {
-                InKind::Shard(redeem) => buy_sigscript(&self.templates, &self.args, redeem),
-                InKind::Funding => vec![0; P2PK_SIG_LEN],
-                InKind::Covenant { redeem, args } => buy_sigscript(&self.templates, args, redeem),
-                InKind::Raw(sig) => sig.clone(),
-                InKind::Entry { template, entry, args, redeem } => entry_sigscript(template, entry, args, redeem),
-                InKind::Owner(k) => k.placeholder(),
+                InKind::Shard(redeem) => try_buy_sigscript(&self.templates, &self.args, redeem),
+                InKind::Funding => Ok(vec![0; P2PK_SIG_LEN]),
+                InKind::Covenant { redeem, args } => try_buy_sigscript(&self.templates, args, redeem),
+                InKind::Raw(sig) => Ok(sig.clone()),
+                InKind::Entry { template, entry, args, redeem } => try_entry_sigscript(template, entry, args, redeem),
+                InKind::Owner(k) => Ok(k.placeholder()),
+                InKind::OwnerPub(o) => Ok(o.placeholder()),
             })
             .collect()
     }
 
     fn assemble(&self, sigs: &[Vec<u8>], budgets: &[u16]) -> Transaction {
+        self.try_assemble(sigs, budgets).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn try_assemble(&self, sigs: &[Vec<u8>], budgets: &[u16]) -> Result<Transaction, String> {
         let inputs = sigs
             .iter()
             .zip(budgets)
@@ -1098,9 +1239,35 @@ impl Built {
             .collect();
         let mut tx = Transaction::new(1, inputs, self.outputs.clone(), self.lock_time, Default::default(), 0, vec![]);
         if !self.genesis.is_empty() {
-            tx.populate_genesis_covenants(&self.genesis).expect("genesis groups");
+            tx.populate_genesis_covenants(&self.genesis).map_err(|e| format!("genesis groups: {e}"))?;
         }
-        tx
+        Ok(tx)
+    }
+
+    /// The inputs a signer outside this library must sign (front-end F1 part B), with the
+    /// owner each one's script names: every funding input (a Schnorr P2PK: its entry's
+    /// script) and every owner input. An `Owner` input (secret key held here) counts as its
+    /// public side: `finish_unsigned` does not sign it either.
+    pub fn external_signers(&self) -> Result<Vec<(usize, OwnerPub)>, String> {
+        let mut v = vec![];
+        for (n, i) in self.inputs.iter().enumerate() {
+            match &i.kind {
+                InKind::Funding => {
+                    let s = i.entry.script_public_key.script();
+                    // OP_DATA_32 <x-only key> OP_CHECKSIG, version 0.
+                    if i.entry.script_public_key.version() != 0 || s.len() != 34 || s[0] != 0x20 || s[33] != 0xac {
+                        return Err(format!("funding input {n}: its UTXO script is not a Schnorr P2PK script"));
+                    }
+                    let mut x = [0u8; 32];
+                    x.copy_from_slice(&s[1..33]);
+                    v.push((n, OwnerPub::Schnorr(x)));
+                }
+                InKind::Owner(k) => v.push((n, k.public())),
+                InKind::OwnerPub(o) => v.push((n, o.clone())),
+                _ => {}
+            }
+        }
+        Ok(v)
     }
 
     /// KIP-9 storage mass of this transaction. It depends only on input and output values
@@ -1115,55 +1282,57 @@ impl Built {
     /// Size budgets from an unlimited run, commit storage mass, sign funding and owner
     /// inputs. An owner input (spec M5) is budgeted at one signature check (P2PK_UNITS) and,
     /// if its signed run needs more (P2SH), re-budgeted from that run and signed again.
+    /// Panics on an `OwnerPub` input (no key to sign it) and where `finish_unsigned` errs.
     pub fn finish(&self) -> Final {
-        self.finish_inner(true)
+        self.try_finish_inner(true).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Spec frontend 6.1 (F0, signing split from building): `finish()` without the
     /// signatures. Budgets, the storage-mass commit and every covenant sigscript are exactly
-    /// `finish()`'s; each funding input keeps the placeholder sigscript of the final size
-    /// (66 zero bytes), so the masses equal the signed transaction's. Returns the
-    /// transaction and the indices of the funding inputs the payer must sign (SIG_HASH_ALL).
-    /// Owner inputs (spec M5 D67) are refused: their budget depends on the signed run.
+    /// `finish()`'s; each input a signer outside this library must sign
+    /// (`external_signers`: funding inputs and, since F1 part B, owner inputs) keeps the
+    /// placeholder sigscript of its final size (66 zero bytes, plus the redeem push for a
+    /// P2SH owner), so the masses equal the signed transaction's. An owner input is budgeted
+    /// from `owner_signed_units` of its class, which is what `finish()`'s signed re-run
+    /// commits (`tests/f1_unsigned.rs`). Returns the transaction and the indices to sign
+    /// (SIG_HASH_ALL). Never panics: every failure is an error.
     pub fn finish_unsigned(&self) -> Result<(Final, Vec<usize>), String> {
-        if let Some(i) = self.inputs.iter().position(|i| matches!(i.kind, InKind::Owner(_))) {
-            return Err(format!("input {i} is an owner input; finish_unsigned supports funding inputs only"));
-        }
-        let sign = self.inputs.iter().enumerate().filter(|(_, i)| matches!(i.kind, InKind::Funding)).map(|(n, _)| n).collect();
-        Ok((self.finish_inner(false), sign))
+        let sign = self.external_signers()?.into_iter().map(|(n, _)| n).collect();
+        Ok((self.try_finish_inner(false)?, sign))
     }
 
-    fn finish_inner(&self, sign: bool) -> Final {
+    fn try_finish_inner(&self, sign: bool) -> Result<Final, String> {
         let entries: Vec<UtxoEntry> = self.inputs.iter().map(|i| i.entry.clone()).collect();
-        let sigs = self.sigscripts();
+        let sigs = self.try_sigscripts()?;
         let max_budget = vec![u16::MAX; sigs.len()];
-        let probe = self.assemble(&sigs, &max_budget);
-        let mut units: Vec<u64> = (0..sigs.len())
-            .map(|i| match self.inputs[i].kind {
-                InKind::Funding | InKind::Owner(_) => P2PK_UNITS,
+        let probe = self.try_assemble(&sigs, &max_budget)?;
+        let p2pk_budget = harness::try_budget_for(P2PK_UNITS)?;
+        let mut units: Vec<u64> = Vec::with_capacity(sigs.len());
+        for (i, inp) in self.inputs.iter().enumerate() {
+            units.push(match &inp.kind {
+                InKind::Funding => P2PK_UNITS,
+                // Signed here: budgeted at P2PK_UNITS, re-budgeted from the signed run below.
+                InKind::Owner(_) if sign => P2PK_UNITS,
+                // Signed outside: the budget the signed re-run commits for this class.
+                InKind::Owner(k) => external_owner_units(&k.public(), p2pk_budget)?,
+                InKind::OwnerPub(_) if sign => return Err(format!("input {i} is an owner input signed outside this library; use finish_unsigned")),
+                InKind::OwnerPub(o) => external_owner_units(o, p2pk_budget)?,
                 // A rejected dry run (attack tests) gets a generous budget, so the run under the
                 // committed budget fails on the script's own check, not on the budget.
                 _ => run_script(&probe, &entries, i, false, self.sim.as_deref()).unwrap_or(FAILED_RUN_UNITS),
-            })
-            .collect();
+            });
+        }
         loop {
-            let budgets: Vec<u16> = units
-                .iter()
-                .enumerate()
-                .map(|(i, &u)| {
-                    let b = budget_for(u);
-                    if i == 0 {
-                        self.shard_budget.unwrap_or((b as i32 + self.budget_delta).max(0) as u16)
-                    } else {
-                        b
-                    }
-                })
-                .collect();
-            let tx = self.assemble(&sigs, &budgets);
+            let mut budgets: Vec<u16> = Vec::with_capacity(units.len());
+            for (i, &u) in units.iter().enumerate() {
+                let b = harness::try_budget_for(u)?;
+                budgets.push(if i == 0 { self.shard_budget.unwrap_or((b as i32 + self.budget_delta).max(0) as u16) } else { b });
+            }
+            let tx = self.try_assemble(&sigs, &budgets)?;
             // Zero-value outputs (range tests with d = 0) are consensus-invalid and the mass
             // calculator divides by the value; the script check is what is under test there.
             if tx.outputs.iter().all(|o| o.value > 0) {
-                harness::commit_storage_mass(&tx, &entries);
+                tx.set_storage_mass(harness::try_masses(&tx, &entries)?.storage);
             }
             let mut tx = tx;
             for (i, inp) in self.inputs.iter().enumerate().filter(|_| sign) {
@@ -1181,7 +1350,7 @@ impl Built {
             }
             tx.finalize();
             let mut rerun = false;
-            for (i, inp) in self.inputs.iter().enumerate() {
+            for (i, inp) in self.inputs.iter().enumerate().filter(|_| sign) {
                 if let InKind::Owner(_) = inp.kind {
                     if let Ok(u) = run_script(&tx, &entries, i, false, self.sim.as_deref()) {
                         if budget_for(u) > budget_for(units[i]) {
@@ -1192,10 +1361,18 @@ impl Built {
                 }
             }
             if !rerun {
-                return Final { tx, entries, units, sim: self.sim.clone() };
+                return Ok(Final { tx, entries, units, sim: self.sim.clone() });
             }
         }
     }
+}
+
+/// The units `finish_unsigned` gives an owner input signed outside this library: the
+/// signed run's units if their budget exceeds one signature check's, else P2PK_UNITS
+/// (exactly where `finish()`'s re-run loop ends for the same class, see `finish_inner`).
+fn external_owner_units(o: &OwnerPub, p2pk_budget: u16) -> Result<u64, String> {
+    let u = owner_signed_units(o)?;
+    Ok(if harness::try_budget_for(u)? > p2pk_budget { u } else { P2PK_UNITS })
 }
 
 impl Final {
@@ -1222,6 +1399,14 @@ impl Final {
         let i: u64 = self.entries.iter().map(|e| e.amount).sum();
         let o: u64 = self.tx.outputs.iter().map(|o| o.value).sum();
         i - o
+    }
+
+    /// `fee` in checked arithmetic: an error if the sums overflow or the outputs exceed the
+    /// inputs (F1 part B).
+    pub fn try_fee(&self) -> Result<u64, String> {
+        let i = self.entries.iter().try_fold(0u64, |a, e| a.checked_add(e.amount)).ok_or("input values overflow u64")?;
+        let o = self.tx.outputs.iter().try_fold(0u64, |a, x| a.checked_add(x.value)).ok_or("output values overflow u64")?;
+        i.checked_sub(o).ok_or_else(|| format!("outputs {o} exceed inputs {i}"))
     }
 }
 
