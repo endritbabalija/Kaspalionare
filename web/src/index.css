@@ -1,0 +1,74 @@
+@import 'tailwindcss';
+@import './theme/fonts.css';
+@import './theme/tokens.css';
+
+/* Tailwind colour and font utilities over the tokens (bg-ground, text-ink, border-rule, font-mono, ...). */
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-on-ink: var(--on-ink);
+  --color-graphite: var(--graphite);
+  --color-rule: var(--rule);
+  --color-rule-soft: var(--rule-soft);
+  --color-control-line: var(--control-line);
+  --color-teal: var(--teal);
+  --color-on-teal: var(--on-teal);
+  --color-link: var(--link);
+  --color-mint: var(--mint);
+  --color-on-mint: var(--on-mint);
+  --color-amber: var(--amber);
+  --color-status-open-bg: var(--status-open-bg);
+  --color-status-open-fg: var(--status-open-fg);
+  --color-status-closing-bg: var(--status-closing-bg);
+  --color-status-closing-fg: var(--status-closing-fg);
+  --color-status-drawn-bg: var(--status-drawn-bg);
+  --color-status-drawn-fg: var(--status-drawn-fg);
+  --color-status-void-fg: var(--status-void-fg);
+  --color-focus: var(--focus);
+  --font-sans: 'Geist', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
+}
+
+/* Base rules in Tailwind's base layer, so utilities (text-ink on a link, ...) win over them. */
+@layer base {
+  html,
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  a {
+    color: var(--link);
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

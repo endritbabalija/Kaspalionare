@@ -1,0 +1,7 @@
+node_modules
+dist
+src/wasm
+playwright-report
+test-results
+package-lock.json
+src/fonts

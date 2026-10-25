@@ -10,12 +10,13 @@
 //!
 //! What it builds (wasm32, release cdylib):
 //! - **release**: the documented wasm build command exactly (CLAUDE.md "wasm build":
-//!   `cargo build -j 2 -p web --target wasm32-unknown-unknown --release`, default target
-//!   directory, no feature), so the file checked is the release artifact itself,
-//!   `target/wasm32-unknown-unknown/release/web.wasm` (copied to `target/w4/web-release.wasm`);
-//! - **dev**: `--features simnet,fixtures` (the local simnet dev run), in `target/w4`: the
-//!   positive control of the simnet and fixture checks;
-//! - **mainnet**: `--features mainnet`, in `target/w4`.
+//!   `cargo build -j 2 -p web --target wasm32-unknown-unknown --release --features node`,
+//!   default target directory; F3 added the page's node client, `node`), so the file checked
+//!   is the release artifact itself, `target/wasm32-unknown-unknown/release/web.wasm` (copied
+//!   to `target/w4/web-release.wasm`), the one `web/scripts/wasm.mjs release` packages;
+//! - **dev**: `--features simnet,fixtures,node` (the local simnet dev run), in `target/w4`:
+//!   the positive control of the simnet and fixture checks;
+//! - **mainnet**: `--features mainnet,node`, in `target/w4`.
 //!
 //! What it checks:
 //! 1. byte scans of each `.wasm` (exports, the `name` section, data, custom sections):
@@ -111,9 +112,11 @@ fn node(wasm: &Path, script: &str) -> (bool, String) {
 fn w4_mainnet_build_has_no_quick_wallet_and_refuses_to_start() {
     assert!(tool_ok("wasm-bindgen", "--version"), "wasm-bindgen 0.2.100 must be on PATH: cargo install wasm-bindgen-cli --version 0.2.100 --locked");
     assert!(tool_ok("node", "--version"), "node must be on PATH");
-    let release = build("release", &[], None);
-    let dev = build("dev", &["simnet", "fixtures"], Some("w4"));
-    let main = build("mainnet", &["mainnet"], Some("w4"));
+    // F3: every page build has the node client (`node`); the release build is the page's
+    // (`web/scripts/wasm.mjs release` runs exactly this command).
+    let release = build("release", &["node"], None);
+    let dev = build("dev", &["simnet", "fixtures", "node"], Some("w4"));
+    let main = build("mainnet", &["mainnet", "node"], Some("w4"));
     let (r, d, m) = (std::fs::read(&release).unwrap(), std::fs::read(&dev).unwrap(), std::fs::read(&main).unwrap());
     // 1. The scans.
     for n in QUICK {

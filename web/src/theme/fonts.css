@@ -1,0 +1,16 @@
+/* Geist and Geist Mono (SIL Open Font License 1.1, src/fonts/OFL.txt), served by the site itself (spec 5):
+   vendored from the `geist` npm package 1.7.2, no third-party font request. */
+@font-face {
+  font-family: 'Geist';
+  src: url('../fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}

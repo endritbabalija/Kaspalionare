@@ -7,9 +7,11 @@
 //! - `smoke [n]`: start a fresh node, mine max(n, 1,060) blocks (coinbase maturity is
 //!   1,000 DAA on simnet), then genesis, buy() and close() of round 1 with the production
 //!   templates, each mined from the node's templates.
-//! - `dev [--api-bind <addr:port>] [--for <seconds>] [--block-ms <n>]` (front-end F2): one
-//!   instance with a drawn, a closing and an open round, indexed and served by the indexer
-//!   API, then blocks mined every `--block-ms` until Ctrl-C (`dev.rs`).
+//! - `dev [--api-bind <addr:port>] [--node-port <port>] [--faucet-bind <addr:port>] [--for <seconds>]
+//!   [--block-ms <n>]` (front-end F2, F3): one instance with a drawn, a closing and an open
+//!   round, indexed and served by the indexer API, the node's Borsh wRPC on a fixed loopback
+//!   port (default 18610) and the dev faucet (`faucet.rs`), then blocks mined every
+//!   `--block-ms` until Ctrl-C (`dev.rs`).
 //! - `sn1` .. `sn4`: the forced-jackpot scenarios of spec A5b (one fresh node and genesis
 //!   each; the anchor block ground, `sn.rs`); `sn5` runs SN1 and reports its grinding numbers;
 //!   `all` runs SN1-SN4, each in a child process (one node per process), and SN5 over
@@ -27,6 +29,7 @@ use kaspa_alloc::init_allocator_with_default_settings;
 #[path = "../../tn10/src/anchor.rs"]
 mod anchor;
 mod dev;
+mod faucet;
 // The M8 indexer, shared with tn10 unchanged (generic over `RpcApi`); the dev run follows the
 // node with it and writes `index/1` for the indexer API.
 #[allow(dead_code)]
@@ -40,7 +43,7 @@ mod sn;
 mod wallet;
 
 fn usage() -> ! {
-    eprintln!("usage: simnet <mine [n] | smoke [n] | sn1 | sn2 | sn3 | sn4 | sn5 | all | dev [--api-bind <addr:port>] [--for <seconds>] [--block-ms <n>]>");
+    eprintln!("usage: simnet <mine [n] | smoke [n] | sn1 | sn2 | sn3 | sn4 | sn5 | all | dev [--api-bind <addr:port>] [--node-port <port>] [--faucet-bind <addr:port>] [--for <seconds>] [--block-ms <n>]>");
     std::process::exit(2);
 }
 
@@ -63,7 +66,13 @@ fn main() {
 }
 
 fn dev_opts(a: &[String]) -> Result<dev::Opts, String> {
-    let mut o = dev::Opts { api_bind: "127.0.0.1:8790".parse().expect("bind"), run_for: None, block_ms: 200 };
+    let mut o = dev::Opts {
+        api_bind: "127.0.0.1:8790".parse().expect("bind"),
+        node_port: dev::NODE_PORT,
+        faucet_bind: "127.0.0.1:8791".parse().expect("bind"),
+        run_for: None,
+        block_ms: 200,
+    };
     let mut it = a.iter();
     while let Some(f) = it.next() {
         let v = it.next().ok_or(format!("{f} needs a value"))?;
@@ -72,6 +81,13 @@ fn dev_opts(a: &[String]) -> Result<dev::Opts, String> {
                 o.api_bind = v.parse().map_err(|e| format!("--api-bind {v}: {e}"))?;
                 if !o.api_bind.ip().is_loopback() {
                     return Err("--api-bind: the dev API binds to a loopback address only".into());
+                }
+            }
+            "--node-port" => o.node_port = v.parse().map_err(|e| format!("--node-port {v}: {e}"))?,
+            "--faucet-bind" => {
+                o.faucet_bind = v.parse().map_err(|e| format!("--faucet-bind {v}: {e}"))?;
+                if !o.faucet_bind.ip().is_loopback() {
+                    return Err("--faucet-bind: the dev faucet binds to a loopback address only".into());
                 }
             }
             "--for" => o.run_for = Some(std::time::Duration::from_secs(v.parse().map_err(|e| format!("--for {v}: {e}"))?)),

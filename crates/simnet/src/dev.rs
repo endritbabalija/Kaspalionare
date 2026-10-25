@@ -16,6 +16,12 @@
 //! 6. then it mines one block every `--block-ms` (default 200) and follows the chain with the
 //!    indexer, until Ctrl-C or `--for <seconds>`.
 //!
+//! F3 (the page's one-command dev run, `web/scripts/dev-simnet.mjs`): the node's Borsh wRPC
+//! listens on the fixed loopback port `--node-port` (default 18610), and the dev faucet
+//! (`faucet.rs`) on `--faucet-bind` (default 127.0.0.1:8791) pays the page's quick wallet.
+//! `current.json` is written only once the instance is ready (then the self-check runs), with
+//! `startedMs`, so a starter script can wait for a fresh one.
+//!
 //! Every transaction is built by the `lottery` builders, checked in the local engine and
 //! submitted to the node's mempool, as in SN1-SN4. `crates/target/simnet-dev/current.json`
 //! names the API URL, the node's wRPC URL and the instance. The keys are throwaway simnet
@@ -46,9 +52,16 @@ use crate::wallet::{KAS, Utxo, Wallet};
 
 pub struct Opts {
     pub api_bind: std::net::SocketAddr,
+    /// The node's Borsh wRPC port on 127.0.0.1 (fixed, so the page's dev config can name it).
+    pub node_port: u16,
+    /// The dev faucet (`faucet.rs`) for the page's quick wallet.
+    pub faucet_bind: std::net::SocketAddr,
     pub run_for: Option<Duration>,
     pub block_ms: u64,
 }
+
+/// The dev run's fixed node port (F3): Borsh wRPC on 127.0.0.1:18610 (not a rusty-kaspa default).
+pub const NODE_PORT: u16 = 18_610;
 
 /// The M8 testnet instance's round knobs (spec 8 A2): ten minutes of sales at 10 BPS.
 fn short_rounds(g: &mut lottery::genesis::GenesisCase) {
@@ -289,7 +302,7 @@ async fn self_check(c: &KaspaRpcClient, api: std::net::SocketAddr, cov: Hash, me
 }
 
 pub async fn run(o: Opts) -> Result<(), String> {
-    let node = Node::start()?;
+    let node = Node::start_on(Some(o.node_port))?;
     let r = run_on(&node, &o).await;
     node.shutdown();
     r
@@ -368,17 +381,20 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
     note_closes(&x, &starts);
     acfg.anchor = Some(Arc::new(NodeAnchor { c: c.clone(), starts: starts.clone() }));
     let api = tokio::spawn(indexer_api::run(acfg));
+    let faucet = crate::faucet::serve(o.faucet_bind, c.clone(), Wallet { sk: w.sk, addr: w.addr.clone() }).await?;
     let info = serde_json::json!({
         "network": "simnet",
         "api": format!("http://{}/v1/", o.api_bind),
         "wrpcBorsh": node.url,
+        "faucet": format!("http://{}/faucet", o.faucet_bind),
+        "startedMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
         "covenantId": lottery::store::to_hex(&cov.as_bytes()),
         "store": dir.display().to_string(),
         "rounds": { "1": "drawn", "2": "closing", "3": "open" },
     });
-    std::fs::write(dev_root().join("current.json"), serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     tokio::time::sleep(Duration::from_millis(500)).await;
     self_check(&c, o.api_bind, cov, &w.addr.to_string()).await.map_err(|e| format!("self-check: {e}"))?;
+    std::fs::write(dev_root().join("current.json"), serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     println!("dev: ready in {:.0} s: {}", t0.elapsed().as_secs_f64(), info);
     println!("dev: {} checks passed in round 1 ({} transactions)", log.checks.len(), log.txs.len());
     sn::print_report(&[log]);
@@ -405,6 +421,7 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
         note_closes(&x, &starts);
     }
     api.abort();
+    faucet.abort();
     let _ = c.disconnect().await;
     Ok(())
 }

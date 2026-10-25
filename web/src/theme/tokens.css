@@ -1,0 +1,61 @@
+/*
+ * Design tokens: the one file (spec 5, D139). One name per role, a value per theme; dark is the default.
+ * The table is spec 5's, value for value. Additions (roles the table implies, each also checked for
+ * contrast by tokens.test.ts): on-teal (white text on teal), on-mint (dark text on the mint win fill),
+ * status-void (the Void pill: outline, graphite text), focus (the focus ring).
+ * Themes: <html data-theme="dark|light"> is set before first paint by public/theme-boot.js from the
+ * remembered choice (dark, light, device) and the device setting (no preference: dark). Any element may
+ * carry data-theme too (the dev catalogue shows both themes side by side).
+ */
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+  --ground: #0e1012;
+  --surface: #16191c;
+  --ink: #eceeea;
+  --on-ink: #0e1012;
+  --graphite: #9aa1a8;
+  --rule: #2a2e33;
+  --rule-soft: #22262a;
+  --control-line: #3a3f44;
+  --teal: #0e7a70;
+  --on-teal: #ffffff;
+  --link: #5cc8b8;
+  --mint: #74cdbf;
+  --on-mint: #0e1012;
+  --amber: #e59a4e;
+  --status-open-bg: #12332f;
+  --status-open-fg: #7fd8ca;
+  --status-closing-bg: #3a2a17;
+  --status-closing-fg: #f0b27a;
+  --status-drawn-bg: #24282c;
+  --status-drawn-fg: #eceeea;
+  --status-void-fg: #9aa1a8;
+  --focus: #5cc8b8;
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+  --ground: #f6f6f3;
+  --surface: #ffffff;
+  --ink: #15171a;
+  --on-ink: #ffffff;
+  --graphite: #565c63;
+  --rule: #dfe1dc;
+  --rule-soft: #ecedea;
+  --control-line: #c9ccc6;
+  --teal: #0e7a70;
+  --on-teal: #ffffff;
+  --link: #0e7a70;
+  --mint: #74cdbf;
+  --on-mint: #15171a;
+  --amber: #a14f08;
+  --status-open-bg: #e3f3f0;
+  --status-open-fg: #0a5c54;
+  --status-closing-bg: #f3eadf;
+  --status-closing-fg: #7e3e06;
+  --status-drawn-bg: #e9eae6;
+  --status-drawn-fg: #15171a;
+  --status-void-fg: #565c63;
+  --focus: #0e7a70;
+}

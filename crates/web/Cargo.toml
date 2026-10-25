@@ -28,6 +28,12 @@ simnet = []
 # Off in the release artifact, which W4 scans for their symbols; the tests get the fixtures
 # through the dev-dependency below.
 fixtures = ["lottery/fixtures"]
+# Front end F3: the page's node client (`src/node_client.rs`, wasm32): the rusty-kaspa v2.1.0
+# Borsh wRPC client (the version every other crate here links) behind async exports
+# (`nodeConnect`, `nodeEntries`, `nodeCoins`, `nodeFeeRate`, `nodeAnchorBlock`, `nodeSubmit`).
+# On in every page build (dev and release); native builds (tn10, simnet, indexer-api) leave it
+# off. A `mainnet` build compiles it out (W4).
+node = ["dep:kaspa-wrpc-client", "dep:kaspa-rpc-core", "dep:wasm-bindgen-futures", "dep:ring", "dep:workflow-core"]
 # F1 part C, spec 6.1 "Anchor proof": a compile-and-run probe of the rusty-kaspa v2.1.0 wRPC
 # client in wasm, calling GetSeqCommitLaneProof (`src/wrpc_probe.rs`). Off in every build the
 # page ships; the networking itself is F2/F5 work.
@@ -55,16 +61,19 @@ secp256k1.workspace = true
 blake2b_simd.workspace = true
 # The quick wallet's key (the browser's crypto.getRandomValues on wasm32, `wasm_js`).
 getrandom = "=0.3.4"
-# wrpc-probe only (the versions tn10 links).
+# node and wrpc-probe only (the versions tn10 links).
 kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16", optional = true }
 kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16", optional = true }
 kaspa-seq-commit = { workspace = true, optional = true }
 kaspa-smt = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16", optional = true }
 wasm-bindgen-futures = { version = "=0.4.50", optional = true }
+# node only: the wRPC client's timer layer (the version Cargo.lock already has), to switch off its
+# window-only timer overrides inside the page's Web Worker (`node_client::connect`).
+workflow-core = { version = "=0.18.0", optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "=0.3.4", features = ["wasm_js"] }
-# wrpc-probe only: the wRPC client links rustls with ring, which needs its browser random source on
+# node and wrpc-probe only: the wRPC client links rustls with ring, which needs its browser random source on
 # wasm32 (as rusty-kaspa's own `rpc/wrpc/wasm/Cargo.toml:43` sets it).
 ring = { version = "=0.17.14", features = ["wasm32_unknown_unknown_js"], optional = true }
 

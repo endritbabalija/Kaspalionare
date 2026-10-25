@@ -41,6 +41,13 @@ pub mod dto;
 /// The indexer API's response types (served by `crates/indexer-api`) and the page's checks of
 /// them against the chain (spec 6.3; F2).
 pub mod indexer;
+/// The page's network layer, plain-Rust half (F3): URLs, the node's network, fee rates, which
+/// entries to read for the indexer's objects, the error table and the jackpot odds.
+pub mod node;
+/// The page's node client (F3, feature `node`, wasm32): the rusty-kaspa v2.1.0 wRPC client.
+/// Compiled out of a `mainnet` build (which refuses to start anyway, W4), like the quick wallet.
+#[cfg(all(feature = "node", target_arch = "wasm32", not(feature = "mainnet")))]
+pub mod node_client;
 #[cfg(not(feature = "mainnet"))]
 pub mod quick_wallet;
 pub mod safe_json;

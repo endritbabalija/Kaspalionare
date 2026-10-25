@@ -159,6 +159,19 @@ codes! {
     /// coin it signs is of one wallet address (F1 re-review N2: otherwise a summary could
     /// show a second key's output as coming back to the wallet).
     MixedSigners = 34, "mixed_signers", "All the coins to sign must come from one wallet address.";
+    /// Front end F3: the public node (wRPC) could not be reached, or did not answer in time.
+    NodeUnavailable = 35, "node_unavailable", "The network node cannot be reached.";
+    /// Front end F3: the node reports another network than the one the page runs on, or has
+    /// no UTXO index (spec 6.6: the page refuses it).
+    NodeNetwork = 36, "node_network", "The network node is on another network.";
+    /// Front end F3: the node answered with an error (for example, it rejected a transaction).
+    NodeRefused = 37, "node_refused", "The network node refused the request.";
+    /// Front end F3 (the page, not the wasm): the indexer API could not be reached or answered
+    /// with an error status.
+    IndexerUnavailable = 38, "indexer_unavailable", "The indexer cannot be reached.";
+    /// Front end F3 (the page, not the wasm): the worker running the lottery code stopped (wasm
+    /// aborts on a panic); the page restarted it.
+    WorkerStopped = 39, "worker_stopped", "The lottery code stopped and was restarted.";
 }
 
 impl fmt::Display for Code {

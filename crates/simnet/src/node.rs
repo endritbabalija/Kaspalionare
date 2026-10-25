@@ -85,8 +85,21 @@ pub struct Node {
 impl Node {
     /// Start a fresh private simnet node in this process.
     pub fn start() -> Result<Node, String> {
+        Self::start_on(None)
+    }
+
+    /// The same, with the Borsh wRPC listener on 127.0.0.1:`borsh` when given (the dev run's
+    /// fixed port, F3), else on a free port.
+    pub fn start_on(borsh: Option<u16>) -> Result<Node, String> {
         let data_dir = fresh_data_dir()?;
-        let (p2p, borsh) = (free_port()?, free_port()?);
+        let p2p = free_port()?;
+        let borsh = match borsh {
+            Some(p) => {
+                std::net::TcpListener::bind(("127.0.0.1", p)).map_err(|e| format!("127.0.0.1:{p} is not free (another dev run?): {e}"))?;
+                p
+            }
+            None => free_port()?,
+        };
         let args = node_args(&data_dir, p2p, borsh);
         net::check_args(&args)?;
         let url = format!("ws://127.0.0.1:{borsh}");

@@ -24,7 +24,7 @@ const ERROR_NAMES: &'static str = lottery::web::Code::TS_DECL;
 /// 0 = not started, 1 = testnet-10, 2 = simnet.
 static NET: AtomicU8 = AtomicU8::new(0);
 
-fn net() -> Result<Net> {
+pub(crate) fn net() -> Result<Net> {
     match NET.load(Ordering::SeqCst) {
         1 => Ok(Net::Testnet10),
         #[cfg(all(feature = "simnet", not(feature = "mainnet")))]
@@ -33,7 +33,7 @@ fn net() -> Result<Net> {
     }
 }
 
-fn out<T: Serialize>(r: Result<T>) -> JsValue {
+pub(crate) fn out<T: Serialize>(r: Result<T>) -> JsValue {
     let o = match r {
         Ok(v) => Outcome::Ok(v),
         Err(e) => Outcome::Error(ApiError::from(e)),
@@ -50,7 +50,7 @@ fn out<T: Serialize>(r: Result<T>) -> JsValue {
     }
 }
 
-fn parse<T: DeserializeOwned>(what: &str, v: JsValue) -> Result<T> {
+pub(crate) fn parse<T: DeserializeOwned>(what: &str, v: JsValue) -> Result<T> {
     serde_wasm_bindgen::from_value(v).map_err(|e| Error::new(Code::InputFormat, format!("{what}: {e}")))
 }
 
@@ -216,6 +216,23 @@ pub fn check_indexer_objects(#[wasm_bindgen(unchecked_param_type = "ObjectsCheck
 #[wasm_bindgen(js_name = checkIndexerRound, unchecked_return_type = "Outcome<CheckedRound>")]
 pub fn check_indexer_round(#[wasm_bindgen(unchecked_param_type = "RoundCheckInput")] input: JsValue) -> JsValue {
     out(net().and_then(|n| crate::indexer::check_round(n, &parse("input", input)?)))
+}
+
+// ------------------------------------------------------------------------------ page tables (F3)
+
+/// Every error code with its one message (the one table, `lottery::web::Code`). Needs no
+/// started session: the page loads it first, so the codes it raises itself (a stopped worker,
+/// an unreachable indexer) read the same way as the wasm's.
+#[wasm_bindgen(js_name = errorTable, unchecked_return_type = "ErrorEntry[]")]
+pub fn error_table() -> JsValue {
+    let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    crate::node::error_table().serialize(&ser).unwrap_or(JsValue::NULL)
+}
+
+/// The jackpot odds at bonus range m: "1 in" this many (C = N x m, design 4.1).
+#[wasm_bindgen(js_name = jackpotOdds, unchecked_return_type = "Outcome<Dec>")]
+pub fn jackpot_odds(m: u32) -> JsValue {
+    out(net().and_then(|_| crate::node::jackpot_odds(m)))
 }
 
 // ------------------------------------------------------------------------------ dev only

@@ -66,6 +66,39 @@ impl Wallet {
         Ok(self.utxos(c).await?.into_iter().filter(|u| !u.entry.is_coinbase || u.entry.block_daa_score + COINBASE_MATURITY + 10 < vdaa).collect())
     }
 
+    /// Pay `amount` from `ins` (our P2PK) to `to`, the rest back to us (the dev faucet, F3),
+    /// signed; the fee as `consolidate`'s.
+    pub fn pay(&self, ins: &[Utxo], to: &ScriptPublicKey, amount: u64) -> Result<Transaction, String> {
+        let entries: Vec<UtxoEntry> = ins.iter().map(|u| u.entry.clone()).collect();
+        let total: u64 = entries.iter().map(|e| e.amount).sum();
+        let mk = |fee: u64| -> Result<Transaction, String> {
+            let inputs = ins.iter().map(|u| TransactionInput::new(u.op, vec![0; P2PK_SIG_LEN], 0, 1)).collect();
+            let change = total.checked_sub(amount).and_then(|x| x.checked_sub(fee)).ok_or("insufficient value")?;
+            let outs = vec![TransactionOutput::new(amount, to.clone()), TransactionOutput::new(change, self.spk())];
+            let mut tx = Transaction::new(0, inputs, outs, 0, SubnetworkId::default(), 0, vec![]);
+            tx.finalize();
+            Ok(tx)
+        };
+        let mut fee = 100_000;
+        let mut tx = mk(fee)?;
+        for _ in 0..4 {
+            let m = masses(&tx, &entries);
+            let need = priority_fee(&m).max(m.compute.max(m.transient.div_ceil(2)) * 100) + 10_000;
+            if need <= fee {
+                break;
+            }
+            fee = need;
+            tx = mk(fee)?;
+        }
+        let m = masses(&tx, &entries);
+        tx.set_storage_mass(m.storage);
+        for i in 0..ins.len() {
+            tx.inputs[i].signature_script = sign_input(&PopulatedTransaction::new(&tx, entries.clone()), i, &self.sk, SIG_HASH_ALL);
+        }
+        tx.finalize();
+        Ok(tx)
+    }
+
     /// Spend `ins` (our P2PK) to one output of everything minus the fee (min feerate over
     /// the priority mass, also covering the relay floor), signed.
     pub fn consolidate(&self, ins: &[Utxo]) -> Result<Transaction, String> {
