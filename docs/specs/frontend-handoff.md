@@ -40,7 +40,7 @@ Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this f
 | Stage | Status | Notes |
 |---|---|---|
 | F0 wallet experiment | part A done, waiting for owner | Probe `tn10 wallet-probe` built and self-tested on testnet-10 (stand-in signer). Part B (the owner's clicks, KasWare only; Kaspire not available, untested) is scheduled for 2026-10-26: see "F0 part B: owner steps". |
-| F1 builder refactor for wasm | parts A and B done; part C next | A: templates embedded (W2), compiler behind `compiler`, one rusty-kaspa version (vendored `silverscript-abi` on v2.1.0, no encoding change, proven by golden digests), wasm cdylib links with no extra flag (5.43 MB at O3, 5.01 MB at Os). B: the page-facing layer `lottery::web` (decode, verify, the 8 unsigned builders, the signing split for every case including owner inputs, the post-sign check moved from tn10, 26 typed error codes), no panic on untrusted input (W3 property test, 3 panics found and fixed), `.gitattributes` for the byte-pinned files; native bytes unchanged (golden digests). C: the wasm-bindgen API in `crates/web`, W1, W4, `.d.ts`, size. See "F1 part A" and "F1 part B". |
+| F1 builder refactor for wasm | done (parts A, B, C); `covenant-reviewer` next | A: the templates embedded (W2), the compiler behind `compiler`, one rusty-kaspa version, the wasm links. B: `lottery::web` (decode, verify, the 8 unsigned builders, the signing split, the post-sign check, typed errors, W3). C: the builders from chain objects (`lottery::web::cases`), the wasm-bindgen API in `crates/web` with a generated, typed `.d.ts`, one Safe JSON serialiser (tn10 calls it), W1 in wasm under Node (77 + 18 digests equal), W4 (the mainnet build has no quick-wallet symbol and refuses to load), the quick-wallet key hook, the wRPC client running in wasm against testnet-10, sizes (1.69 MB brotli at its smallest). Owner questions: simnet addresses; an npm accident in the home folder. See "F1 part A", "F1 part B" and "F1 part C". |
 | F2 indexer API | not started | |
 | F3 web shell and Play | not started | |
 | F4 My tickets, claims, backup | not started | |
@@ -738,3 +738,367 @@ The calls marked OK passed every check and built; the rest returned a typed erro
 - `cargo test -j 1 --release -p tn10`: `25 passed; 0 failed` (the 3 `pskt` tests run against the moved check).
 - `cargo check -j 2 -p lottery --no-default-features --target wasm32-unknown-unknown`, with `--features mainnet`, and without the compiler: `Finished`, no warnings.
 - Not run: the `crates/web` wasm link (part A's link probe is unchanged and does not reach `lottery::web`; part C builds it with the API) and `simnet` (RocksDB, about 14 min; it uses `lottery`'s default features, whose API only gained additions).
+
+## F1 part C (stage agent, 2026-10-25)
+
+### What was done
+
+1. **The builders from chain objects** (`crates/lottery/src/web/cases.rs`, new).
+   - Why: part B's builders take a `*Case`. Filling one is lottery logic (reserves from UTXO values, the boost pot, lock times, trees, the referral decision), so a page must not do it. `web::cases` does it in Rust, one function per entry point: `buy`, `claim`, `return_deposit`, `close`, `draw` (with its void), `request_deposit`, `request_withdraw`, `settle`.
+   - Inputs: the covenant UTXOs as a node shows them, with the state bytes the indexer or the local copy gives (`Obj`); the instance's covenant ID; the purchases where a tree is needed (compact six-byte form, shard order); the user's choices.
+   - Checks on every object:
+     - the UTXO carries the instance's covenant ID, is confirmed and is not a coinbase;
+     - the state bytes decode under the role's template, re-encode to themselves, and give the UTXO's P2SH (`verify::verify_state`);
+     - after the build, the transaction spends exactly the given entry and outpoint (`chain_inputs`), so every derived value gives back the chain's UTXO value.
+
+     Any mismatch is `chain_mismatch`.
+   - The derivations mirror the native hosts that fill cases from an index: `DrawCase::from_store_absorbing`, `ClaimCase::from_store_index` and tn10's campaign builders.
+   - `claim` implements `ClaimStore` over the chain objects and uses `from_store` or `from_store_index`. It first checks the rebuilt trees against every given pool's frozen roots, so a wrong purchase list is `tree_mismatch` before the reference reads a count.
+   - The referral (spec 7) is decided here: it is paid only if a referrer is named and r = floor(b × p × s_R / 10⁴) ≥ M_REF. Otherwise the output is left out.
+   - The caller's change address funds the reserves: the marker's in `close()` and the new pools' in `draw()`.
+2. **`lottery::web::fixtures`** (new): every web fixture case as the chain-object call a page makes, with `web::build`'s transaction for the fixture case. There are 18 calls:
+   - buy: b = 1 with a paid referral, and b = 4 with two coins;
+   - claim, k = 4;
+   - return_deposit: both paths;
+   - close: k = 4 and k = 16;
+   - draw and void: k = 4;
+   - request_deposit;
+   - request_withdraw: each owner class, partial and whole;
+   - settle: both kinds.
+
+   `Tree::purchases()` (new, `smt.rs`) gives a purchase list that rebuilds a fixture tree.
+3. **The error table as one macro** (`lottery::web::Code`).
+   - Each code's variant, number, name and message are written once. The macro gives the enum, `ALL`, `number`, `as_str`, `message`, `from_name` and `TS_DECL` (the `ErrorName` TypeScript union, emitted into the `.d.ts`).
+   - Codes 1–26 are unchanged; `error_codes_are_stable` pins them.
+   - Appended: 27 `address_network`, 28 `input_format`, 29 `not_started`, 30 `mainnet_refused`.
+4. **`crates/web`: the wasm-bindgen API** (it replaces part A's link probe).
+   - **Layers:**
+     - `dto`: the boundary types, declared to TypeScript by tsify;
+     - `convert`: hex, decimals, UTXOs, addresses, the network;
+     - `views`: decoded states;
+     - `api`: the logic in plain Rust, which the native tests call;
+     - `bindings`: the exports;
+     - `safe_json`: the wallets' format;
+     - `quick_wallet`;
+     - `wrpc_probe`: behind a feature.
+   - **Exports, by group:**
+
+     | Group | Exports |
+     |---|---|
+     | Start | `start(network)` |
+     | Decode | `decodeState(role, stateHex)`, `decodeRedeem(redeemHex)` |
+     | Verify | `verifyState(covenantId, role, {utxo, state})`; `checkRoots({m, purchases[], against, covenantId})`; `winningNumbers({covenantId, round, d, m, anchorProof})` |
+     | Build | `buildBuy`, `buildClaim`, `buildReturnDeposit`, `buildClose`, `buildDraw` (the void when `anchorProof` is absent), `buildRequestDeposit`, `buildRequestWithdraw`, `buildSettle` |
+     | Sign | `assemble({built, signed})` |
+     | Estimate | `feeFor({priorityMass, feeRate})`, `wMin(covenantId, vault)` |
+     | Addresses | `addressOf`, `scriptOf` |
+     | Quick wallet (absent from a `mainnet` build) | `quickWalletNew`, `quickWalletImport`, `quickWalletSign` |
+   - **Results:**
+     - Every export returns `Outcome<T> = { ok: T } | { error: ApiError }` and never throws. `ApiError` is `{code: ErrorName, number, message, detail}`.
+     - Inputs are JS objects; a malformed one is `input_format`.
+     - Every call except `start` needs a started session (`not_started` otherwise).
+   - **Builders:**
+     - Each takes `funds: {coins, change, feeRate}` (the wallet's coins, its change address and a fee rate) and runs the fee loop (`build::with_fee`) itself.
+     - Each returns a `BuiltTx`:
+
+       | Field | Content |
+       |---|---|
+       | `transaction` | the Safe JSON for `signPskt`'s `txJsonString`, with the inputs to sign blank |
+       | `id` | final already: v1 transaction IDs exclude signature scripts |
+       | `sign` | `{index, sighashType: 1, kind, publicKey, address}`: KasWare's `signInputs` items, plus who signs |
+       | `masses`, `fee`, `units` | from the built transaction |
+       | `summary` | the wallet's coins in, what comes back, and every output with its address (spec 7: figures come from the built transaction) |
+   - **`BuiltTx` is plain data**, not a handle into wasm memory. So it survives a worker restart, crosses `postMessage` and can be stored. `assemble` first rebuilds the `Unsigned` from it and checks that it is self-consistent:
+     - the blank inputs are exactly the listed ones;
+     - each listed owner is the one its UTXO's script names;
+     - every signature is asked for SIG_HASH_ALL.
+
+     Then it runs part B's `sign::assemble`: the post-sign check, our transaction with only the listed signature scripts taken, the masses, and the engine on every listed input.
+   - **Types (spec 1.1):**
+     - Every input and output type derives `tsify::Tsify`, so `wasm-bindgen` writes it into `web.d.ts`.
+     - The exports carry `unchecked_param_type` and `unchecked_return_type`, so the functions are typed with those types, for example `buildBuy(input: BuyInput): Outcome<BuiltTx>`.
+     - Named string types:
+       - `Dec` is every 64-bit integer, as a decimal string, so values above 2^53 survive JSON, IndexedDB and `postMessage`;
+       - `Hex`, `Address` and `Shares`.
+     - Views:
+       - there is one interface per role, and `StateView` is the union tagged on `role`;
+       - a macro generates them by destructuring each `lottery::state` struct in full, so a new state field without a view field is a compile error;
+       - each D11 (class, key) pair also gets its address.
+     - Why tsify, not opaque strings: the `.d.ts` gets real field types and doc comments, at no run-time cost. tsify is used for declarations only. Values cross through `serde-wasm-bindgen` as plain objects, with `undefined` for absent options, matching the declarations.
+     - Why tsify 0.5.5: it is the last release on wasm-bindgen 0.2.100 (0.5.8 needs 0.2.104), so the build still has one wasm-bindgen. `tsify-macros` is pinned to 0.5.5 to match.
+   - **Extra items in the `.d.ts`:** it also lists rusty-kaspa's own wasm-bindgen items (`ITransaction`, `initConsolePanicHook`, …), which `kaspa-consensus-client` compiles in. They are not our API, and the page imports only ours.
+5. **One Safe JSON serialiser.**
+   - `web::safe_json` is the only copy. It moved from `tn10/src/pskt.rs`, with the network prefix as a parameter.
+   - tn10's `pskt::{to_safe_json, from_json, reserialize}` call it, and tn10 no longer depends on `kaspa-consensus-client` directly.
+   - `from_json` refuses input above 8 MB.
+6. **Networks and addresses** (spec 6.6).
+   - The beta build starts on testnet-10 only (`start("testnet-10")`).
+   - Every address input (payout, referrer, change, deposit owner, `scriptOf`) must carry the started network's prefix (`kaspatest:`); anything else is `address_network`. Output addresses use the same network.
+   - The `simnet` feature (off by default) adds `start("simnet")` with `kaspasim:` addresses, for the private-simnet dev run (spec 8's Playwright suite). See open question 1.
+7. **W4: the mainnet gate.** In a `--features mainnet` build:
+   - `api::start` always returns `mainnet_refused`;
+   - a `#[wasm_bindgen(start)]` function throws it when the module is instantiated;
+   - the session can never start, so every other call is `not_started`. The optimizer then drops the whole API: the mainnet wasm is 1.37 MB, against 6.32 MB.
+   - The quick wallet is compiled out: the `quick_wallet` module, its exports, its `QuickKey` and `QuickSignInput` types and a marker string (`cfg(not(feature = "mainnet"))`). The module also has a `compile_error!` guard.
+8. **The quick wallet's Rust hook** (spec 6.2, S7; the wallet UI is F3):
+   - `quickWalletNew` makes a secp256k1 key from the browser's `crypto.getRandomValues` (getrandom `wasm_js`); the address is the Schnorr P2PK address on the started network.
+   - `quickWalletImport(secretKey)`.
+   - `quickWalletSign({built, secretKey})` signs only the listed inputs whose key it is, with rusty-kaspa v2.1.0's `sign_input` (SIG_HASH_ALL). Its signed Safe JSON then goes through `assemble`, like any wallet's.
+9. **The wRPC probe** (feature `wrpc-probe`, never shipped; `src/wrpc_probe.rs`): see "Anchor proof from a browser" below.
+10. **CLAUDE.md** gains:
+    - the layout line for `web`;
+    - `f1_cases` in the F1 test command;
+    - a "Web API" command line: build, `.d.ts`, native API tests, W1, W4 and the features.
+11. **Unchanged:** no covenant, template or `f1_digests.txt` change.
+    - `crates/.cargo/config.toml` gains the wasm32 test runner.
+    - `.gitattributes` pins `crates/web/tests/fixtures/w1_api.txt`.
+
+### Tests (all new in part C)
+
+- **`lottery/tests/f1_cases.rs`** (written before the derivations were run):
+  - `chain_object_calls_equal_the_fixture_cases`: all 18 calls build exactly `web::build`'s transaction for the fixture case (transaction, entries, inputs to sign, masses, fee, units).
+  - `untrusted_objects_are_refused`, each with its code:
+
+    | Refused input | Code |
+    |---|---|
+    | a state that is not the UTXO's | `chain_mismatch` |
+    | a UTXO of another instance, or with no covenant ID | `chain_mismatch` |
+    | an unconfirmed UTXO | `coin_unconfirmed` |
+    | a coinbase UTXO | `chain_mismatch` |
+    | a ticket's bytes given as a shard | `not_template` |
+    | a value below what the state accounts for (shard, vault, record) | `chain_mismatch` |
+    | an extra or a missing purchase (buy, claim, draw) | `tree_mismatch` |
+    | no live pool | `store_incomplete` |
+    | a draw with one shard's purchase list missing | `store_incomplete` |
+    | an anchor proof with P's fields altered | `anchor_invalid` |
+    | a truncated anchor proof | `anchor_invalid` |
+  - Two boundaries the test documents:
+    - A shard UTXO one sompi richer is a different, valid UTXO, because the value comes from the node. The build spends it, and the successor keeps the extra sompi.
+    - A proof with another X.hash builds off-chain, because only `OpChainblockSeqCommit` on the node knows the chain. Spec 8 says such a proof is "refused by the node".
+  - `referral_below_m_ref_is_omitted`.
+- **`web/tests/api.rs`** (native):
+  - `api_builds_equal_the_library`: every call, as the page's JSON, builds what `lottery::web` builds at the same fee rate, and the `BuiltTx` reads back to the same `Unsigned`.
+  - `api_digests_match_the_golden_file`.
+  - `assemble_takes_a_wallets_signatures_only`:
+    - a stand-in wallet signs all 18 calls, and `assemble` accepts them;
+    - spec 8's mock-wallet list, applied to the returned JSON, is refused: a covenant signature script, an output value, an output script, an extra output, the change address, the lock time and the payload (`signed_changed`), and a listed input left unsigned (`signed_missing`);
+    - our own `BuiltTx` with its sign list removed is refused (`input_format`).
+  - `other_network_addresses_are_refused`:
+    - refused: mainnet, devnet and simnet addresses, a malformed `kaspatest:` string and an empty one;
+    - tried in every builder's change field, and in the payout, the referrer, the deposit owner and `scriptOf`;
+    - only testnet-10 starts.
+  - `untrusted_inputs_never_panic` (W3 at the boundary): mutated JSON inputs; mutated returned Safe JSON into `assemble` and `from_json`; random hex into the decoders. `F1_API_ITERS=n` changes the number of rounds.
+  - `quick_wallet_signs_what_it_owns`.
+  - `views_decode_every_role`: all 11 roles, and every `*Address` field is a `kaspatest:` address.
+  - `verify_roots_and_numbers`.
+- **`web/tests/w1_wasm.rs`** (W1, wasm under Node) and **`web/tests/w4_mainnet.rs`** (W4): below.
+
+### W1 evidence (wasm vs native byte identity)
+
+- Command: `cargo test -j 2 -p web --target wasm32-unknown-unknown --release --test w1_wasm -- --nocapture`, with the CC/AR variables set. The runner is `wasm-bindgen-test-runner` 0.2.100, under Node v24.14.0.
+- Output:
+```
+running 2 tests
+W1 library: 77 digest lines equal the native golden file
+test w1_library_digests_equal_native ... ok
+W1 API: 18 builds through the JS boundary equal the native golden file
+test w1_api_through_the_js_boundary ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.36s
+```
+- What it covers:
+  - **The library half:** `lottery::digest::all_lines()`, computed in wasm, against `lottery/tests/fixtures/f1_digests.txt`, the native golden file written before F1. It covers every template's ABI output and the 21 M1–M8 fixture transactions, with their entries, script units, masses and storage-mass commits.
+  - **The API half:** the 18 web fixture calls, passed as JS objects through the real exports. Each `BuiltTx` is read back from JS, digested, and compared with `web/tests/fixtures/w1_api.txt`, the same file the native `api_digests_match_the_golden_file` compares.
+  - It also checks that calls before `start` return `not_started`.
+- Negative control: with one digit of `w1_api.txt` line 3 changed, the wasm test failed with `claim k=4 (buildClaim): the wasm BuiltTx differs from the native one`. The file was then restored.
+
+### W4 evidence (mainnet gate)
+
+- Command: `cargo test -j 2 -p web --release --test w4_mainnet -- --nocapture` (206 s; it builds in `target/w4`).
+```
+beta build 6315531 B, mainnet build 1368162 B
+quickWalletNew               beta    4  mainnet    0
+quickWalletImport            beta    4  mainnet    0
+quickWalletSign              beta    5  mainnet    0
+quick_wallet                 beta    8  mainnet    0
+KASPALIONARE_QUICK_WALLET    beta    1  mainnet    0
+beta: started on testnet-10 ; start(mainnet) refused: address_network
+mainnet: load refused: mainnet_refused - This build refuses to run on mainnet.
+test w4_mainnet_build_has_no_quick_wallet_and_refuses_to_start ... ok
+```
+- The scan searches the bytes of the whole `.wasm` file. That covers:
+  - the exports;
+  - the `name` section, with every mangled `web::quick_wallet::…` symbol;
+  - the data section;
+  - the custom sections, such as the TypeScript declarations.
+
+  The beta build is the positive control: it must contain every name.
+- The start check runs each build through `wasm-bindgen --target nodejs` and then Node.
+
+### Anchor proof from a browser (spec 6.1): the wRPC finding
+
+- **It compiles.** `kaspa-wrpc-client` v2.1.0 compiles into this wasm (`--features wrpc-probe`) once ring gets its browser random source: `ring`'s feature `wasm32_unknown_unknown_js`, as rusty-kaspa's own `rpc/wrpc/wasm/Cargo.toml:43` sets it. Without it, rustls and ring fail to compile for wasm32.
+- **It runs.** Under Node, which offers the same WebSocket and fetch APIs as a browser, `wrpcProbe()`:
+  1. connected through the public resolver to `wss://muon-10.kaspa.blue/kaspa/testnet-10/wrpc/borsh`;
+  2. read the sink;
+  3. called `GetSeqCommitLaneProof(sink, COINBASE_LANE_KEY)`;
+  4. recomputed the block's KIP-21 commitment from the proof (lanes root from the SMT proof, then the activity root, the state root and the commitment).
+
+  The result equals the header's `accepted_id_merkle_root`: `{"block":"b78912f0…4c39","commitmentMatches":true,"daaScore":"605799412","hasLane":true,"network":"testnet-10","smtProofBytes":130}`. It took 21.4 s, most of it the resolver and the connection.
+- **Not tried:** a real browser tab. Open there: the CORS rules of the resolver's HTTP endpoint, and `wss` from an `https` page. kaspa-wasm itself runs in browsers through the same resolver, so this is expected to work; F3's first browser run settles it.
+- **Cost:** +1.86 MB raw, +578 KB gzip, +372 KB brotli. After wasm-bindgen the build is 7,284,023 B, against 5,423,397 B without the client.
+- **Still missing** before the browser can build the 272-byte proof itself: the miner payload root. It needs the coinbase payload of every mergeset block (one `get_block` each), which is what `tn10/src/anchor.rs` assembles. That code is generic over `RpcApi`; moving it to a shared crate (or to `lottery`) is F2/F5 work.
+- So the spec 6.1 fallback is not forced: both paths stay open (proposed row (i)).
+
+### Sizes (release, the beta build with the whole API reachable)
+
+| Build | raw | gzip -9 | brotli -q 11 |
+|---|---|---|---|
+| opt-level 3, cargo output | 6,315,533 | 2,326,230 | 1,933,984 |
+| opt-level 3, after wasm-bindgen | 5,423,397 | 2,174,290 | 1,846,862 |
+| opt-level 3, + wasm-opt -O2 | 4,707,149 | 2,108,039 | 1,813,946 |
+| opt-level 3, + wasm-opt -Oz | 4,506,713 | 2,097,974 | 1,807,866 |
+| opt-level "s", after wasm-bindgen | 4,975,004 | 2,032,482 | 1,763,138 |
+| opt-level "s", + wasm-opt -Oz | **3,933,392** | **1,914,548** | **1,685,156** |
+| mainnet build (refuses to start) | 1,368,162 | | |
+| with `wrpc-probe`, opt-level 3, after wasm-bindgen | 7,284,023 | 2,752,194 | 2,218,944 |
+
+- Part A's link probe was 5.43 MB at opt-level 3 before wasm-bindgen. It did not reach `lottery::web` and had no Safe JSON. This build adds the API, `kaspa-consensus-client` and the views (6.32 MB).
+- The smallest shipped form is opt-level "s", then wasm-bindgen, then `wasm-opt -Oz`: 1.91 MB gzip, 1.69 MB brotli. F3's build pipeline should use it. It needs binaryen, with `wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals`.
+- **Embedded templates: keep the pretty JSON.**
+  - Compact JSON would save 227 KB raw (795,518 → 568,526 B), but only 13.4 KB gzip (41,964 → 28,525 B) and 9.6 KB brotli (24,176 → 14,613 B).
+  - That is about 0.6% of the compressed bundle, and the format is guarded by W2 and pinned byte for byte. Not worth changing.
+
+### Tool versions (installed or used in part C)
+
+- `wasm-bindgen-cli` 0.2.100, installed with `cargo install wasm-bindgen-cli --version 0.2.100 --locked`. It puts `wasm-bindgen`, `wasm-bindgen-test-runner` and `wasm2es6js` in `~/.cargo/bin`.
+- Node v24.14.0, already installed. The `wasm-bindgen-test` crate is 0.3.50, which matches 0.2.100.
+- binaryen `wasm-opt` 131, from the npm package `binaryen@131.0.0`. Installing it caused the incident in open question 2.
+- brotli 1.2.0 and gzip 1.14 (Git Bash). LLVM clang and llvm-ar as in part A.
+- Crates added to Cargo.lock:
+  - `tsify` 0.5.5, `tsify-macros` 0.5.5 and `serde_derive_internals` 0.29.1;
+  - `wasm-bindgen-test` 0.3.50, with its macro crate, `minicov`, `walkdir` and `same-file`.
+- `web` also depends on crates that were already in the lock: `kaspa-consensus-client`, `kaspa-addresses` and `serde-wasm-bindgen`. For `wrpc-probe` it adds the wRPC client, `kaspa-smt`, `kaspa-seq-commit`, `ring` and `wasm-bindgen-futures`.
+
+### Commands run (outputs)
+
+- `cargo test -j 2 -p lottery --release --test f1_cases --test f1_web -- --nocapture --test-threads=1`:
+  - `f1_cases` `3 passed`; all 18 calls print "chain objects = fixture case";
+  - `f1_web` `6 passed`, including the extended `error_codes_are_stable`.
+- `cargo test -j 2 -p web --release --test api -- --nocapture --test-threads=1`: `8 passed; 0 failed; 1 ignored` (the ignored one is `write_golden`).
+  - The eight mock-wallet edits are each refused with their code.
+  - The fuzz test printed "138 mutated calls parsed, 10 built, none panicked" at 40 rounds. The default is now 100 rounds.
+- `cargo test -j 2 -p web --release --features simnet --test api other_network`: `1 passed`.
+- `cargo test -j 2 -p web --release --test api -- --ignored write_golden`: wrote the 18 lines of `w1_api.txt`.
+- W1 and W4: above.
+- `cargo build -j 2 -p web --target wasm32-unknown-unknown --release`: `Finished`. `wasm-bindgen --target web --out-dir target/web-pkg …` writes `web.d.ts` (1,725 lines), `web.js` and `web_bg.wasm`.
+- `cargo check -j 2 -p web --features simnet` and `--features simnet,mainnet`: `Finished`, with no warnings.
+- `cargo build -j 2 -p web --target wasm32-unknown-unknown --release --features wrpc-probe --target-dir target/wrpc`:
+  - before `ring/wasm32_unknown_unknown_js` was added: 6 rustls errors (`SystemRandom: ring::rand::SecureRandom` not satisfied);
+  - after: `Finished`. The Node run is quoted above.
+
+### Files changed (F1 part C)
+
+- `crates/lottery/src/web/mod.rs`: the code table macro, codes 27–30, `TS_DECL`, `from_name`, and the modules `cases` and `fixtures`.
+- `crates/lottery/src/web/cases.rs` and `crates/lottery/src/web/fixtures.rs` (both new).
+- `crates/lottery/src/smt.rs`: `Tree::purchases`.
+- `crates/lottery/tests/f1_cases.rs` (new); `crates/lottery/tests/f1_web.rs` (the code test extended).
+- `crates/web/Cargo.toml`.
+- `crates/web/src/{lib,api,bindings,convert,dto,views,safe_json,quick_wallet,wrpc_probe}.rs`; all are new except `lib.rs`.
+- `crates/web/tests/{api.rs, w1_wasm.rs, w4_mainnet.rs, common/mod.rs, fixtures/w1_api.txt}` (all new).
+- `crates/tn10/Cargo.toml`: `web` replaces `kaspa-consensus-client`.
+- `crates/tn10/src/pskt.rs`: the Safe JSON functions call `web::safe_json`.
+- `crates/.cargo/config.toml` (the wasm32 runner), `crates/Cargo.lock`, `.gitattributes`, `CLAUDE.md`, and this file.
+
+### Proposed DECISIONS rows (for the orchestrator)
+
+- (a) **The page builds from chain objects** (`lottery::web::cases`).
+  - The page passes the covenant UTXOs with their state bytes, the purchases and the user's choices.
+  - Rust derives every case field, and requires the built inputs to be exactly the given UTXOs.
+  - No `*Case` crosses the boundary.
+- (b) **The boundary:**
+  - every call returns `{ok} | {error}`, and never throws;
+  - every 64-bit integer is a decimal string and bytes are hex (`Dec`, `Hex`, `Address` in the `.d.ts`);
+  - unknown input fields are refused;
+  - types come from tsify 0.5.5 (declarations only), and values cross through serde-wasm-bindgen;
+  - `BuiltTx` is plain data, and `assemble` checks it again.
+- (c) **One error table** (a macro), with the appended codes 27 `address_network`, 28 `input_format`, 29 `not_started` and 30 `mainnet_refused`. The TypeScript `ErrorName` union is generated from it.
+- (d) **Networks:** the beta build starts on testnet-10 only and refuses every other address prefix. The `simnet` feature (dev only) adds the private simnet, with `kaspasim:` addresses (open question 1).
+- (e) **The mainnet gate (W4):** a `--features mainnet` build refuses at instantiation and at `start`, and compiles out the quick wallet and its types. W4 checks this with a byte scan, a positive control and a Node load.
+- (f) **The quick wallet's key hook:** a secp256k1 key from getrandom (`wasm_js`), signing with rusty-kaspa's `sign_input`.
+  - It signs only the listed inputs it owns, and its output passes the same `assemble` as any wallet's.
+  - Spec 6.2 names the kaspa-wasm `PrivateKey`. This uses the same secp256k1 key type and rusty-kaspa's own signer from Rust, so the page loads no second wasm package.
+- (g) **One Safe JSON serialiser**, in `web::safe_json`; tn10 calls it.
+- (h) **The referral and the reserve funders:** the referral is paid only if a referrer is named and r ≥ M_REF, decided in Rust. The caller's change address funds the reserves in `close()` and `draw()`.
+- (i) **The anchor proof:** the rusty-kaspa wRPC client runs in wasm (with `ring/wasm32_unknown_unknown_js`) and fetches `GetSeqCommitLaneProof` from testnet-10.
+  - The browser can build the proof itself once `tn10/src/anchor.rs` is shared (F2/F5), at +372 KB brotli.
+  - The indexer fallback stays available.
+- (j) **The templates stay pretty JSON:** compact JSON would save only 9.6 KB brotli.
+- (k) **The shipped wasm** is opt-level "s", then wasm-bindgen, then `wasm-opt -Oz`: 1.91 MB gzip, 1.69 MB brotli.
+
+### Open questions and owner decisions
+
+1. **Simnet addresses: needs a decision.**
+   - The conflict: spec 6.6 says every address that is not `kaspatest:` is refused, but spec 8 runs the whole end-to-end suite on the private simnet, whose addresses are `kaspasim:`.
+   - What part C did: the beta build stays testnet-10 only, and a `simnet` build feature adds the simnet, for the local dev run only.
+   - Trust: none; simnet coins exist only on this PC.
+   - Money: none.
+   - Work: none now. F3 builds the dev page with `--features simnet`.
+   - The alternative: run the Playwright suite on testnet-10 only. That is slower and needs faucet coins.
+2. **An accident outside the repo: the owner should know.**
+   - What happened: I ran `npm install` to get binaryen from the scratchpad folder. npm walked up the folders to `C:\Users\endri`, which has a `node_modules` folder, and treated the home folder as its project. It:
+     - created `C:\Users\endri\package.json` and `package-lock.json`, listing only `binaryen`;
+     - removed the 491 packages that were in `C:\Users\endri\node_modules` (641 counting nested ones). They are web3 libraries and related tools, such as wagmi, viem, ethers, hardhat, rainbowkit, walletconnect, supabase and react.
+   - Likely impact: no project under `Documents\Kaspalionare` used them. They were not listed in any `package.json` in the home folder, so they were probably left over from an install run there.
+   - If another project of yours relied on them through the home folder, run `npm install` in that project.
+   - Records: the list of removed packages and npm's log are in the session scratchpad (`home-node_modules-removed.txt`, `npm-install-log-that-pruned-home.log`). Their exact versions cannot be recovered.
+   - Nothing was done to undo it, because reinstalling at guessed versions could make it worse.
+3. **wRPC in the page, or the indexer's proof (F2/F5).**
+   - Trust: with the client in the page, the page does not depend on the indexer for the anchor proof. The chain checks the proof in `draw()` either way, so this is about availability, not money.
+   - Cost: +372 KB brotli for the page.
+   - Work: sharing `anchor.rs`.
+4. **Allocation limits on the page** (from part B, unchanged).
+   - JSON inputs are bounded: Safe JSON 8 MB, hex 4 M digits, coins ≤ 8, pools ≤ 64, shards ≤ 16, purchase lists ≤ 16.
+   - But a huge JS object is converted before those checks run. The worker should cap what it accepts from the indexer and from backup files (F3/F4).
+5. **Left for later stages:**
+   - the time to build a buy in a browser (spec 8 quality); in Node, the whole W1 run took 0.36 s for all builds;
+   - `webstore/1` (F4);
+   - the view models for the claim panel (prize, h, accrual), which should also come from Rust.
+
+### What the reviewer should attack
+
+- **Byte identity:**
+  - W1, both halves;
+  - `f1_cases::chain_object_calls_equal_the_fixture_cases`;
+  - `api_builds_equal_the_library`.
+
+  Is any M1–M8 fixture shape missing from `web::fixtures`? `refresh` and `set_params` are not page actions, so they are covered only by the library half.
+- **Rule logic outside Rust:** by construction, the API's callers hold none. Check `cases.rs` instead:
+  - its derivations against the covenants: `reserve_of`, the pot, the lock times (`T + D_RET`, `pool.deadline`), `at_age`, `set_void`;
+  - that `chain_inputs` really covers every derived value.
+- **The post-sign check:**
+  - `api::unsigned_of`'s self-consistency check: could a stored or tampered `BuiltTx` make `assemble` accept a transaction other than the one shown?
+  - how `assemble` uses part B's check.
+- **Untrusted input:**
+  - the indexer's state bytes and purchases (`chain_mismatch`, `tree_mismatch`);
+  - the returned Safe JSON, parsed by kaspa-consensus-client under mutation;
+  - `deny_unknown_fields` and the size caps;
+  - the anchor-proof boundary: X.hash can only be checked on-chain.
+- **W4:**
+  - could a byte scan miss a quick-wallet path, for example inlined code with no name?
+  - `--features mainnet,simnet` cannot start, because `start` refuses first.
+
+### Suite at the end of F1 part C
+
+- `cargo test -j 2 --no-fail-fast` (from `crates/`, debug, the default members `harness` and `lottery`): 54 test binaries, 1,104 passed, 0 failed, 2 ignored (`f1_bytes::write_golden` and the old `m4_mutants` one).
+  - This includes `f1_cases` 3/3, `f1_web` 6/6, `f1_w3` 4/4, `f1_unsigned` 3/3, `f1_bytes` 1/1, `f1_templates` 4/4 and `f0_unsigned` 2/2.
+  - It also includes `m7_seed` 15/15: the SP12 seed gate still works.
+  - As before F1 (D113), `spike_vdf` overflowed its stack in debug (`sv_measure_masses_and_stack`, STATUS_STACK_OVERFLOW).
+- `cargo test -j 2 -p lottery --release --test spike_vdf`: `14 passed; 0 failed` (359 s).
+- `cargo test -j 1 --release -p tn10`: `25 passed; 0 failed`. The 3 `pskt` tests now run through `web::safe_json`.
+- `crates/web`:
+  - `api` 8/8, with 1 ignored;
+  - W1 2/2 in wasm;
+  - W4 1/1.
+- Native transactions are byte-identical: `f1_bytes` (77 golden lines) is unchanged and green, and W1 holds in wasm.
+- No covenant or template change.
+- Not run: `simnet` (RocksDB, about 14 minutes). It uses `lottery`'s default features, and the library API only gained additions.

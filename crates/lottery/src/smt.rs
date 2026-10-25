@@ -125,6 +125,26 @@ impl Tree {
         out
     }
 
+    /// A purchase list in compact form (six bytes per combination) that rebuilds this tree:
+    /// each held combination, rank then bonus ascending, repeated by its count (front-end F1
+    /// part C: the fixture adapters give the web builders the purchases behind a fixture
+    /// tree; the root depends on the counts only, not on the order).
+    pub fn purchases(&self) -> Vec<u8> {
+        let mut ranks: Vec<&u32> = self.leaves.keys().collect();
+        ranks.sort();
+        let mut out = vec![];
+        for &r in ranks {
+            let main = crate::combo::unrank(r);
+            for (b, &n) in self.leaves[&r].iter().enumerate() {
+                for _ in 0..n {
+                    out.extend_from_slice(&main);
+                    out.push(b as u8 + 1);
+                }
+            }
+        }
+        out
+    }
+
     /// Set a key's counts (used to preload trees for boundary tests).
     pub fn set(&mut self, rank: u32, counts: Vec<u16>) {
         assert_eq!(counts.len(), self.m);

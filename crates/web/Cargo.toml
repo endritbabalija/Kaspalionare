@@ -7,16 +7,62 @@ license.workspace = true
 publish = false
 
 # Front-end `crates/web` (spec frontend 6.1): the `lottery` builders for the browser (wasm32,
-# a Web Worker). F1 part A: only the link probe below, so the wasm build links and can be
-# measured; part B adds the wasm-bindgen API (decode, build, verify, estimate). Not a default
-# workspace member. Build command and environment: CLAUDE.md, "wasm build".
+# a Web Worker), behind a wasm-bindgen API (F1 part C): start, decode, verify, build, the
+# post-sign check and assembly, estimates, the Safe JSON the wallets take, and the quick
+# testnet wallet's key hook. The page's only type source is the `.d.ts` wasm-bindgen emits
+# (the input and output types come from the Rust types here through tsify). Not a default
+# workspace member. Commands: CLAUDE.md, "wasm build", "W1", "W4".
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# A `mainnet` build refuses to start and has no quick wallet (spec 6.6, W4; same pattern as
+# the genesis refusal and the SP12 seed gate). The quick wallet is compiled iff not mainnet.
 mainnet = ["lottery/mainnet"]
+# The private simnet (D125, `kaspasim:` addresses) as a second network for the local dev run
+# (spec 8's Playwright suite). Off in the beta build: there, only testnet-10 starts.
+simnet = []
+# F1 part C, spec 6.1 "Anchor proof": a compile-and-run probe of the rusty-kaspa v2.1.0 wRPC
+# client in wasm, calling GetSeqCommitLaneProof (`src/wrpc_probe.rs`). Off in every build the
+# page ships; the networking itself is F2/F5 work.
+wrpc-probe = ["dep:kaspa-wrpc-client", "dep:kaspa-rpc-core", "dep:kaspa-seq-commit", "dep:kaspa-smt", "dep:wasm-bindgen-futures", "dep:ring"]
 
 [dependencies]
 # No `compiler`: the embedded templates only, no SilverScript compiler, no file reads.
 lottery = { path = "../lottery", default-features = false }
+harness = { path = "../harness", default-features = false }
+kaspa-consensus-core.workspace = true
+kaspa-txscript.workspace = true
+kaspa-hashes.workspace = true
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+# The Safe JSON of kaspa-wasm's `Transaction.serializeToSafeJSON`/`deserializeFromSafeJSON`, the
+# format KasWare's and Kaspire's `signPskt` take (F0); the one serialiser (tn10 uses it from here).
+kaspa-consensus-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+# The versions rusty-kaspa v2.1.0 already links (Cargo.lock): one copy of each.
+wasm-bindgen = "=0.2.100"
+serde-wasm-bindgen = "=0.6.5"
+# TypeScript declarations from the Rust types (the last tsify on wasm-bindgen 0.2.100).
+tsify = { version = "=0.5.5", default-features = false, features = ["js"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+secp256k1.workspace = true
+blake2b_simd.workspace = true
+# The quick wallet's key (the browser's crypto.getRandomValues on wasm32, `wasm_js`).
+getrandom = "=0.3.4"
+# wrpc-probe only (the versions tn10 links).
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16", optional = true }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16", optional = true }
+kaspa-seq-commit = { workspace = true, optional = true }
+kaspa-smt = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16", optional = true }
+wasm-bindgen-futures = { version = "=0.4.50", optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "=0.3.4", features = ["wasm_js"] }
+# wrpc-probe only: the wRPC client links rustls with ring, which needs its browser random source on
+# wasm32 (as rusty-kaspa's own `rpc/wrpc/wasm/Cargo.toml:43` sets it).
+ring = { version = "=0.17.14", features = ["wasm32_unknown_unknown_js"], optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+# W1 under Node (`wasm-bindgen-test-runner`, the CLI at the same version as wasm-bindgen).
+wasm-bindgen-test = "=0.3.50"

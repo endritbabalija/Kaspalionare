@@ -1,7 +1,7 @@
 //! Front-end F0 (spec frontend 6.2, 9): the wallet's transaction format and the post-sign
 //! check.
 //!
-//! Format. KasWare's `signPskt({txJsonString, options})` takes and returns a transaction "in
+//! Format (F1 part C: the serialiser itself is `web::safe_json`, shared with the page). KasWare's `signPskt({txJsonString, options})` takes and returns a transaction "in
 //! "Safe JSON" format that can be deserialized by kaspa-wasm's
 //! `Transaction.deserializeFromSafeJSON()`" (docs.kasware.xyz, wallet/dev-base/
 //! kaspa-transaction, read 2026-10-25; Kaspire's `signPskt` takes the same `txJsonString`,
@@ -33,9 +33,7 @@
 //! sample has `mass`, v2.1.0 writes `storageMass` and reads both).
 
 use kaspa_addresses::Prefix;
-use kaspa_consensus_client::{numeric, string::SerializableTransaction as Safe};
-use kaspa_consensus_core::tx::{SignableTransaction, Transaction, UtxoEntry};
-use kaspa_txscript::extract_script_pub_key_address;
+use kaspa_consensus_core::tx::{Transaction, UtxoEntry};
 
 type R<T> = Result<T, String>;
 
@@ -45,34 +43,21 @@ pub fn blanked(tx: &Transaction, blank: &[usize]) -> R<Transaction> {
     lottery::web::sign::blanked(tx, blank).map_err(|e| e.to_string())
 }
 
-/// The Safe JSON of `tx` with `entries`, the signature scripts of `blank` emptied.
+/// The Safe JSON of `tx` with `entries`, the signature scripts of `blank` emptied (F1 part C:
+/// the one serialiser is `web::safe_json`, which the page uses too).
 pub fn to_safe_json(tx: &Transaction, entries: &[UtxoEntry], blank: &[usize]) -> R<String> {
-    let t = blanked(tx, blank)?;
-    let mut s = Safe::from_signable_transaction(&SignableTransaction::with_entries(t, entries.to_vec())).map_err(|e| e.to_string())?;
-    for inp in &mut s.inputs {
-        inp.utxo.address = extract_script_pub_key_address(&inp.utxo.script_public_key, Prefix::Testnet).ok();
-    }
-    s.serialize_to_json().map_err(|e| e.to_string())
+    web::safe_json::to_safe_json(tx, entries, blank, Prefix::Testnet)
 }
 
 /// Parse a wallet's returned transaction: Safe JSON (strings), else the numeric JSON form.
 /// Returns the transaction, its entries as stated, and which form parsed.
 pub fn from_json(json: &str) -> R<(Transaction, Vec<Option<UtxoEntry>>, &'static str)> {
-    let (st, form) = match Safe::deserialize_from_json(json) {
-        Ok(s) => (SignableTransaction::try_from(s).map_err(|e| format!("Safe JSON: {e}"))?, "safe"),
-        Err(e1) => {
-            let n = numeric::SerializableTransaction::deserialize_from_json(json).map_err(|e2| format!("not Safe JSON ({e1}) nor numeric JSON ({e2})"))?;
-            (SignableTransaction::try_from(n).map_err(|e| format!("numeric JSON: {e}"))?, "numeric")
-        }
-    };
-    let mut tx = st.tx;
-    tx.finalize();
-    Ok((tx, st.entries, form))
+    web::safe_json::from_json(json)
 }
 
 /// Re-serialize a parsed transaction as Safe JSON (the stand-in signer's output).
 pub fn reserialize(tx: &Transaction, entries: &[UtxoEntry]) -> R<String> {
-    to_safe_json(tx, entries, &[])
+    web::safe_json::reserialize(tx, entries, Prefix::Testnet)
 }
 
 /// The outcome of the post-sign check (F1 part B: moved to `lottery::web::sign`, so the

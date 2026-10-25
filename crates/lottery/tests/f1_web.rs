@@ -399,8 +399,17 @@ fn error_codes_are_stable() {
         table.join(","),
         "1 bytes_length,2 not_template,3 not_canonical,4 state_range,5 chain_mismatch,6 tree_mismatch,7 purchase_invalid,8 store_format,\
          9 store_incomplete,10 anchor_invalid,11 input_range,12 funding_short,13 wallet_script,14 coin_unconfirmed,15 overflow,16 refused,\
-         17 policy,18 encode,19 mass,20 engine,21 templates,22 fee_rate,23 signed_changed,24 signed_missing,25 signature_form,26 signature_invalid"
+         17 policy,18 encode,19 mass,20 engine,21 templates,22 fee_rate,23 signed_changed,24 signed_missing,25 signature_form,26 signature_invalid,\
+         27 address_network,28 input_format,29 not_started,30 mainnet_refused"
     );
     let msgs: std::collections::HashSet<&str> = Code::ALL.iter().map(|c| c.message()).collect();
     assert_eq!(msgs.len(), Code::ALL.len(), "one distinct message per code");
+    // F1 part C: numbers are 1.. in table order, names round-trip, and the TypeScript union
+    // (emitted into crates/web's .d.ts) lists every name.
+    for (i, c) in Code::ALL.iter().enumerate() {
+        assert_eq!(c.number() as usize, i + 1, "{c}: number");
+        assert_eq!(Code::from_name(c.as_str()), Some(*c), "{c}: from_name");
+        assert!(Code::TS_DECL.contains(&format!("\"{}\" | ", c.as_str())), "{c}: TS_DECL");
+    }
+    assert!(Code::TS_DECL.contains("export type ErrorName = \"bytes_length\" | ") && Code::TS_DECL.ends_with(" | never;\n"));
 }

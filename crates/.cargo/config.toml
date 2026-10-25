@@ -4,3 +4,7 @@
 # are unaffected. https://docs.rs/getrandom/0.3.4/#webassembly-support
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+# Front-end F1 part C (W1): `cargo test --target wasm32-unknown-unknown` runs the test binaries
+# under Node with wasm-bindgen's runner (`cargo install wasm-bindgen-cli --version 0.2.100`, the
+# version of the wasm-bindgen crate in Cargo.lock).
+runner = "wasm-bindgen-test-runner"

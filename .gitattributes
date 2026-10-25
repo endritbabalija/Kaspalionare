@@ -5,3 +5,5 @@
 # holds the committed bytes exactly.
 crates/lottery/templates/** -text
 crates/lottery/tests/fixtures/f1_digests.txt -text
+# F1 part C: the API digests (crates/web/tests/api.rs and w1_wasm.rs compare against them).
+crates/web/tests/fixtures/w1_api.txt -text

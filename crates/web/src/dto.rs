@@ -1,0 +1,428 @@
+//! The types that cross the wasm boundary (F1 part C). Each derives `Tsify`, so the `.d.ts`
+//! wasm-bindgen emits declares it: the page's only type source (spec 1.1, no hand-written
+//! mirror). Conventions, the same for every type:
+//! - every 64-bit integer (sompi amounts, DAA scores, masses, shares, i64 state fields) is a
+//!   decimal string, so values above 2^53 survive JSON, IndexedDB and `postMessage`;
+//! - bytes are lowercase hex; a script public key is the Safe JSON form (2-byte big-endian
+//!   version, then the script);
+//! - an address is a `kaspatest:` address (testnet-10; `kaspasim:` only in a `simnet` build
+//!   started on the simnet); any other prefix is refused (`address_network`);
+//! - field names are camelCase; an unknown input field is refused (`input_format`), so a
+//!   misspelt option never goes unnoticed.
+
+use serde::{Deserialize, Serialize};
+use tsify::Tsify;
+
+// ------------------------------------------------------------------------------ named strings
+
+/// A 64-bit integer as a decimal string (sompi amounts, DAA scores, masses, shares, the i64
+/// fields of states).
+#[tsify::declare]
+pub type Dec = String;
+
+/// Bytes as lowercase hex (a script public key is the Safe JSON form: 2-byte big-endian
+/// version, then the script).
+#[tsify::declare]
+pub type Hex = String;
+
+/// An address of the started network (`kaspatest:` on testnet-10).
+#[tsify::declare]
+pub type Address = String;
+
+/// The five lower-tier shares of a controller or marker (D18 slot order), as decimals.
+#[tsify::declare]
+pub type Shares = Vec<Dec>;
+
+// ------------------------------------------------------------------------------ outcome
+
+/// An error crossing the boundary (spec 1.1 AX): the stable code, its number and its one
+/// message (what the page shows), and the detail (for logs and developers, never page copy).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ApiError {
+    #[tsify(type = "ErrorName")]
+    pub code: String,
+    pub number: u16,
+    pub message: String,
+    pub detail: String,
+}
+
+impl From<lottery::web::Error> for ApiError {
+    fn from(e: lottery::web::Error) -> Self {
+        Self { code: e.code.as_str().into(), number: e.code.number(), message: e.code.message().into(), detail: e.detail }
+    }
+}
+
+/// Every function returns `{ ok: T }` or `{ error: ApiError }`; none throws, none panics.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Outcome<T> {
+    Ok(T),
+    Error(ApiError),
+}
+
+// ------------------------------------------------------------------------------ start
+
+/// What `start` reports.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Info {
+    /// "testnet-10" (or "simnet" in a `simnet` build).
+    pub network: String,
+    /// The address prefix every address must carry ("kaspatest").
+    pub address_prefix: String,
+    /// This crate's version.
+    pub version: String,
+    /// The committed B_MAX (combinations per ticket) and K_MAX (shards per round).
+    pub b_max: u32,
+    pub k_max: u32,
+    /// The embedded templates' hashes (hex), by role name.
+    pub templates: Vec<TemplateHash>,
+}
+
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TemplateHash {
+    pub name: String,
+    pub hash: Hex,
+}
+
+// ------------------------------------------------------------------------------ chain objects
+
+/// A UTXO as a public node returns it (outpoint and entry, flattened; the Safe JSON field
+/// names). Extra fields (such as `address`) are ignored.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Utxo {
+    /// 32 bytes, hex.
+    pub transaction_id: Hex,
+    pub index: u32,
+    /// Sompi.
+    pub amount: Dec,
+    /// Safe JSON form.
+    pub script_public_key: Hex,
+    pub block_daa_score: Dec,
+    pub is_coinbase: bool,
+    /// 32 bytes, hex; null for a plain UTXO.
+    #[serde(default)]
+    pub covenant_id: Option<Hex>,
+}
+
+/// A covenant UTXO and the state bytes given for it (by the indexer API or the local copy;
+/// checked against the UTXO's script before use, spec 6.3).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CovUtxo {
+    pub utxo: Utxo,
+    /// The encoded state bytes, hex.
+    pub state: Hex,
+}
+
+/// One combination: five main numbers (1..=30, ascending, distinct) and a bonus (1..=m).
+#[derive(Tsify, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Combination {
+    pub main: [u8; 5],
+    pub bonus: u8,
+}
+
+/// What pays for a transaction: the wallet's confirmed coins (in input order), its change
+/// address (also the caller's reward address in `close()` and `draw()`, and the reserve
+/// funder there), and the fee rate in sompi per gram (the node's estimate; 100..=1000).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Funds {
+    pub coins: Vec<Utxo>,
+    pub change: Address,
+    pub fee_rate: u32,
+}
+
+// ------------------------------------------------------------------------------ build inputs
+
+/// `buy()` (spec S1): the live shard and its purchases so far, the bundle, the payout, and the
+/// referrer (paid only if the referral reaches M_REF; below it the output is omitted).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuyInput {
+    pub covenant_id: Hex,
+    pub shard: CovUtxo,
+    /// The shard's purchases, six bytes each in purchase order, hex.
+    pub purchases: Hex,
+    pub bundle: Vec<Combination>,
+    pub payout: Address,
+    #[serde(default)]
+    pub referrer: Option<Address>,
+    pub funds: Funds,
+}
+
+/// `claim()` (spec S2): the live ticket, the live pools of its round, the round's purchases
+/// (one hex list per shard, shard order), and the index (null: the first unclaimed index
+/// that wins a tier with a live pool).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimInput {
+    pub covenant_id: Hex,
+    pub ticket: CovUtxo,
+    pub pools: Vec<CovUtxo>,
+    pub purchases: Vec<Hex>,
+    #[serde(default)]
+    pub index: Option<u32>,
+    pub funds: Funds,
+}
+
+/// `return_deposit()`: the live ticket alone (after T + D_RET), or with an expired pool of
+/// its round.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReturnInput {
+    pub covenant_id: Hex,
+    pub ticket: CovUtxo,
+    #[serde(default)]
+    pub pool: Option<CovUtxo>,
+    pub funds: Funds,
+}
+
+/// `close()` (spec S4): the live controller, params and the round's k shards in shard
+/// order; `virtualDaaScore` is the node's (the stale-input guard).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseInput {
+    pub covenant_id: Hex,
+    pub controller: CovUtxo,
+    pub params: CovUtxo,
+    pub shards: Vec<CovUtxo>,
+    pub virtual_daa_score: Dec,
+    pub funds: Funds,
+}
+
+/// `draw()` (spec S4): the live drawer, marker, vault and next controller, expired pools to
+/// absorb, the round's purchases (one hex list per shard), and the 272-byte anchor proof
+/// (null: the void, after D + draw_window).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DrawInput {
+    pub covenant_id: Hex,
+    pub drawer: CovUtxo,
+    pub marker: CovUtxo,
+    pub vault: CovUtxo,
+    pub controller: CovUtxo,
+    #[serde(default)]
+    pub absorbed: Vec<CovUtxo>,
+    pub purchases: Vec<Hex>,
+    #[serde(default)]
+    pub anchor_proof: Option<Hex>,
+    pub funds: Funds,
+}
+
+/// `request_deposit()` (spec S5): `amount` sompi (at least MIN_DEPOSIT) for `owner`.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DepositInput {
+    pub covenant_id: Hex,
+    pub vault: CovUtxo,
+    pub amount: Dec,
+    pub owner: Address,
+    pub funds: Funds,
+}
+
+/// The kind of key behind an address (D67).
+#[derive(Tsify, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyKind {
+    Schnorr,
+    Ecdsa,
+    P2sh,
+}
+
+/// The owner input of a withdrawal: a confirmed coin at the position owner's address and the
+/// owner's public key (x-only for Schnorr and P2SH, 33 bytes for ECDSA).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerInput {
+    pub coin: Utxo,
+    pub kind: KeyKind,
+    pub public_key: Hex,
+}
+
+/// `request_withdraw()` (spec S5): `shares` of the live position (the whole position, or
+/// w >= wmin with a remainder >= wmin). `funds.coins` may be empty: the owner coin pays.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WithdrawInput {
+    pub covenant_id: Hex,
+    pub vault: CovUtxo,
+    pub position: CovUtxo,
+    pub shares: Dec,
+    pub owner: OwnerInput,
+    pub funds: Funds,
+}
+
+/// `settle()` (spec S5): the live request against the live record of its round.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettleInput {
+    pub covenant_id: Hex,
+    pub request: CovUtxo,
+    pub record: CovUtxo,
+    pub funds: Funds,
+}
+
+// ------------------------------------------------------------------------------ built
+
+/// An input the wallet must sign: KasWare's and Kaspire's `signInputs` item (`index`,
+/// `sighashType` = 1, SIG_HASH_ALL) plus who signs it.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SignItem {
+    pub index: u32,
+    pub sighash_type: u8,
+    pub kind: KeyKind,
+    pub public_key: Hex,
+    /// The address of the input's UTXO.
+    pub address: Option<Address>,
+}
+
+/// The masses of the signed transaction (KIP-9/KIP-13; priority = what the fee pays for).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MassesOut {
+    pub compute: Dec,
+    pub transient: Dec,
+    pub storage: Dec,
+    pub priority: Dec,
+}
+
+/// One output of a built transaction.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutputItem {
+    pub index: u32,
+    pub value: Dec,
+    /// The output's address (P2SH for covenant outputs).
+    pub address: Option<Address>,
+    /// A covenant output (bound to an input by KIP-20).
+    pub covenant: bool,
+    /// Pays the wallet's change address.
+    pub to_wallet: bool,
+}
+
+/// The figures of a built transaction, read from the transaction itself (spec 7: amounts
+/// come from the built transaction, not from separate arithmetic).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Summary {
+    /// The wallet's coins spent (funding and owner inputs).
+    pub wallet_in: Dec,
+    /// What comes back to the wallet's change address in this transaction.
+    pub wallet_back: Dec,
+    pub outputs: Vec<OutputItem>,
+}
+
+/// An unsigned transaction ready for the wallet (spec 6.1): the Safe JSON to pass as
+/// `txJsonString` (every covenant input final, the inputs to sign with an empty signature
+/// script, budgets and the storage-mass commit of the signed transaction), the inputs to
+/// sign, the masses, the fee and the figures. Pass it back unchanged to `assemble`.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltTx {
+    pub transaction: String,
+    /// The transaction ID (v1: it does not cover signature scripts, so it is final now).
+    pub id: Hex,
+    pub sign: Vec<SignItem>,
+    pub masses: MassesOut,
+    pub fee: Dec,
+    /// The script units of each input's run (what the compute budgets commit).
+    pub units: Vec<Dec>,
+    pub summary: Summary,
+}
+
+/// `assemble`: the built transaction and the wallet's returned Safe JSON.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssembleInput {
+    pub built: BuiltTx,
+    pub signed: String,
+}
+
+/// The final transaction: our transaction with only the listed inputs' signature scripts
+/// taken from the wallet's (spec 6.2), checked in the local engine; ready to submit.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Signed {
+    pub transaction: String,
+    pub id: Hex,
+}
+
+// ------------------------------------------------------------------------------ verify
+
+/// Spec 6.3: rebuild each shard's tree from its purchases and compare with frozen roots.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RootsInput {
+    /// The round's bonus range m.
+    pub m: u32,
+    /// One hex purchase list per shard, shard order.
+    pub purchases: Vec<Hex>,
+    /// The frozen state to compare with: a marker's or a pool's state bytes (hex).
+    pub against: CovUtxo,
+    pub covenant_id: Hex,
+}
+
+/// The rebuilt roots (they matched).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RootsOut {
+    pub roots: Vec<Hex>,
+}
+
+/// Spec J6: the winning numbers from the round's anchor proof.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WinningInput {
+    pub covenant_id: Hex,
+    /// The marker's round.
+    pub round: Dec,
+    /// The reference D (the marker's creation DAA + seed_offset).
+    pub d: Dec,
+    pub m: u32,
+    /// 272 bytes, hex.
+    pub anchor_proof: Hex,
+}
+
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WinningOut {
+    pub winning: Combination,
+    /// The anchor block X (the seed source) and its DAA score.
+    pub anchor_hash: Hex,
+    pub anchor_daa_score: Dec,
+}
+
+/// A fee for a priority mass at a rate (sompi/gram).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeeInput {
+    pub priority_mass: Dec,
+    pub fee_rate: u32,
+}
+
+// ------------------------------------------------------------------------------ quick wallet
+
+/// The quick testnet wallet's key (spec 6.2, S7): kept in this browser only. Absent from a
+/// `mainnet` build.
+#[cfg(not(feature = "mainnet"))]
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuickKey {
+    /// 32 bytes, hex. Never logged.
+    pub secret_key: Hex,
+    pub public_key: Hex,
+    pub address: Address,
+}
+
+/// `quickWalletSign`: sign the listed inputs of a built transaction that this key owns.
+#[cfg(not(feature = "mainnet"))]
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuickSignInput {
+    pub built: BuiltTx,
+    pub secret_key: Hex,
+}
