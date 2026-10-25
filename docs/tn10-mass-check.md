@@ -1084,3 +1084,19 @@ Not exercised: a void (missed-window) draw, because the campaign had none (the T
 
 - `./target/release/tn10 bundle --out ../docs/launch/tn10-m8.json` (vector-10.kaspa.green, v2.1.0, synced, utxoindex): covenant ID recomputed, 11 templates = the local compilation, genesis checks pass, **383 live UTXOs** (redeem = template + state bytes, P2SH = script), every one present on the node; wrote the file, **598,201 bytes, snapshot DAA 605,601,500**. The previous S3b bundle was 545,095 bytes with 305 UTXOs at DAA 598,620,952.
 - `./target/release/tn10 bundle-verify ../docs/launch/tn10-m8.json` (muon-10.kaspa.blue, DAA 605,602,325): `bundle-verify ../docs/launch/tn10-m8.json: PASS`, **exit 0**. kascov's own index also counts 383 live UTXOs for the instance.
+
+## Front end F0: KasWare signing on testnet-10 (spec frontend 6.2, 9 F0; 2026-10-26)
+
+Probe `tn10 wallet-probe serve` (commit `6084821` binary), page `http://localhost:8710/`, KasWare Chrome extension (installed 2026-10-26, a new test-only account `kaspatest:qpfnqglajgvnr245vzqns2svykvqurl4ne97fdma4w47p5pr6qljqj8sk7act`, network `kaspa_testnet_10`), funded with 30 KAS in 3 outputs by `tn10 send` (`18c8ed60914a23239dc35114792a42e9c8350cc723bffbb28e715c2e2669e756`). Log `tn10-data/wallet-probe/1792931480-serve.jsonl`. Kaspire not installed: untested.
+
+| # | Transaction | Variant | Wallet result | Post-sign check (6.2) | Outcome |
+|---|---|---|---|---|---|
+| 1 | `buy()`, 1 shard covenant input + 1 P2PK funding input | `signPskt`, `signInputs: [1]` | signed input 1 only | PASS (gained [1], nothing else changed); engine: input 0 354,182 units, input 1 100,001 | ACCEPTED `acbaebb5606616b0a07381f7e868e0eda1ed7b54b7b806b14526d2fbf0df1f7e` |
+| 2 | `buy()` | `signPskt`, no list | signed **every** input with the account key | REFUSED: input 0 (covenant) sigscript replaced, 37,378 B → 66 B | not sent |
+| 3 | `buy()` | `signPskt`, no list (a second request while #2's window was open) | `4001 please request after current approval resolve` | – | not sent |
+| 4 | `buy()` | `pushPskt` | `p.pushPskt is not a function` (not exposed by this KasWare version) | – | not sent |
+| 5 | `close()`, 18 covenant inputs + the caller's P2PK fee input (Safe JSON ≈ 440 KB) | `signPskt`, `signInputs: [18]` | signed input 18 only | PASS (gained [18]); engine: input 0 3,371,558 units, all 19 inputs ok | ACCEPTED `4301c53f647e8e635e68d2bf29e857e2e902bd8c84195b2693216b0cc89fbf4e` |
+| 6 | `close()` | `signPskt`, no list | signed every input | REFUSED: all 18 covenant sigscripts replaced by 66 B signatures | not sent |
+| 7 | `close()` | `pushPskt` | `p.pushPskt is not a function` | – | not sent |
+
+Findings: KasWare round-trips our v1 Safe JSON (covenant bindings, compute budgets, storage mass) at both sizes and signs exactly the listed P2PK input. Without a list it overwrites covenant signature scripts, which the post-sign check refuses before sending (a real-wallet negative control for 6.2). `pushPskt` is not available, so the page's path is `signPskt` with the explicit index list, then the post-sign check, then the page's own submit.
