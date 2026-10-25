@@ -6,6 +6,11 @@
 //! encoding (embedded templates, `silverscript-abi` built against rusty-kaspa v2.1.0). The
 //! test fails on any line that differs.
 //!
+//! Lines 1-77 are those pre-F1 lines. Lines 78-97 (`review ...`, F1 review) were appended,
+//! never regenerated: 20 builder shapes the 77 missed, digested with the reviewer's own
+//! function, which gave the same 20 lines on the pre-F1 commit `6633ba3` (a worktree) and on
+//! `b3b3520` (handoff, "F1 review and fixes").
+//!
 //! Rewrite the golden file only for a deliberate change, from `crates/`:
 //! `cargo test -p lottery --release --test f1_bytes -- --ignored write_golden`
 

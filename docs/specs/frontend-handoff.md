@@ -40,7 +40,7 @@ Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this f
 | Stage | Status | Notes |
 |---|---|---|
 | F0 wallet experiment | part A done, waiting for owner | Probe `tn10 wallet-probe` built and self-tested on testnet-10 (stand-in signer). Part B (the owner's clicks, KasWare only; Kaspire not available, untested) is scheduled for 2026-10-26: see "F0 part B: owner steps". |
-| F1 builder refactor for wasm | done (parts A, B, C); `covenant-reviewer` next | A: the templates embedded (W2), the compiler behind `compiler`, one rusty-kaspa version, the wasm links. B: `lottery::web` (decode, verify, the 8 unsigned builders, the signing split, the post-sign check, typed errors, W3). C: the builders from chain objects (`lottery::web::cases`), the wasm-bindgen API in `crates/web` with a generated, typed `.d.ts`, one Safe JSON serialiser (tn10 calls it), W1 in wasm under Node (77 + 18 digests equal), W4 (the mainnet build has no quick-wallet symbol and refuses to load), the quick-wallet key hook, the wRPC client running in wasm against testnet-10, sizes (1.69 MB brotli at its smallest). Owner questions: simnet addresses; an npm accident in the home folder. See "F1 part A", "F1 part B" and "F1 part C". |
+| F1 builder refactor for wasm | done (parts A, B, C; review fixed) | Review (`covenant-reviewer` on `b3b3520`): no must-fix; the six should-fix items and four notes are fixed, each test first, with negative controls: page values out of `checkRoots`/`winningNumbers` (round, m, D derived in Rust), every `BuiltTx` figure bound to its transaction (`built_mismatch`), Schnorr-only deposit owners (`owner_type`), W1 runs signing, verification, decode and verify in wasm (97 + 18 + 290 lines, 7 signed), 20 golden lines appended (77 untouched), W4 checks the release artifact for the simnet and the fixtures; `change_dust`, the draw's `funding_short`, redacted keys, the `fixtures` feature. One owner decision (small change: refuse or pay as fee). See "F1 review and fixes". Before the review: A: the templates embedded (W2), the compiler behind `compiler`, one rusty-kaspa version, the wasm links. B: `lottery::web` (decode, verify, the 8 unsigned builders, the signing split, the post-sign check, typed errors, W3). C: the builders from chain objects (`lottery::web::cases`), the wasm-bindgen API in `crates/web` with a generated, typed `.d.ts`, one Safe JSON serialiser (tn10 calls it), W1 in wasm under Node (77 + 18 digests equal), W4 (the mainnet build has no quick-wallet symbol and refuses to load), the quick-wallet key hook, the wRPC client running in wasm against testnet-10, sizes (1.69 MB brotli at its smallest). Owner questions: simnet addresses; an npm accident in the home folder. See "F1 part A", "F1 part B" and "F1 part C". |
 | F2 indexer API | not started | |
 | F3 web shell and Play | not started | |
 | F4 My tickets, claims, backup | not started | |
@@ -575,7 +575,7 @@ This part needs no coding and takes about 20-30 minutes. Everything uses testnet
     - the transaction ids, entries, units and masses are equal;
     - signed externally (SIG_HASH_ALL, as a wallet signs), every input passes the engine under its committed budget.
   - `owner_pub_cannot_be_signed_here`: an `OwnerPub` input builds unsigned (the same transaction as with the key held here), and `finish()` refuses it.
-- **What a wallet must do for a P2SH owner:** return the signature push followed by the 34-byte redeem push. KasWare signs P2PK only. A P2SH owner therefore needs the quick testnet wallet (part C or F3), or a wallet that returns the full signature script. `post_sign` checks the redeem byte for byte.
+- **What a wallet must do for a P2SH owner:** return the signature push followed by the 34-byte redeem push. `post_sign` checks the redeem byte for byte. *(Corrected in the F1 review: this said the quick testnet wallet could sign a P2SH owner. It cannot: the quick wallet signs Schnorr P2PK inputs only, and KasWare signs P2PK only. D67 allows P2SH owners of any wallet type at the covenant level; the page restricts what it creates instead: `request_deposit` takes Schnorr P2PK owners only (`owner_type` otherwise), so every position the page creates can be withdrawn and signed from the page. A P2SH or ECDSA position made by another tool needs a wallet that returns the full signature script.)*
 
 ### Error codes (`lottery::web::Code`; number, name: message)
 
@@ -1102,3 +1102,174 @@ test w4_mainnet_build_has_no_quick_wallet_and_refuses_to_start ... ok
 - Native transactions are byte-identical: `f1_bytes` (77 golden lines) is unchanged and green, and W1 holds in wasm.
 - No covenant or template change.
 - Not run: `simnet` (RocksDB, about 14 minutes). It uses `lottery`'s default features, and the library API only gained additions.
+
+## F1 review and fixes (stage agent, 2026-10-25)
+
+### The review
+
+- **Who and what:** `covenant-reviewer` on the F1 commit `b3b3520` (parts A, B and C).
+- **Verdict:** no must-fix item. Six should-fix items and four notes (the table gives them as the orchestrator condensed the reviewer's report; the reviewer's own report is not in the repo). The reviewer left four untracked test files with its probes; all four are folded in (see "Files changed").
+- **Per area:**
+
+  | Area | Reviewer's finding | Verdict |
+  |---|---|---|
+  | Byte identity (W1, golden digests) | holds; 20 builder shapes were outside the 77 golden lines; the reviewer digested them on the pre-F1 commit `6633ba3` (a worktree) and on `b3b3520`: all 20 equal | should-fix 5 (coverage) |
+  | Rule logic outside Rust | `winningNumbers` and `checkRoots` took round, m and D from the page; D would have to be computed in TypeScript (spec 1 forbids it), and an indexer serving a wrong round or m made "verify" show wrong numbers as verified | should-fix 1 |
+  | Post-sign check and assembly | the check itself held (R1-R3: only listed signature scripts are taken; non-minimal and extra pushes are refused; every covenant input that loses or changes its signature script is refused); but `assemble` did not bind the displayed figures: a `BuiltTx` with altered fee, ID, summary or output values still assembled (P6) | should-fix 2 |
+  | Vault owners | `build_request_deposit` accepted any `kaspatest:` owner (P2: a P2SH 2-of-2 built), while the page's signers sign Schnorr P2PK only (P1: the quick wallet returns `signed_missing` for ECDSA and P2SH owner inputs), so the page could create positions it can never withdraw; the handoff (F1 part B, "What a wallet must do for a P2SH owner") and the `OwnerPub` comment were wrong about it | should-fix 3 |
+  | wasm coverage | W1 never ran signing or signature verification in wasm, nor decode and verify | should-fix 4 |
+  | Deployed artifact | nothing kept the dev-only `simnet` feature out of the deployed wasm | should-fix 6 |
+  | Notes | change below dust reported as `funding_short` (P5); a draw's funding shortfall reported as `refused`; `QuickKey`'s `Debug` printed the secret key; `lottery::web::fixtures` and the fixture keys in the production wasm | notes |
+
+### What changed, per item (each test written first; each failed, or showed the fault, before its fix)
+
+1. **`checkRoots` and `winningNumbers` take chain objects only** (`crates/web/src/api.rs`, `dto.rs`).
+   - `RootsInput` is `{covenantId, against, purchases}`: no `m`. The round, m, k and roots come from `against`, a live marker or pool (checked against its UTXO). `RootsOut` reports the round and m it read.
+   - `WinningInput` is `{covenantId, from, anchorProof}`, with `from` one of:
+     - `{closed: {marker, controller}}` (before the draw): D = the marker UTXO's creation DAA + the controller's `seed_offset`, exactly as `draw()` reads it (`game::anchor_daa`); the controller must be the undrawn controller of round r + 1;
+     - `{drawn: {pool, drawer}}` (after the draw): D = the pool's claim deadline − `draw_window` − `claim_window` (drawer check 19; `draw()` copies both windows unchanged, `drawer.sil:972-973`), checked with `game::claim_deadline`; the drawer must have drawn the pool's round; and the numbers from the proof must equal the pool's `win`, which `draw()` wrote.
+   - `WinningOut` reports the round, m and D it derived. Unknown fields (such as a page-given `m`) are refused.
+   - Codes: a proof that does not anchor D is `anchor_invalid`; objects that do not belong together, or numbers that are not the pool's, are `chain_mismatch`.
+   - Test: `web/tests/api.rs::roots_and_numbers_come_from_chain_objects` (on a draw with a jackpot and two second-prize holders, since the fixture draw creates no pool): both paths give the library's numbers and the same D; an extra or missing purchase list is `tree_mismatch` against a marker and a pool; a later marker DAA is `anchor_invalid`; a controller of another round and a drawer in the controller's place are refused; a proof with another X.hash, which off-chain still anchors D, is `chain_mismatch` on the drawn path; the round r drawer on the drawn path is `chain_mismatch`; extra `m` fields are refused.
+2. **`assemble` binds every displayed figure to the transaction** (`api::unsigned_of`, used by `assemble` and `quickWalletSign`).
+   - Every field of a `BuiltTx` is recomputed from its `transaction` and refused on any difference with the new code 31 `built_mismatch` ("The figures shown do not match the transaction."):
+     - the fee (inputs − outputs);
+     - the masses (each listed input at its signed size; all four, and the storage-mass commit);
+     - the units: a listed input's must be its signer class's (`buy::external_signer_units`, new), a covenant input's must be those of its own run here, and every input's must give its committed budget;
+     - the ID, the sign items (with their addresses), and the whole summary (`built_tx` run again, field by field), and the `transaction` string itself (a reformatted copy is refused: pass it back unchanged).
+   - To make the summary a function of the transaction alone, `built_tx` no longer takes the change script: `walletIn` is the total of the inputs the wallet signs, and `toWallet` marks a plain output paying the script of one of those inputs (the wallet's own address). For every page flow, where the change address is the wallet's address, the figures are the same as before. Proposed row (b).
+   - The known limit: the drawer's input runs `OpChainblockSeqCommit`, which needs the node's chain (it is `InvalidOpcode`, `Opcode<0xd4>`, with no accessor; `crypto/txscript/src/opcodes/mod.rs:1387`), so its units are bound by the committed budget only (steps of 10,000 units). The test pins this: +1 unit passes, +10,000 is refused. The budget, which is what the chain charges, is bound exactly.
+   - Tests: `api.rs::assemble_binds_every_figure`: 19 alterations on 8 transactions (buy, claim, close, draw, void, two withdrawals, a settlement), 152 tampered `BuiltTx`, each refused with `built_mismatch` by `assemble` and by `quickWalletSign`; the honest one assembles. The existing `assemble_takes_a_wallets_signatures_only` and `api_builds_equal_the_library` still pass.
+   - Golden: `web/tests/fixtures/w1_api.txt` was rewritten for the 6 withdrawal lines only. Their transaction, ID, sign list, masses, fee and units are byte-identical (a field-by-field diff of the 18 `BuiltTx` JSONs before and after: 12 identical; the 6 differ only in `summary.walletBack` and one output's `toWallet`). The reason: the fixture withdrawal's change pays the fixture wallet's address while the only coin it spends is the owner's, at another address, so its change is no longer shown as "back to the wallet". The native transactions (`f1_digests.txt`) are untouched.
+3. **The page creates vault positions only for owners it can withdraw for** (`api::build_request_deposit`).
+   - A deposit owner must be a Schnorr P2PK address; an ECDSA P2PK or any P2SH owner is the new code 32 `owner_type` ("Vault positions need a Schnorr wallet address."). No covenant change: D67 still accepts every type; the page restricts what it creates. `build_request_withdraw` still takes all three owner classes, for positions made by other tools (a wallet that returns the full signature script can sign them).
+   - Test: `api.rs::deposit_owners_are_withdrawable_from_the_page`: the three refused types (ECDSA and wrapped-Schnorr P2SH of the same key, and the reviewer's 2-of-2 P2SH) are `owner_type`; then, end to end for the accepted type: a deposit for a fresh quick-wallet key (its request output carries the key as owner), a settlement of that request (the settle covenant runs in the engine and mints a position of that owner), and the whole withdrawal of that position through the API, signed by `quickWalletSign` and assembled (every input in the engine). The ECDSA and P2SH fixture withdrawals stay `signed_missing` for the quick wallet (the reviewer's P1, kept as an assertion).
+   - Text corrected: the F1 part B handoff paragraph "What a wallet must do for a P2SH owner" (marked "Corrected in the F1 review") and the `OwnerPub` comment (`buy.rs`), which said the wrapped Schnorr P2SH was "the only P2SH owner class D67 defines".
+4. **W1 runs signing, verification, decode and verify in wasm** (`web/tests/w1_wasm.rs`; the reviewer's `review_f1_wasm_assemble.rs` folded in).
+   - New part, the verify half: 290 calls (`common::verify_calls`): `decodeState`, a wrong-role decode, `verifyState`, `verifyState` on another script and `decodeRedeem` for every fixture object; `checkRoots` against a marker and a pool, accepted and refused; `winningNumbers` on both paths, accepted and refused. Each result's JSON through the JS boundary equals the native one, against the new golden `web/tests/fixtures/w1_verify.txt` (written natively by `write_golden`, compared natively by `api.rs::verify_digests_match_the_golden_file`, which also checks that each refused variant is an error and every other call ok).
+   - New part, signing: for 7 transactions (two buys, a claim, close K = 16, a draw, a void, a withdrawal) `quickWalletSign` signs in wasm and `assemble` accepts (Schnorr verification in the wasm engine); the assembled transaction is the built one with only the listed signature scripts; a flipped signature byte is `signature_invalid`; a changed figure is `built_mismatch` for both calls.
+   - The four parts now run in one ordered test, `w1_wasm_equals_native`: the session is module state, and wasm-bindgen-test does not order separate tests (found when the old `not_started` check ran after another part had started the session).
+5. **Golden digests: 20 shapes appended** (`lottery/src/digest/lines.rs::review_digests`, `tests/fixtures/f1_digests.txt` lines 78-97).
+   - The shapes: the return with a pool; each owner class's withdrawal, partial, whole and with the owner second among the plain inputs; the final claim; fabricated jackpot, second and lower-tier claims; a draw absorbing three expired pools; a draw with jackpot and second-prize holders; a void at round 3; a buy without change; both converting draws.
+   - They use the reviewer's own digest function byte for byte (`review_digest`), so the lines are the ones the reviewer computed. The evidence that they equal the pre-F1 code: the reviewer ran the same test on a worktree at `6633ba3` and on `b3b3520` and found all 20 identical. This stage reran the reviewer's file on the unchanged `b3b3520` tree first and appended exactly its 20 printed lines (`REVIEWDIGEST ` replaced by `review `); the existing 77 lines were not regenerated (`git diff`: 20 insertions, 0 deletions).
+   - W1 computes the same 97 lines in wasm and they equal the file.
+6. **The release artifact refuses the simnet and has no fixture code** (`web/tests/w4_mainnet.rs`).
+   - W4 now builds the release artifact with the documented wasm build command itself (`cargo build -j 2 -p web --target wasm32-unknown-unknown --release`, default target directory, so the checked file is `target/wasm32-unknown-unknown/release/web.wasm`), plus a dev build (`--features simnet,fixtures`, the positive control) and the mainnet build in `target/w4`.
+   - Release checks, under Node: `start("simnet")` and `start("mainnet")` are `address_network`; once started on testnet-10, a `kaspasim:` address in `scriptOf` and as a builder's change address is `address_network`; the quick wallet is present; `devFixtureNames` is absent. The dev build starts on the simnet with `kaspasim` addresses and lists the 18 fixture calls.
+   - W4 is part of the documented web test command (CLAUDE.md: api, W1, W4).
+
+**Notes:**
+- **Change below dust** (`build.rs:207, 587-598`): `build::with_fee` now explains its failure. When the loop fails after a successful build (a `funding_short` from the builder, or a `fee_rate` from a fee above the cap), it tries the same transaction without its change output (`mk(fee + change)`; the builders leave a zero change out); if that build's fee covers its own mass, the error is the new code 33 `change_dust` ("The change left over is too small to send back."), with the extra fee dropping the change would pay in the detail. That diagnostic build is discarded: the money behaviour is unchanged, the coins are refused as before. Tests: `lottery/tests/f1_web.rs::small_change_and_short_draws_have_their_codes` (coins of cost + the no-change fee + 0, 1, 10³, 10⁵, 10⁶, 10⁷ sompi: `change_dust`; one sompi below: `funding_short`; +1 KAS: built with change) and `web/tests/api.rs::small_change_is_change_dust` (the reviewer's P5 amounts). Measured: with coins of exactly cost + the fee the buy needs without change, the loop still refuses (it starts from a lower fee, makes a dust change and overshoots); see the owner decision.
+- **Draw shortfall** (`build.rs:442`): `DrawCase::try_expected`'s "funding does not cover the draw" (now the constant `draw::FUNDING_SHORT`) is `funding_short`; every other reference refusal stays `refused`. Test: the same `f1_web` test.
+- **`QuickKey` and `QuickSignInput` `Debug`** print the secret key as `<redacted>` (`dto::REDACTED`). Test: `api.rs::quick_keys_are_redacted_in_debug`.
+- **Fixtures out of the deployed wasm:** `lottery` has a new feature `fixtures` (default on): `web::fixtures` and the golden-digest lines (`digest::lines`: `abi_digests`, `tx_digests`, `review_digests`, `all_lines`) are behind it; `digest::template_list` stays in every build (`start` reports the template hashes from it). `crates/web` enables it only through a dev-dependency (resolver 2: never in `cargo build -p web`) or its own dev feature `fixtures` (which also exports `devFixtureNames`). W4 scans for the module paths `lottery::web::fixtures` and `lottery::digest::lines` (mangled and plain), the export, and the raw bytes of the fixtures' wallet key (32 × 0x21): release 0, mainnet 0, dev 2 / 5 / 1 (the positive control; nothing links `digest::lines` outside tests, so its line has no positive control of its own).
+- **Left (not a fixture module):** the release wasm still holds the bytes of `FUNDING_SK` (32 × 0x07, twice) and `ADMIN_SK` (32 × 0x0a, once). They are the default fields of the `*Case` constructors (`BuyCase::new`, `CloseCase::new_with`, …) that `web::cases` starts from and then overwrites: every web builder sets `funding_sk` to its placeholder and signs nothing (`finish_unsigned`). Removing them means filling the cases without the fixture constructors, a refactor of `cases.rs` with byte-identity risk for no gain in trust or money; left for F3 or later, recorded here.
+
+### Negative controls (each fix disabled by a temporary edit, then restored from a copy)
+
+| Disabled | Test | Result |
+|---|---|---|
+| the field-by-field figure check in `unsigned_of` | `assemble_binds_every_figure` | FAILED: `buy b=1 ref: id: assembled` |
+| the `owner_type` check | `deposit_owners_are_withdrawable_from_the_page` | FAILED: the ECDSA owner built |
+| the pool-number comparison on the drawn path | `roots_and_numbers_come_from_chain_objects` | FAILED: another X.hash gave other numbers as Ok |
+| the draw `funding_short` mapping | `small_change_and_short_draws_have_their_codes` | FAILED: `a draw funded short: refused (16)` |
+| (before the fix) the change-dust diagnosis | the same test | FAILED: `extra 0: funding_short (12)` |
+| one digit of `w1_verify.txt` line 200 | W1 in wasm | FAILED: `request_deposit #0 decodeRedeem vault: the wasm result differs from the native one` |
+| `default = ["simnet"]` in `web/Cargo.toml` | W4 | FAILED: `start(simnet) before testnet: {"ok":{"network":"simnet",…` |
+| `default = ["fixtures"]` in `web/Cargo.toml` | W4 | FAILED: `the release artifact contains lottery::web::fixtures` |
+| (found by W4 itself) a doc comment naming `quickWalletSign` on `BuiltTx` | W4 | FAILED: `the mainnet build contains quickWalletSign` (tsify copies doc comments into the `.d.ts`); the comment was reworded |
+
+### Commands run (outputs)
+
+- Reviewer probes on the unchanged tree: `cargo test -j 2 -p web --release --test review_f1_probes -- --nocapture --test-threads=1`: P2 built a 2-of-2 P2SH owner; P4 `checkRoots` passed with m = 2 and 30 against a marker of m = 10, and `winningNumbers` gave other numbers as Ok for m − 1 and round + 1; P5 `funding_short` for every change below about 0.5 KAS; P6 assembled with a tampered fee, ID, wallet-back and output value. `cargo test -j 2 -p lottery --release --test review_f1_extra_digests --test review_f1_sign_attacks -- --nocapture`: 20 `REVIEWDIGEST` lines (saved, then appended); R1-R3 3 passed.
+- `cargo test -j 2 -p lottery --release --test f1_web --test f1_bytes --test f1_sign -- --nocapture --test-threads=1` (after the fixes): `f1_bytes` `97 lines equal the golden file`; `f1_sign` 3 passed; `f1_web` 7 passed.
+- `cargo test -j 2 -p web --release --test api -- --nocapture --test-threads=1`: 13 passed, 1 ignored (`write_golden`); "152 tampered BuiltTx refused (built_mismatch) by assemble and quickWalletSign", "290 verify lines equal the golden file", "340 mutated calls parsed, 22 built, none panicked".
+- `cargo test -j 2 -p web --release --features simnet --test api other_network`: 1 passed.
+- W1: `cargo test -j 2 -p web --target wasm32-unknown-unknown --release --test w1_wasm -- --nocapture`:
+  ```
+  W1 API: 18 builds through the JS boundary equal the native golden file
+  W1 library: 97 digest lines equal the native golden file
+  W1 verify: 290 decode and verify calls through the JS boundary equal the native golden file
+  W1 sign: 7 transactions signed by the quick wallet and assembled in wasm; a flipped signature and a changed figure refused for each
+  test w1_wasm_equals_native ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 filtered out; finished in 1.21s
+  ```
+- W4: `cargo test -j 2 -p web --release --test w4_mainnet -- --nocapture` (77 s with cold `target/w4` builds; 12-16 s warm):
+  ```
+  release: cargo build -j 2 -p web --target wasm32-unknown-unknown --release -> …\crates\target\wasm32-unknown-unknown\release\web.wasm (6342345 B)
+  dev: cargo build … --target-dir …\crates\target\w4 --features simnet,fixtures -> … (6421896 B)
+  mainnet: cargo build … --target-dir …\crates\target\w4 --features mainnet -> … (1370285 B)
+  quickWalletNew               release    4  mainnet    0
+  quickWalletImport            release    4  mainnet    0
+  quickWalletSign              release    5  mainnet    0
+  quick_wallet                 release    8  mainnet    0
+  KASPALIONARE_QUICK_WALLET    release    1  mainnet    0
+  lottery::web::fixtures       release    0  dev    2  mainnet    0
+  devFixtureNames              release    0  dev    5  mainnet    0
+  lottery::digest::lines       release    0  dev    0  mainnet    0
+  fixtures WALLET_SK bytes     release    0  dev    1  mainnet    0
+  release: started on testnet-10 ; start(simnet), start(mainnet), a kaspasim: address and change refused: address_network
+  dev: started on simnet with kaspasim addresses; 18 fixture calls
+  test result: ok. 1 passed; 0 failed
+  ```
+  The nested `cargo build` into the default target directory does not block on the outer `cargo test`'s lock.
+- `cargo check -j 2` with: `-p lottery --no-default-features`, `… --features mainnet`, `… --features fixtures`, `… --target wasm32-unknown-unknown`; `-p web`, `--features simnet`, `simnet,mainnet`, `mainnet`, `fixtures`, `--tests --features simnet`; `-p tn10`: all `Finished`, no warnings.
+- Suite: see "Suite at the end of the F1 review".
+
+### Files changed
+
+- `crates/lottery/Cargo.toml`: the `fixtures` feature (default on).
+- `crates/lottery/src/web/mod.rs`: `fixtures` gated; codes 31 `built_mismatch`, 32 `owner_type`, 33 `change_dust`.
+- `crates/lottery/src/web/build.rs`: `with_fee` with `diagnose` (`change_dust`); the draw's `funding_short`.
+- `crates/lottery/src/draw.rs`: `FUNDING_SHORT`.
+- `crates/lottery/src/buy.rs`: `external_signer_units`; the `OwnerPub` comment.
+- `crates/lottery/src/digest.rs` and `src/digest/lines.rs` (new): `template_list` in every build; the lines behind `fixtures`, plus `review_digest` and `review_digests`.
+- `crates/lottery/tests/fixtures/f1_digests.txt`: 20 lines appended.
+- `crates/lottery/tests/f1_bytes.rs` (doc), `f1_web.rs` (the codes test; `small_change_and_short_draws_have_their_codes`), `f1_sign.rs` (new: the reviewer's `review_f1_sign_attacks.rs`, renamed, with a header). `review_f1_extra_digests.rs` is folded into `digest/lines.rs` and removed.
+- `crates/web/Cargo.toml`: the `fixtures` feature; `lottery` with `fixtures` as a dev-dependency.
+- `crates/web/src/api.rs`: `check_roots`, `winning_numbers`, `built_tx`, `unsigned_of` (with the figure check), `assemble`, `build_request_deposit`.
+- `crates/web/src/dto.rs`: `RootsInput`, `RootsOut`, `RoundObjs`, `WinningInput`, `WinningOut`; the redacted `Debug` of `QuickKey` and `QuickSignInput`; summary docs.
+- `crates/web/src/bindings.rs`: `devFixtureNames` (feature `fixtures`). `quick_wallet.rs`: `unsigned_of(net, …)`. `lib.rs`: docs.
+- `crates/web/tests/api.rs` (the new tests; the reviewer's `review_f1_probes.rs` folded in and removed), `tests/common/mod.rs` (the draw with winners, the verify calls), `tests/w1_wasm.rs` (the reviewer's `review_f1_wasm_assemble.rs` folded in and removed), `tests/w4_mainnet.rs`, `tests/fixtures/w1_api.txt` (6 lines), `tests/fixtures/w1_verify.txt` (new, 290 lines).
+- `.gitattributes` (`w1_verify.txt -text`), `CLAUDE.md` (the F1 and web test commands, the features), this file (this section, the stage log, the corrected part B paragraph).
+- Not touched: `covenants/`, `crates/lottery/templates/`, the 77 original golden lines, tn10, simnet.
+
+### Proposed DECISIONS rows (for the orchestrator)
+
+- (a) **The page passes no derived game value.** `checkRoots` takes `{covenantId, against, purchases}` and `winningNumbers` `{covenantId, from: {closed: {marker, controller}} | {drawn: {pool, drawer}}, anchorProof}`. Rust derives the round, m and D: D = marker creation DAA + seed_offset (closed), or the pool's claim deadline − draw_window − claim_window (drawn, drawer check 19); on the drawn path the numbers must equal the pool's `win`.
+- (b) **A built transaction's figures are bound to it.** `assemble` and `quickWalletSign` recompute every `BuiltTx` field from its transaction and refuse a difference (31 `built_mismatch`). The summary is a function of the transaction alone: `walletIn` = the inputs the wallet signs; `toWallet` = a plain output paying the script of one of them. The drawer input's units are bound by its committed budget only (its seq-commit opcode needs the node's chain).
+- (c) **Vault deposits from the page are Schnorr P2PK owners only** (32 `owner_type`). D67 is unchanged (any P2PK or P2SH owner at the covenant level); the page creates only positions its signers (KasWare, the quick wallet: Schnorr P2PK) can withdraw. Withdrawals still accept all three owner classes, for positions made by other tools.
+- (d) **33 `change_dust`:** the fee loop never drops change; when the coins cover the transaction without change but the change cannot pay for its own output, the refusal says so. Money behaviour unchanged (see the owner decision).
+- (e) **The `fixtures` feature** (lottery, default on; web, dev only): the fixture calls, their wallet key and the golden-digest lines are out of the release wasm; W4 checks the release artifact, built by the documented wasm build command, for them and for the simnet.
+- (f) **Golden digests:** 97 lines; lines 78-97 are the F1 review's 20 shapes, appended with the reviewer's digest function and its pre-F1 evidence, never regenerated. `w1_api.txt`: the 6 withdrawal lines rewritten for the `toWallet` definition (transactions unchanged). New `w1_verify.txt` (290 decode and verify results, native = wasm).
+- (g) **W1 is one ordered wasm test** (`w1_wasm_equals_native`: API, library, verify, sign).
+
+### Owner decision (needs the owner; nothing was decided)
+
+**Small change: refuse, or pay it as fee?**
+- What happens today: if your coins pay for a ticket with a little left over, but that leftover is too small to be sent back on its own (on Kaspa, a tiny output costs more in fee than it is worth; in the tests, at the floor fee rate, a leftover of 0.1 KAS was refused and 0.5 KAS went through), the page refuses the purchase. It now says why ("The change left over is too small to send back") instead of "your coins do not cover this". Before and after this stage, no money moves in that case.
+- The alternative: build the purchase without a change output and let the leftover go to the network as extra fee. The player would lose that leftover (at most the size of the band, so well under 1 KAS at the floor rate, more if fees rise), but the purchase would go through. When the leftover is exactly zero (the coins equal cost plus the fee), nothing is lost at all, yet the page still refuses today because the fee loop overshoots.
+- Trust: none either way; the covenants do not care about the change.
+- Money: refusing costs the player nothing but a retry with other coins; dropping the change costs the player the leftover. On testnet the coins have no value.
+- Work: small (one rule in `build::with_fee`: accept the no-change build when its extra fee is below a limit the owner picks, for example 0, or 0.01 KAS), with tests.
+- Recommendation: accept the no-change build only when the extra fee is 0 (the exact case), and keep refusing otherwise with `change_dust`, so the page never silently gives away coins. The page (F3) can then suggest adding or removing a coin.
+
+### Left and open
+
+- The drawer input's units: bound by its budget only (above). A page never displays units today.
+- `toWallet` uses the inputs' scripts: a change address that is not the address of a signed coin is shown as not coming back. Every page flow uses the wallet's own address for both.
+- `close()`'s caller output below `MIN_CALLER_OUTPUT` stays `policy` even when the coins are short (the reviewer flagged only the draw).
+- The drawn path of `winningNumbers` needs a live pool of the round. Once a round's pools are all claimed, expired or absorbed, its numbers can only be verified on the closed path, which needs the spent marker (F5 should decide what the round explorer shows then: the indexer's copy marked unverified, or the record).
+- The fixture-constructor keys left in the release wasm (above).
+- Not run in this stage: `simnet` (RocksDB, about 14 minutes; it uses `lottery`'s default features, which now include `fixtures`, unchanged API), a fresh pre-F1 worktree run of the 20 review shapes (the reviewer's run is the evidence).
+
+### Suite at the end of the F1 review
+
+- `cargo test -j 2 --no-fail-fast` (from `crates/`, debug; default members `harness` and `lottery`): 55 test binaries, 1,108 passed, 0 failed, 2 ignored (`f1_bytes::write_golden` and the old `m4_mutants` one).
+  - This includes `f1_bytes` (97 lines), `f1_web` 7/7, `f1_sign` 3/3, `f1_cases`, `f1_w3`, `f1_unsigned`, `f1_templates` and `f0_unsigned`.
+  - It also includes `m7_seed` 15/15: the SP12 seed gate holds.
+  - As before F1 (D113), `spike_vdf` overflowed its stack in debug (`sv_measure_masses_and_stack`); it is the one failed target.
+- `cargo test -j 2 -p lottery --release --test spike_vdf`: 14 passed, 0 failed (361 s).
+- `cargo test -j 1 --release -p tn10`: 25 passed, 0 failed.
+- `crates/web` (the web test command): `api` 13 passed, 1 ignored (`write_golden`); W1 1/1 in wasm (18 + 97 + 290 lines, 7 signed and assembled); W4 1/1 (release artifact, dev control, mainnet).
+- Native transactions byte-identical: the 77 original lines of `f1_digests.txt` are unchanged and green, plus the 20 appended. No covenant or template change. `Cargo.lock` unchanged.

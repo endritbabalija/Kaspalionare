@@ -6,9 +6,10 @@
 
 use lottery::buy::OwnerPub;
 use lottery::state::Payout;
-use lottery::web::fixtures::Call;
+use lottery::web::fixtures::{Call, WALLET_SK};
 use web::convert::{Net, hex, obj_dto, utxo_dto};
 use web::dto::*;
+use web::views::RoleName;
 
 /// The fee rate of every fixture input (sompi/gram, the floor).
 pub const RATE: u32 = 100;
@@ -197,3 +198,178 @@ pub fn digest_line(name: &str, b: &BuiltTx) -> String {
 
 /// The golden file of the API digests (written natively, compared natively and in wasm).
 pub const GOLDEN: &str = include_str!("../fixtures/w1_api.txt");
+
+/// A UTXO the transaction `tx` creates at output `i` (as a node would show it once confirmed
+/// at `daa`), with its state bytes.
+pub fn created(tx: &kaspa_consensus_core::tx::Transaction, i: usize, cov: &kaspa_hashes::Hash, daa: u64, state: &lottery::index::State) -> CovUtxo {
+    let o = &tx.outputs[i];
+    let entry = kaspa_consensus_core::tx::UtxoEntry::new(o.value, o.script_public_key.clone(), daa, false, Some(*cov));
+    let obj = lottery::web::cases::Obj { outpoint: kaspa_consensus_core::tx::TransactionOutpoint::new(tx.id(), i as u32), entry, state: lottery::web::verify::state_bytes(state).unwrap() };
+    web::convert::obj_dto(&obj)
+}
+
+/// The output of `tx` whose script is `state`'s P2SH.
+pub fn output_of(tx: &kaspa_consensus_core::tx::Transaction, state: &lottery::index::State) -> usize {
+    let spk = lottery::web::verify::state_spk(state).unwrap();
+    tx.outputs.iter().position(|o| o.script_public_key == spk).unwrap_or_else(|| panic!("no output for {state:?}"))
+}
+
+/// A draw with winners (a jackpot holder in shard 2, two second-prize holders in shard 1;
+/// the fixture draw has none, so it creates no pool), built by the web builder as the API
+/// builds it (the wallet's coins, its change address as the funder), and the live objects
+/// around it: its marker and next controller (inputs 1 and 3), the round r drawer (input 0),
+/// the pools it creates and the next round's drawer.
+pub struct Drawn {
+    pub cov: kaspa_hashes::Hash,
+    pub marker: CovUtxo,
+    pub controller: CovUtxo,
+    pub drawer_before: CovUtxo,
+    pub purchases: Vec<Vec<u8>>,
+    pub proof: Vec<u8>,
+    pub pools: Vec<(CovUtxo, [u8; 6])>,
+    pub drawer: CovUtxo,
+}
+
+pub fn drawn() -> Drawn {
+    use lottery::index::State;
+    let mut c = lottery::draw::DrawCase::new(4);
+    c.hold_jackpot(2, 1);
+    let b2 = c.other_bonus(0);
+    c.hold(1, b2, 2);
+    let p = lottery::anchor::AnchorProof::from_sim(&c.chain(), c.d() as u64);
+    c.x_hash = p.x_hash();
+    c.proof = Some(p.clone());
+    let wspk = lottery::buy::spk_of(&WALLET_SK);
+    c.funder = lottery::web::build::payout_of_spk(&wspk).unwrap();
+    let coins = c
+        .funding
+        .iter()
+        .enumerate()
+        .map(|(n, f)| lottery::web::build::Coin { outpoint: harness::outpoint(4 + n as u32), entry: kaspa_consensus_core::tx::UtxoEntry::new(f.value, wspk.clone(), f.daa, false, None) })
+        .collect();
+    let funds = lottery::web::build::Funds { coins, change: wspk, fee: c.fee };
+    let ops: Vec<_> = (0..4).map(harness::outpoint).collect();
+    let u = lottery::web::build::draw(&c, &ops, &funds).unwrap();
+    let x = c.try_expected().unwrap();
+    let input = |i: usize, st: State| {
+        let o = lottery::web::cases::Obj { outpoint: u.tx.inputs[i].previous_outpoint, entry: u.entries[i].clone(), state: lottery::web::verify::state_bytes(&st).unwrap() };
+        web::convert::obj_dto(&o)
+    };
+    let pools = x.new_pools.iter().map(|ps| (created(&u.tx, output_of(&u.tx, &State::Pool(ps.clone())), &c.cov, 2_000_000, &State::Pool(ps.clone())), ps.win)).collect::<Vec<_>>();
+    assert!(pools.len() >= 2, "the draw creates the jackpot and second-prize pools");
+    let dr = State::Drawer(x.drawer.clone());
+    Drawn {
+        cov: c.cov,
+        marker: input(1, State::Marker(c.marker.clone())),
+        controller: input(3, State::Controller(c.controller.clone())),
+        drawer_before: input(0, State::Drawer(c.drawer.clone())),
+        purchases: c.trees.iter().map(|t| t.purchases()).collect(),
+        proof: p.to_bytes().to_vec(),
+        pools,
+        drawer: created(&u.tx, output_of(&u.tx, &dr), &c.cov, 2_000_000, &dr),
+    }
+}
+
+
+/// The golden file of the verify half (written natively, compared natively and in wasm).
+pub const GOLDEN_VERIFY: &str = include_str!("../fixtures/w1_verify.txt");
+
+/// A line of a result's JSON text: its length and blake2b-256.
+pub fn text_line(name: &str, json: &str) -> String {
+    let d = blake2b_simd::Params::new().hash_length(32).hash(json.as_bytes());
+    format!("{name} {} {}", json.len(), d.to_hex())
+}
+
+/// One decode or verify call (W1's verify half, F1 review item 4).
+#[derive(Clone, Debug)]
+pub enum Verify {
+    Decode(RoleName, String),
+    Redeem(String),
+    State(String, RoleName, CovUtxo),
+    Roots(RootsInput),
+    Winning(WinningInput),
+}
+
+fn role(r: &str) -> RoleName {
+    serde_json::from_value(serde_json::json!(r)).unwrap()
+}
+
+/// Every decode and verify call W1 runs on both builds: each fixture object as its role
+/// (`decodeState`, `verifyState`), as a wrong role and on another script (errors), its
+/// redeem (`decodeRedeem`); `checkRoots` against a marker and a pool, and `winningNumbers`
+/// on both paths, each with a refused variant, on a draw with winners.
+pub fn verify_calls() -> Vec<(String, Verify)> {
+    let mut v = vec![];
+    for (name, call, _) in lottery::web::fixtures::calls().unwrap() {
+        let objs: Vec<(&str, lottery::web::cases::Obj)> = match &call {
+            Call::Buy { shard, .. } => vec![("shard", shard.clone())],
+            Call::Claim { ticket, pools, .. } => [vec![("ticket", ticket.clone())], pools.iter().map(|p| ("pool", p.clone())).collect()].concat(),
+            Call::Return { ticket, pool, .. } => [vec![("ticket", ticket.clone())], pool.iter().map(|p| ("pool", p.clone())).collect()].concat(),
+            Call::Close { controller, params, shards, .. } => {
+                [vec![("controller", controller.clone()), ("params", params.clone())], shards.iter().map(|s| ("shard", s.clone())).collect()].concat()
+            }
+            Call::Draw { drawer, marker, vault, controller, .. } => vec![("drawer", drawer.clone()), ("marker", marker.clone()), ("vault", vault.clone()), ("controller", controller.clone())],
+            Call::Deposit { vault, .. } => vec![("vault", vault.clone())],
+            Call::Withdraw { vault, position, .. } => vec![("vault", vault.clone()), ("position", position.clone())],
+            Call::Settle { request, record, .. } => vec![("request", request.clone()), ("record", record.clone())],
+        };
+        for (n, (r, o)) in objs.into_iter().enumerate() {
+            let dto = obj_dto(&o);
+            let cov = hex(&o.entry.covenant_id.unwrap().as_bytes());
+            let wrong = if r == "ticket" { "shard" } else { "ticket" };
+            v.push((format!("{name} #{n} decodeState {r}"), Verify::Decode(role(r), dto.state.clone())));
+            v.push((format!("{name} #{n} decodeState as {wrong}"), Verify::Decode(role(wrong), dto.state.clone())));
+            v.push((format!("{name} #{n} verifyState {r}"), Verify::State(cov.clone(), role(r), dto.clone())));
+            let mut moved = dto.clone();
+            moved.utxo.script_public_key = web::convert::spk_hex(&lottery::buy::spk_of(&WALLET_SK));
+            v.push((format!("{name} #{n} verifyState {r} on another script"), Verify::State(cov, role(r), moved)));
+            let redeem = lottery::web::verify::decode_state(role(r).role(), &o.state).ok().and_then(|s| s.try_redeem(&lottery::web::verify::templates().unwrap()).ok());
+            if let Some(rd) = redeem {
+                v.push((format!("{name} #{n} decodeRedeem {r}"), Verify::Redeem(hex(&rd))));
+            }
+        }
+    }
+    let x = drawn();
+    let cov = hex(&x.cov.as_bytes());
+    let lists: Vec<String> = x.purchases.iter().map(|p| hex(p)).collect();
+    let mut extra = lists.clone();
+    extra[0].push_str("010203040501");
+    for (what, against) in [("marker", x.marker.clone()), ("pool", x.pools[0].0.clone())] {
+        v.push((format!("checkRoots {what}"), Verify::Roots(RootsInput { covenant_id: cov.clone(), against: against.clone(), purchases: lists.clone() })));
+        v.push((format!("checkRoots {what} extra purchase"), Verify::Roots(RootsInput { covenant_id: cov.clone(), against, purchases: extra.clone() })));
+    }
+    let mut other = lottery::anchor::AnchorProof::from_bytes(&x.proof).unwrap();
+    other.x.hash[0] ^= 1;
+    let other = hex(&other.to_bytes());
+    let proof = hex(&x.proof);
+    let closed = RoundObjs::Closed { marker: x.marker.clone(), controller: x.controller.clone() };
+    v.push(("winningNumbers closed".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: closed, anchor_proof: proof.clone() })));
+    let wrong = RoundObjs::Closed { marker: x.marker.clone(), controller: x.drawer_before.clone() };
+    v.push(("winningNumbers closed, a drawer as the controller".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: wrong, anchor_proof: proof.clone() })));
+    for (n, (pool, _)) in x.pools.iter().enumerate() {
+        let from = RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone() };
+        v.push((format!("winningNumbers drawn pool {n}"), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: from.clone(), anchor_proof: proof.clone() })));
+        v.push((format!("winningNumbers drawn pool {n}, another X"), Verify::Winning(WinningInput { covenant_id: cov.clone(), from, anchor_proof: other.clone() })));
+    }
+    v
+}
+
+fn outcome_json<T: serde::Serialize>(r: lottery::web::Result<T>) -> String {
+    let o = match r {
+        Ok(x) => Outcome::Ok(x),
+        Err(e) => Outcome::Error(ApiError::from(e)),
+    };
+    serde_json::to_string(&o).unwrap()
+}
+
+/// A verify call natively (the `api` functions), as the JSON text of its outcome.
+pub fn verify_native(v: &Verify) -> String {
+    let n = Net::Testnet10;
+    match v {
+        Verify::Decode(r, h) => outcome_json(web::api::decode_state(n, *r, h)),
+        Verify::Redeem(h) => outcome_json(web::api::decode_redeem(n, h)),
+        Verify::State(c, r, o) => outcome_json(web::api::verify_state(n, c, *r, o)),
+        Verify::Roots(i) => outcome_json(web::api::check_roots(i)),
+        Verify::Winning(i) => outcome_json(web::api::winning_numbers(i)),
+    }
+}

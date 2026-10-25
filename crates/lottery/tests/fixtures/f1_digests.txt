@@ -75,3 +75,23 @@ settle deposit: 3 in 3 out units 278460 storage 20180 d147e6006944b72cbbee6d878c
 settle withdrawal: 3 in 3 out units 271019 storage 0 a691c31797b95c8d39c5d3782d0356333488109e218992d20ec8ca057a498c37
 genesis K=4: 1 in 10 out units 100000 storage 176516 9789eb534d565729ed096622a4e6b7a3cc881f7957837dd8d32cff35a3c44ae2
 genesis K=16: 1 in 22 out units 100000 storage 460532 7b080be109078694e06546727c4bfb462f7e8f98af9703aa96ae6c21922bcda4
+review return with_pool: 3in 3out units=[96636, 183576, 100000] storage=34301 run=ok 3df67205a3c0cc28b067d8efce46080f
+review withdraw 0 partial: 3in 4out units=[199819, 26756, 100000] storage=48554 run=ok 0ce14a151c51a308374f50548de9391c
+review withdraw 0 whole: 3in 3out units=[187456, 26756, 100000] storage=24678 run=ok 52879f7e5c8f50ab554ff57f8563b037
+review withdraw 0 owner second: 5in 4out units=[199959, 26756, 100000, 100000, 100000] storage=48093 run=ok b27a15e746817675699dcdf977428cc9
+review withdraw 1 partial: 3in 4out units=[199756, 26756, 100000] storage=48554 run=ok 689bb8673215429b89d7541d7fede1e9
+review withdraw 1 whole: 3in 3out units=[187393, 26756, 100000] storage=24678 run=ok d737fbf803b2cab4dcf0f33a0de6838c
+review withdraw 1 owner second: 5in 4out units=[199896, 26756, 100000, 100000, 100000] storage=48093 run=ok d21e6338fddcdf8e4ed6803b37f5abef
+review withdraw 2 partial: 3in 4out units=[199685, 26756, 100000] storage=48554 run=ok f1afc1af9fe01d6b38d0d94b1ed0cc3e
+review withdraw 2 whole: 3in 3out units=[187322, 26756, 100000] storage=24678 run=ok 8fd8770202b1fc56cd4ba3d0ee40290f
+review withdraw 2 owner second: 5in 4out units=[199825, 26756, 100000, 100000, 100000] storage=48093 run=ok aeaed5263831fc956ff526d410f9c1bc
+review claim k=4 final: 3in 3out units=[185705, 183627, 100000] storage=18608 run=ok bde8b8a67e2ceffc738f81c99598a8c6
+review claim fabricated tier 0: 3in 4out units=[288659, 183627, 100000] storage=300013 run=ok ae664418dab46909ec99f2aa56346728
+review claim fabricated tier 1: 3in 4out units=[288514, 183627, 100000] storage=300013 run=ok 5227fa417906e0d4b1a653c43fc6af7b
+review claim fabricated tier 4: 3in 3out units=[288064, 183627, 100000] storage=134592 run=ok 74b03a0ca03c1111aae3889148e79144
+review draw r=3 absorb 3: 8in 9out units=[1097788, 455611, 459698, 64031, 457814, 457814, 457814, 100000] storage=52436 run=ok 329e1daa0ef7efb8c9cca5d724f61cce
+review draw K=16 jackpot+second winners: 5in 8out units=[1477788, 455611, 459698, 64031, 100000] storage=34692 run=ok 43ddea58bf2570a89ffa15ec98257920
+review void K=4: 5in 6out units=[949114, 455611, 459698, 64031, 100000] storage=34685 run=ok 10cb57f811b1c8a31bab5a0048d4b817
+review buy b=4 no change: 2in 2out units=[439161, 100000] storage=70542 run=ok 68bb3ff2614ac27f30e9799e40a9931e
+review draw K=4 converting (deposit + withdrawal pending): 5in 7out units=[1062619, 455611, 459698, 64031, 100000] storage=34687 run=ok 220638dda047e3987a3115eeb096bef7
+review draw K=4 converting (deposit only): 5in 7out units=[1059478, 455611, 459698, 64031, 100000] storage=58355 run=ok 8221b66292aac46073d8783428e29c15

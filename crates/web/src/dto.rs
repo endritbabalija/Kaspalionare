@@ -300,18 +300,21 @@ pub struct OutputItem {
     pub address: Option<Address>,
     /// A covenant output (bound to an input by KIP-20).
     pub covenant: bool,
-    /// Pays the wallet's change address.
+    /// Pays back to the wallet: the script of an input the wallet signs (its own address;
+    /// read from the transaction alone, F1 review).
     pub to_wallet: bool,
 }
 
 /// The figures of a built transaction, read from the transaction itself (spec 7: amounts
-/// come from the built transaction, not from separate arithmetic).
+/// come from the built transaction, not from separate arithmetic). `assemble` (and any
+/// signing call of this API) recomputes every figure of a `BuiltTx` from its `transaction`
+/// and refuses any difference (`built_mismatch`, F1 review).
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Summary {
-    /// The wallet's coins spent (funding and owner inputs).
+    /// The wallet's coins spent: the inputs it signs (funding and owner inputs).
     pub wallet_in: Dec,
-    /// What comes back to the wallet's change address in this transaction.
+    /// What comes back to the wallet in this transaction: the outputs with `toWallet`.
     pub wallet_back: Dec,
     pub outputs: Vec<OutputItem>,
 }
@@ -354,23 +357,40 @@ pub struct Signed {
 // ------------------------------------------------------------------------------ verify
 
 /// Spec 6.3: rebuild each shard's tree from its purchases and compare with frozen roots.
+/// The round, m, k and the roots all come from the chain object `against` (F1 review: the
+/// page passes no derived game value).
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RootsInput {
-    /// The round's bonus range m.
-    pub m: u32,
+    pub covenant_id: Hex,
+    /// The frozen state to compare with: a live marker or a live pool of the round.
+    pub against: CovUtxo,
     /// One hex purchase list per shard, shard order.
     pub purchases: Vec<Hex>,
-    /// The frozen state to compare with: a marker's or a pool's state bytes (hex).
-    pub against: CovUtxo,
-    pub covenant_id: Hex,
 }
 
-/// The rebuilt roots (they matched).
+/// The rebuilt roots (they matched), with the round and m read from the chain object.
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RootsOut {
+    pub round: Dec,
+    pub m: u32,
     pub roots: Vec<Hex>,
+}
+
+/// The live chain objects that fix a round's winning numbers (F1 review: the round, m and
+/// the reference D are derived from them in Rust, never passed by the page).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum RoundObjs {
+    /// Closed, not drawn yet: the live marker of round r and the live controller of round
+    /// r + 1. D = the marker's creation DAA score + the controller's seed_offset (what
+    /// `draw()` uses).
+    Closed { marker: CovUtxo, controller: CovUtxo },
+    /// Drawn: a live pool of round r (its numbers, round and m) and the instance's live
+    /// drawer. D = the pool's claim deadline - draw_window - claim_window (drawer check 19);
+    /// the numbers from the proof must be the pool's.
+    Drawn { pool: CovUtxo, drawer: CovUtxo },
 }
 
 /// Spec J6: the winning numbers from the round's anchor proof.
@@ -378,11 +398,7 @@ pub struct RootsOut {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WinningInput {
     pub covenant_id: Hex,
-    /// The marker's round.
-    pub round: Dec,
-    /// The reference D (the marker's creation DAA + seed_offset).
-    pub d: Dec,
-    pub m: u32,
+    pub from: RoundObjs,
     /// 272 bytes, hex.
     pub anchor_proof: Hex,
 }
@@ -391,6 +407,10 @@ pub struct WinningInput {
 #[serde(rename_all = "camelCase")]
 pub struct WinningOut {
     pub winning: Combination,
+    /// The round, its m and its reference D, as derived from the chain objects.
+    pub round: Dec,
+    pub m: u32,
+    pub d: Dec,
     /// The anchor block X (the seed source) and its DAA score.
     pub anchor_hash: Hex,
     pub anchor_daa_score: Dec,
@@ -409,10 +429,10 @@ pub struct FeeInput {
 /// The quick testnet wallet's key (spec 6.2, S7): kept in this browser only. Absent from a
 /// `mainnet` build.
 #[cfg(not(feature = "mainnet"))]
-#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Tsify, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuickKey {
-    /// 32 bytes, hex. Never logged.
+    /// 32 bytes, hex. Never logged (`Debug` prints it redacted).
     pub secret_key: Hex,
     pub public_key: Hex,
     pub address: Address,
@@ -420,9 +440,29 @@ pub struct QuickKey {
 
 /// `quickWalletSign`: sign the listed inputs of a built transaction that this key owns.
 #[cfg(not(feature = "mainnet"))]
-#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[derive(Tsify, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuickSignInput {
     pub built: BuiltTx,
+    /// Never logged (`Debug` prints it redacted).
     pub secret_key: Hex,
+}
+
+/// What `Debug` prints for a secret key (F1 review: a `{:?}` of a key type in a log or a
+/// panic message must not leak it).
+#[cfg(not(feature = "mainnet"))]
+pub const REDACTED: &str = "<redacted>";
+
+#[cfg(not(feature = "mainnet"))]
+impl std::fmt::Debug for QuickKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuickKey").field("secret_key", &REDACTED).field("public_key", &self.public_key).field("address", &self.address).finish()
+    }
+}
+
+#[cfg(not(feature = "mainnet"))]
+impl std::fmt::Debug for QuickSignInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuickSignInput").field("built", &self.built).field("secret_key", &REDACTED).finish()
+    }
 }

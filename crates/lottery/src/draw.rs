@@ -65,6 +65,11 @@ fn dummy_drawer() -> DrawerState {
     DrawerState { round: 1, pool_tpl: [0; 32], vault_tpl: [0; 32], ticket_tpl: [0; 32], f_min: F_MIN, claim_window: CLAIM_WINDOW, draw_window: DRAW_WINDOW }
 }
 
+/// The start of `DrawCase::try_expected`'s error when the funding inputs do not cover the
+/// new reserves and the fee (no caller output left); `web::build::draw` reports it as a
+/// funding shortfall (F1 review).
+pub const FUNDING_SHORT: &str = "funding does not cover the draw";
+
 /// Creation DAA score of the round 1 marker in the standalone fixture (round r:
 /// + (r - 1) x 10^6), so D = TEST_MARKER_DAA + SEED_OFFSET = 1,000,600 as the M3-M6 seed_ref.
 pub const TEST_MARKER_DAA: i64 = 1_000_000;
@@ -762,7 +767,7 @@ impl DrawCase {
             + self.funding_total() as i128;
         let caller = total_in - values.iter().map(|&v| v as i128).sum::<i128>() - self.fee as i128;
         if caller <= 0 {
-            return Err(format!("funding does not cover the draw: caller output {caller}"));
+            return Err(format!("{FUNDING_SHORT}: caller output {caller}"));
         }
         values.push(caller as u64);
 

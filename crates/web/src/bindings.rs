@@ -168,6 +168,17 @@ pub fn script_of(address: &str) -> JsValue {
     out(net().and_then(|n| api::script_of(n, address)))
 }
 
+// ------------------------------------------------------------------------------ dev only
+
+/// The names of the library's fixture calls (feature `fixtures`: dev builds only, never the
+/// release artifact). W4's positive control: it links the fixtures, so the symbol scan that
+/// finds none in the release artifact is shown to find them when they are there.
+#[cfg(feature = "fixtures")]
+#[wasm_bindgen(js_name = devFixtureNames, unchecked_return_type = "Outcome<string[]>")]
+pub fn dev_fixture_names() -> JsValue {
+    out(net().and_then(|_| Ok(lottery::web::fixtures::calls()?.into_iter().map(|(n, _, _)| n).collect::<Vec<_>>())))
+}
+
 // ------------------------------------------------------------------------------ quick wallet
 
 /// A new quick-testnet-wallet key (absent from a `mainnet` build).

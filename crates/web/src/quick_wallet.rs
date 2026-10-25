@@ -59,7 +59,8 @@ pub fn quick_wallet_sign(net: Net, i: &QuickSignInput) -> Result<String> {
     let sk = hash32("secretKey", &i.secret_key)?;
     let (x, _) = keypair(&sk)?.x_only_public_key();
     let xb = hex(&x.serialize());
-    let u = unsigned_of(&i.built)?;
+    // The figures the page showed are checked against the transaction before signing.
+    let u = unsigned_of(net, &i.built)?;
     let mine: Vec<usize> = i.built.sign.iter().filter(|s| s.kind == KeyKind::Schnorr && s.public_key == xb).map(|s| s.index as usize).collect();
     if mine.is_empty() {
         return Err(Error::new(Code::SignedMissing, "no listed input belongs to this key"));

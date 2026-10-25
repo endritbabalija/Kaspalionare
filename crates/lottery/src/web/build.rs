@@ -439,7 +439,9 @@ pub fn draw(case: &DrawCase, outpoints: &[TransactionOutpoint], funds: &Funds) -
     c.funding = funds.funding_in();
     c.fee = funds.fee;
     c.funding_sk = PLACEHOLDER_SK;
-    let x = c.try_expected().code(Code::Refused)?;
+    // F1 review: coins below the new reserves and the fee are a funding shortfall, not a
+    // rule refusal.
+    let x = c.try_expected().map_err(|d| Error::new(if d.starts_with(crate::draw::FUNDING_SHORT) { Code::FundingShort } else { Code::Refused }, d))?;
     let mut built = c.build_with(t);
     bind(&mut built, 4 + case.absorbed.len(), outpoints, funds, Some(x.caller_output()))?;
     unsigned(&built)
@@ -584,17 +586,55 @@ pub fn fee_of(m: &Masses, rate: u64) -> Result<u64> {
 /// Build a transaction whose fee covers its own exact mass at `rate`: `mk(fee)` builds it
 /// with that fee (the change absorbs it). The mass depends on the fee only through the
 /// change output's storage mass, so this settles in a few rounds (as `tn10::fees::with_fee`).
+///
+/// The loop never drops the change: a change too small to pay for its own output (its
+/// storage mass) makes it fail. F1 review: that failure is `ChangeDust` when the same coins
+/// cover the transaction without a change output (`diagnose`), and stays `FundingShort` (or
+/// the fee cap's `FeeRate`) when they do not. Only the code differs; the coins are refused
+/// either way.
 pub fn with_fee(rate: u64, mut mk: impl FnMut(u64) -> Result<Unsigned>) -> Result<Unsigned> {
     let mut fee = fee_of(&Masses { compute: 0, transient: 0, storage: 0, priority: 1_000 }, rate)?;
+    let mut prev: Option<Unsigned> = None;
     for _ in 0..6 {
-        let u = mk(fee)?;
-        let need = fee_of(&u.masses, rate)?;
+        let u = match mk(fee) {
+            Ok(u) => u,
+            Err(e) if e.code == Code::FundingShort => return Err(diagnose(rate, prev.as_ref(), e, &mut mk)),
+            Err(e) => return Err(e),
+        };
+        let need = match fee_of(&u.masses, rate) {
+            Ok(n) => n,
+            Err(e) if e.code == Code::FeeRate => return Err(diagnose(rate, Some(&u), e, &mut mk)),
+            Err(e) => return Err(e),
+        };
         if u.fee >= need {
             return Ok(u);
         }
         fee = need.max(fee + 1);
+        prev = Some(u);
     }
     Err(Error::new(Code::FeeRate, format!("the fee did not settle at {rate} sompi/gram after 6 builds")))
+}
+
+/// Why the fee loop failed after `prev` built (F1 review). `prev` had a change output of
+/// value c at fee f; the builders leave the change out when it would be 0, so `mk(f + c)` is
+/// the same transaction without change. If one of `prev`'s plain outputs, taken as c, gives a
+/// build with fewer outputs whose fee covers its own mass, the coins cover the transaction
+/// and only the change is too small: `ChangeDust`, with the extra fee dropping it would pay
+/// in the detail. That build is discarded. Otherwise `e` stands.
+fn diagnose(rate: u64, prev: Option<&Unsigned>, e: Error, mk: &mut impl FnMut(u64) -> Result<Unsigned>) -> Error {
+    let Some(p) = prev else { return e };
+    for o in p.tx.outputs.iter().rev().filter(|o| o.covenant.is_none()) {
+        let Some(f) = p.fee.checked_add(o.value).filter(|f| *f <= MAX_FEE_SOMPI) else { continue };
+        let Ok(u) = mk(f) else { continue };
+        let Ok(need) = fee_of(&u.masses, rate) else { continue };
+        if u.tx.outputs.len() < p.tx.outputs.len() && u.fee >= need {
+            return Error::new(
+                Code::ChangeDust,
+                format!("{}; without the change output the fee would be {} sompi, {} above what its mass needs at {rate} sompi/gram", e.detail, u.fee, u.fee - need),
+            );
+        }
+    }
+    e
 }
 
 /// The withdrawal minimum of a vault state (spec M6 A4, D86): `game::w_min`.

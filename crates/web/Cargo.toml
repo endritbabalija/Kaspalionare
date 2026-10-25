@@ -21,8 +21,13 @@ crate-type = ["cdylib", "rlib"]
 # the genesis refusal and the SP12 seed gate). The quick wallet is compiled iff not mainnet.
 mainnet = ["lottery/mainnet"]
 # The private simnet (D125, `kaspasim:` addresses) as a second network for the local dev run
-# (spec 8's Playwright suite). Off in the beta build: there, only testnet-10 starts.
+# (spec 8's Playwright suite). Off in the beta build: there, only testnet-10 starts (W4 checks
+# the release artifact).
 simnet = []
+# The library's fixture calls and the export `devFixtureNames` (dev builds only; F1 review).
+# Off in the release artifact, which W4 scans for their symbols; the tests get the fixtures
+# through the dev-dependency below.
+fixtures = ["lottery/fixtures"]
 # F1 part C, spec 6.1 "Anchor proof": a compile-and-run probe of the rusty-kaspa v2.1.0 wRPC
 # client in wasm, calling GetSeqCommitLaneProof (`src/wrpc_probe.rs`). Off in every build the
 # page ships; the networking itself is F2/F5 work.
@@ -62,6 +67,11 @@ getrandom = { version = "=0.3.4", features = ["wasm_js"] }
 # wrpc-probe only: the wRPC client links rustls with ring, which needs its browser random source on
 # wasm32 (as rusty-kaspa's own `rpc/wrpc/wasm/Cargo.toml:43` sets it).
 ring = { version = "=0.17.14", features = ["wasm32_unknown_unknown_js"], optional = true }
+
+[dev-dependencies]
+# The fixture calls and golden lines for the tests (native and W1 in wasm). A dev-dependency
+# only: with resolver 2 it does not reach `cargo build -p web` (W4 checks the artifact).
+lottery = { path = "../lottery", default-features = false, features = ["fixtures"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 # W1 under Node (`wasm-bindgen-test-runner`, the CLI at the same version as wasm-bindgen).

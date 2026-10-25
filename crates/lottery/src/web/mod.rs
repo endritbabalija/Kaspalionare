@@ -26,6 +26,8 @@
 
 pub mod build;
 pub mod cases;
+/// The fixture calls (tests and the dev build only: feature `fixtures`, F1 review).
+#[cfg(feature = "fixtures")]
 pub mod fixtures;
 pub mod sign;
 pub mod verify;
@@ -143,6 +145,16 @@ codes! {
     NotStarted = 29, "not_started", "The lottery code has not been started.";
     /// A `mainnet` build refuses to start (spec 6.6, W4). F1 part C.
     MainnetRefused = 30, "mainnet_refused", "This build refuses to run on mainnet.";
+    /// A built transaction's figures (fee, ID, masses, units, sign list, summary) differ
+    /// from what its transaction gives (spec 7: amounts come from the built transaction).
+    /// F1 review.
+    BuiltMismatch = 31, "built_mismatch", "The figures shown do not match the transaction.";
+    /// A vault owner address of a type the page cannot withdraw for (its signers sign
+    /// Schnorr P2PK only; D67 allows more at the covenant level). F1 review.
+    OwnerType = 32, "owner_type", "Vault positions need a Schnorr wallet address.";
+    /// The coins cover the transaction without change, but the change left over is too
+    /// small to pay for its own output (its storage mass). F1 review.
+    ChangeDust = 33, "change_dust", "The change left over is too small to send back.";
 }
 
 impl fmt::Display for Code {

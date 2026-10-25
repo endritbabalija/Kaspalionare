@@ -16,9 +16,14 @@ license.workspace = true
 # the `.sil` source paths (template variants for the attack and mutant tests, the TEST-ONLY
 # short-void drawer, `regen-templates`). Without it (the web build) the library uses the
 # templates embedded from `templates/` and reads no file.
+# F1 review: `fixtures` (default on) keeps the fixture calls of the web layer
+# (`web::fixtures`, with their fixture wallet key) and the golden-digest lines
+# (`digest::all_lines`). The deployed web build leaves it off, so its wasm holds neither
+# (W4 checks the symbols); `crates/web` turns it on for its tests only (a dev-dependency).
 [features]
-default = ["compiler"]
+default = ["compiler", "fixtures"]
 compiler = ["harness/compiler"]
+fixtures = []
 mainnet = []
 
 [[bin]]

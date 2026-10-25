@@ -174,6 +174,53 @@ fn with_fee_covers_the_mass() {
     assert_eq!(build::fee_of(&u.masses, 1_001).unwrap_err().code, Code::FeeRate);
 }
 
+/// F1 review notes (build.rs:207, 587-598 and 442). The money behaviour is unchanged (the
+/// same coins are refused or accepted as before); only the codes are made accurate:
+/// - coins that cover a buy without change, but whose change would be too small to pay for
+///   its own output (its storage mass), are `change_dust`, not `funding_short`: the fee loop
+///   never drops change (that would pay the leftover as fee), so it refuses, and now says why;
+/// - coins that do not cover the buy even without change stay `funding_short`;
+/// - a draw whose coins do not cover the new reserves and the fee is `funding_short`, not
+///   `refused`.
+#[test]
+fn small_change_and_short_draws_have_their_codes() {
+    let c = BuyCase::new(b_max());
+    let rate = 100;
+    let cost = c.bundle.len() as u64 * (c.shard.price + c.shard.d) as u64;
+    // The fee the buy needs without a change output: coins of exactly cost + fee leave none.
+    let exact = |fee: u64| build::buy(&c, outpoint(0), &funds(&[(cost + fee, 0)], 1, fee)).unwrap();
+    let mut need0 = 0;
+    for _ in 0..4 {
+        need0 = build::fee_of(&exact(need0.max(1)).masses, rate).unwrap();
+    }
+    let u0 = exact(need0);
+    assert_eq!(u0.tx.outputs.len(), 2, "the exact-coin buy has no change output");
+    assert!(u0.fee >= build::fee_of(&u0.masses, rate).unwrap());
+    let run = |coin: u64| build::with_fee(rate, |fee| build::buy(&c, outpoint(0), &funds(&[(coin, 0)], 1, fee)));
+    let mut seen = vec![];
+    for extra in [0u64, 1, 1_000, 100_000, 1_000_000, 10_000_000] {
+        let r = run(cost + need0 + extra);
+        let what = match &r {
+            Ok(u) => format!("ok, fee {}, {} outputs", u.fee, u.tx.outputs.len()),
+            Err(e) => format!("{e}"),
+        };
+        println!("coin = cost + need0 ({need0}) + {extra}: {what}");
+        match r {
+            Ok(u) => assert_eq!(u.tx.outputs.len(), 3, "accepted only with its change output"),
+            Err(e) => assert_eq!(e.code, Code::ChangeDust, "extra {extra}: {e}"),
+        }
+        seen.push(extra);
+    }
+    // Below the no-change fee: short, whatever the change.
+    assert_code("coins below cost + fee", run(cost + need0 - 1), Code::FundingShort);
+    assert_code("coins below cost", run(cost - 1), Code::FundingShort);
+    // A large change pays for itself.
+    assert!(run(cost + need0 + 100_000_000).is_ok());
+    // A draw funded below its new reserves and fee.
+    let d = proofed(DrawCase::new(4));
+    assert_code("a draw funded short", build::draw(&d, &ops(4), &funds(&[(1_000, 0)], 4, d.fee)), Code::FundingShort);
+}
+
 fn assert_code(name: &str, r: lottery::web::Result<Unsigned>, code: Code) {
     match r {
         Ok(_) => panic!("{name}: accepted, expected {code}"),
@@ -400,7 +447,7 @@ fn error_codes_are_stable() {
         "1 bytes_length,2 not_template,3 not_canonical,4 state_range,5 chain_mismatch,6 tree_mismatch,7 purchase_invalid,8 store_format,\
          9 store_incomplete,10 anchor_invalid,11 input_range,12 funding_short,13 wallet_script,14 coin_unconfirmed,15 overflow,16 refused,\
          17 policy,18 encode,19 mass,20 engine,21 templates,22 fee_rate,23 signed_changed,24 signed_missing,25 signature_form,26 signature_invalid,\
-         27 address_network,28 input_format,29 not_started,30 mainnet_refused"
+         27 address_network,28 input_format,29 not_started,30 mainnet_refused,31 built_mismatch,32 owner_type,33 change_dust"
     );
     let msgs: std::collections::HashSet<&str> = Code::ALL.iter().map(|c| c.message()).collect();
     assert_eq!(msgs.len(), Code::ALL.len(), "one distinct message per code");

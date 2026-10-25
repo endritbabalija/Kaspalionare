@@ -12,6 +12,8 @@ use lottery::state::K_MAX;
 use lottery::web::build::{self, Coin, Funds as LFunds, OwnerCoin};
 use lottery::web::cases::{self, BuyChoice, DrawObjs};
 use lottery::web::sign::{self, SignInput, Unsigned};
+use lottery::index::{Role, State};
+use lottery::state::Payout;
 use lottery::web::{Code, Error, Result, verify};
 
 use crate::convert::{self, Net, dec, dec_i64, hash32, hex, obj, unhex, utxo};
@@ -73,28 +75,81 @@ fn purchase_lists(p: &[String]) -> Result<Vec<Vec<u8>>> {
 }
 
 /// Spec 6.3, J6: the shard trees rebuilt from their purchases against a live marker's or
-/// pool's frozen roots.
+/// pool's frozen roots. The round, m, k and roots are the chain object's (F1 review).
 pub fn check_roots(i: &RootsInput) -> Result<RootsOut> {
     let cov = cov_of(&i.covenant_id)?;
     let o = obj("against", &i.against)?;
-    let (roots, k) = match cases::live(lottery::index::Role::Marker, &o, &cov).or_else(|_| cases::live(lottery::index::Role::Pool, &o, &cov))? {
-        lottery::index::State::Marker(m) => (m.roots, m.k),
-        lottery::index::State::Pool(p) => (p.roots, p.k),
+    let (round, m, roots, k) = match cases::live(Role::Marker, &o, &cov).or_else(|_| cases::live(Role::Pool, &o, &cov))? {
+        State::Marker(mk) => {
+            verify::check_marker(&mk)?;
+            (mk.round, mk.m, mk.roots, mk.k)
+        }
+        State::Pool(p) => {
+            verify::check_pool(&p)?;
+            (p.round, p.m, p.roots, p.k)
+        }
         _ => return Err(Error::new(Code::NotTemplate, "neither a marker nor a pool")),
     };
-    let trees = cases::trees(i.m as i64, &purchase_lists(&i.purchases)?)?;
+    let trees = cases::trees(m, &purchase_lists(&i.purchases)?)?;
     verify::check_roots(&trees, &roots, k)?;
-    Ok(RootsOut { roots: trees.iter().map(|t| hex(&t.root())).collect() })
+    Ok(RootsOut { round: round.to_string(), m: m as u32, roots: trees.iter().map(|t| hex(&t.root())).collect() })
 }
 
-/// Spec J6: the winning numbers from the anchor proof (checked to anchor D).
+/// Spec J6: the winning numbers from the anchor proof, for the round the live chain objects
+/// fix (F1 review: round, m and D are derived here, never passed by the page).
+/// - `closed`: the round r marker and the round r + 1 controller (`draw()`'s inputs 1 and
+///   3): D = the marker's creation DAA score + seed_offset.
+/// - `drawn`: a live pool of round r and the live drawer: D = the pool's claim deadline -
+///   draw_window - claim_window (drawer check 19; draw() copies both windows unchanged),
+///   and the proof's numbers must be the pool's `win`, which `draw()` wrote.
+///
+/// A proof that does not anchor D is `anchor_invalid`; objects that do not belong together,
+/// or numbers that are not the pool's, are `chain_mismatch`.
 pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
-    let cov = hash32("covenantId", &i.covenant_id)?;
+    let cov = cov_of(&i.covenant_id)?;
     let proof = unhex("anchorProof", &i.anchor_proof)?;
     let p = verify::anchor_proof(&proof)?;
-    let w = verify::winning_numbers_from_anchor(&cov, dec_i64("round", &i.round)?, &proof, dec_i64("d", &i.d)?, i.m as i64)?;
+    let mismatch = |what: &str| Error::new(Code::ChainMismatch, what.to_string());
+    let (round, m, d, pool_win) = match &i.from {
+        RoundObjs::Closed { marker, controller } => {
+            let mo = obj("marker", marker)?;
+            let mk = cases::marker(&mo, &cov)?;
+            verify::check_marker(&mk)?;
+            let c = cases::controller(&obj("controller", controller)?, &cov)?;
+            verify::check_controller(&c)?;
+            if c.round != mk.round + 1 || c.drawn != 0 {
+                return Err(mismatch("the controller is not the undrawn controller of the marker's next round"));
+            }
+            (mk.round, mk.m, lottery::game::anchor_daa(mo.entry.block_daa_score as i64, c.seed_offset), None)
+        }
+        RoundObjs::Drawn { pool, drawer } => {
+            let pl = cases::pool(&obj("pool", pool)?, &cov)?;
+            verify::check_pool(&pl)?;
+            let dr = cases::drawer(&obj("drawer", drawer)?, &cov)?;
+            verify::check_drawer(&dr)?;
+            if dr.round <= pl.round {
+                return Err(mismatch("the drawer has not drawn the pool's round"));
+            }
+            let d = pl
+                .deadline
+                .checked_sub(dr.draw_window)
+                .and_then(|x| x.checked_sub(dr.claim_window))
+                .ok_or_else(|| mismatch("the pool's deadline is below the drawer's windows"))?;
+            if lottery::game::claim_deadline(d, dr.draw_window, dr.claim_window) != Some(pl.deadline) {
+                return Err(mismatch("the pool's deadline is not a claim deadline of the drawer's windows"));
+            }
+            (pl.round, pl.m, d, Some(pl.win))
+        }
+    };
+    let w = verify::winning_numbers_from_anchor(&cov.as_bytes(), round, &proof, d, m)?;
+    if pool_win.is_some_and(|win| win != w) {
+        return Err(mismatch("the anchor proof's numbers are not the pool's"));
+    }
     Ok(WinningOut {
         winning: Combination { main: [w[0], w[1], w[2], w[3], w[4]], bonus: w[5] },
+        round: round.to_string(),
+        m: m as u32,
+        d: d.to_string(),
         anchor_hash: hex(&p.x_hash()),
         anchor_daa_score: p.x.daa_score.to_string(),
     })
@@ -133,11 +188,10 @@ fn funds(net: Net, f: &Funds, fee: u64) -> Result<LFunds> {
 }
 
 /// Build with the fee loop at `f.fee_rate`, then the boundary form.
-fn built(net: Net, f: &Funds, extra_wallet: &[(u64, &kaspa_consensus_core::tx::ScriptPublicKey)], mk: impl Fn(&LFunds) -> Result<Unsigned>) -> Result<BuiltTx> {
+fn built(net: Net, f: &Funds, mk: impl Fn(&LFunds) -> Result<Unsigned>) -> Result<BuiltTx> {
     let base = funds(net, f, 0)?;
     let u = build::with_fee(f.fee_rate as u64, |fee| mk(&LFunds { fee, ..base.clone() }))?;
-    let wallet_in = base.coins.iter().map(|c| c.entry.amount).chain(extra_wallet.iter().map(|x| x.0)).try_fold(0u64, |a, v| a.checked_add(v)).ok_or_else(|| Error::new(Code::Overflow, "wallet total"))?;
-    built_tx(net, &u, &base.change, wallet_in)
+    built_tx(net, &u)
 }
 
 fn kind_of(o: &OwnerPub) -> (KeyKind, Vec<u8>) {
@@ -161,9 +215,19 @@ fn masses_out(m: &harness::Masses) -> MassesOut {
     MassesOut { compute: m.compute.to_string(), transient: m.transient.to_string(), storage: m.storage.to_string(), priority: m.priority.to_string() }
 }
 
-/// The boundary form of an unsigned transaction.
-pub fn built_tx(net: Net, u: &Unsigned, change: &kaspa_consensus_core::tx::ScriptPublicKey, wallet_in: u64) -> Result<BuiltTx> {
+/// The boundary form of an unsigned transaction. Every field is a function of the
+/// transaction, its entries and the inputs to sign (F1 review), so `unsigned_of` can
+/// recompute it: the wallet's coins are the inputs it signs, and an output comes back to the
+/// wallet when it is a plain output paying the script of one of them.
+pub fn built_tx(net: Net, u: &Unsigned) -> Result<BuiltTx> {
     let idx = u.sign_indices();
+    let mut wallet_in = 0u64;
+    let mut wallet_scripts = vec![];
+    for &i in &idx {
+        let e = u.entries.get(i).ok_or_else(|| Error::new(Code::InputRange, format!("sign index {i}")))?;
+        wallet_in = wallet_in.checked_add(e.amount).ok_or_else(|| Error::new(Code::Overflow, "wallet total"))?;
+        wallet_scripts.push(&e.script_public_key);
+    }
     let transaction = safe_json::to_safe_json(&u.tx, &u.entries, &idx, net.prefix()).map_err(|e| Error::new(Code::Encode, e))?;
     let sign = u
         .sign
@@ -180,7 +244,7 @@ pub fn built_tx(net: Net, u: &Unsigned, change: &kaspa_consensus_core::tx::Scrip
         .iter()
         .enumerate()
         .map(|(i, o)| {
-            let to_wallet = o.script_public_key == *change;
+            let to_wallet = o.covenant.is_none() && wallet_scripts.contains(&&o.script_public_key);
             if to_wallet {
                 back = back.saturating_add(o.value);
             }
@@ -214,7 +278,7 @@ pub fn build_buy(net: Net, i: &BuyInput) -> Result<BuiltTx> {
         payout: net.payout_of("payout", &i.payout)?,
         referrer: i.referrer.as_deref().map(|r| net.payout_of("referrer", r)).transpose()?,
     };
-    built(net, &i.funds, &[], |f| cases::buy(&cov, &shard, &purchases, &choice, f))
+    built(net, &i.funds, |f| cases::buy(&cov, &shard, &purchases, &choice, f))
 }
 
 pub fn build_claim(net: Net, i: &ClaimInput) -> Result<BuiltTx> {
@@ -225,14 +289,14 @@ pub fn build_claim(net: Net, i: &ClaimInput) -> Result<BuiltTx> {
     }
     let pools = i.pools.iter().map(|p| obj("pools", p)).collect::<Result<Vec<_>>>()?;
     let purchases = purchase_lists(&i.purchases)?;
-    built(net, &i.funds, &[], |f| cases::claim(&cov, &ticket, &pools, &purchases, i.index.map(|x| x as i64), f))
+    built(net, &i.funds, |f| cases::claim(&cov, &ticket, &pools, &purchases, i.index.map(|x| x as i64), f))
 }
 
 pub fn build_return_deposit(net: Net, i: &ReturnInput) -> Result<BuiltTx> {
     let cov = cov_of(&i.covenant_id)?;
     let ticket = obj("ticket", &i.ticket)?;
     let pool = i.pool.as_ref().map(|p| obj("pool", p)).transpose()?;
-    built(net, &i.funds, &[], |f| cases::return_deposit(&cov, &ticket, pool.as_ref(), f))
+    built(net, &i.funds, |f| cases::return_deposit(&cov, &ticket, pool.as_ref(), f))
 }
 
 pub fn build_close(net: Net, i: &CloseInput) -> Result<BuiltTx> {
@@ -245,7 +309,7 @@ pub fn build_close(net: Net, i: &CloseInput) -> Result<BuiltTx> {
     let shards = i.shards.iter().map(|s| obj("shards", s)).collect::<Result<Vec<_>>>()?;
     let now = dec("virtualDaaScore", &i.virtual_daa_score)?;
     let funder = net.payout_of("funds.change", &i.funds.change)?;
-    built(net, &i.funds, &[], |f| cases::close(&cov, &controller, &params, &shards, funder, f, now))
+    built(net, &i.funds, |f| cases::close(&cov, &controller, &params, &shards, funder, f, now))
 }
 
 pub fn build_draw(net: Net, i: &DrawInput) -> Result<BuiltTx> {
@@ -258,18 +322,26 @@ pub fn build_draw(net: Net, i: &DrawInput) -> Result<BuiltTx> {
     let purchases = purchase_lists(&i.purchases)?;
     let proof = i.anchor_proof.as_deref().map(|p| unhex("anchorProof", p)).transpose()?;
     let funder = net.payout_of("funds.change", &i.funds.change)?;
-    built(net, &i.funds, &[], |f| {
+    built(net, &i.funds, |f| {
         let o = DrawObjs { drawer: &drawer, marker: &marker, vault: &vault, controller: &controller, absorbed: &absorbed };
         cases::draw(&cov, &o, &purchases, proof.as_deref(), funder, f)
     })
 }
 
+/// `request_deposit()` for `owner`. F1 review: the owner must be a Schnorr P2PK address
+/// (`owner_type` otherwise). D67 accepts any P2PK or P2SH owner at the covenant level, but
+/// the page can only withdraw for owners its signers sign: KasWare and the quick wallet sign
+/// Schnorr P2PK inputs only, so a position of any other owner type would be unwithdrawable
+/// from the page.
 pub fn build_request_deposit(net: Net, i: &DepositInput) -> Result<BuiltTx> {
     let cov = cov_of(&i.covenant_id)?;
     let vault = obj("vault", &i.vault)?;
     let d = dec_i64("amount", &i.amount)?;
     let owner = net.payout_of("owner", &i.owner)?;
-    built(net, &i.funds, &[], |f| cases::request_deposit(&cov, &vault, d, owner, f))
+    if !matches!(owner, Payout::Schnorr(_)) {
+        return Err(Error::new(Code::OwnerType, format!("owner of class {}: the page withdraws for Schnorr P2PK owners only", owner.class())));
+    }
+    built(net, &i.funds, |f| cases::request_deposit(&cov, &vault, d, owner, f))
 }
 
 pub fn build_request_withdraw(net: Net, i: &WithdrawInput) -> Result<BuiltTx> {
@@ -281,21 +353,30 @@ pub fn build_request_withdraw(net: Net, i: &WithdrawInput) -> Result<BuiltTx> {
     // The owner coin must be at a standard address (the builder then requires it to be the
     // position owner's script, D67).
     net.address(&entry.script_public_key).ok_or_else(|| Error::new(Code::WalletScript, "the owner coin's script has no address"))?;
-    built(net, &i.funds, &[(entry.amount, &entry.script_public_key)], |f| cases::request_withdraw(&cov, &vault, &position, w, &owner, f))
+    built(net, &i.funds, |f| cases::request_withdraw(&cov, &vault, &position, w, &owner, f))
 }
 
 pub fn build_settle(net: Net, i: &SettleInput) -> Result<BuiltTx> {
     let cov = cov_of(&i.covenant_id)?;
     let (request, record) = (obj("request", &i.request)?, obj("record", &i.record)?);
-    built(net, &i.funds, &[], |f| cases::settle(&cov, &request, &record, f))
+    built(net, &i.funds, |f| cases::settle(&cov, &request, &record, f))
 }
 
 // ------------------------------------------------------------------------------ assemble
 
-/// The `Unsigned` behind a `BuiltTx` (as `built_tx` wrote it), checked for self-consistency:
-/// the inputs with an empty signature script are exactly the listed ones, and each listed
-/// owner is the one its UTXO's script names.
-pub fn unsigned_of(b: &BuiltTx) -> Result<Unsigned> {
+/// The `Unsigned` behind a `BuiltTx` (as `built_tx` wrote it), checked for self-consistency
+/// and against its own figures (spec 7, F1 review):
+/// - the inputs with an empty signature script are exactly the listed ones, in input order,
+///   each listed owner is the one its UTXO's script names, and each is asked for
+///   SIG_HASH_ALL;
+/// - every figure is recomputed from the transaction and must equal the given one: the fee
+///   (inputs - outputs), the masses (each listed input at its signed size), the units (a
+///   listed input's are its signer class's, and every input's give its committed budget),
+///   the ID, the sign items and the whole summary (`built_tx` again, field by field).
+///
+/// A structural fault is `input_format`; a figure that differs is `built_mismatch`. So what
+/// the page showed is what the transaction does, or nothing is signed or sent.
+pub fn unsigned_of(net: Net, b: &BuiltTx) -> Result<Unsigned> {
     let (tx, entries, form) = safe_json::from_json(&b.transaction).map_err(|e| Error::new(Code::InputFormat, format!("built.transaction: {e}")))?;
     if form != "safe" {
         return Err(Error::new(Code::InputFormat, "built.transaction is not Safe JSON"));
@@ -304,13 +385,16 @@ pub fn unsigned_of(b: &BuiltTx) -> Result<Unsigned> {
     if entries.len() != tx.inputs.len() || b.units.len() != tx.inputs.len() {
         return Err(Error::new(Code::InputFormat, "built: entries or units do not match the inputs"));
     }
-    let mut sign = vec![];
+    let mut sign: Vec<SignInput> = vec![];
     for s in &b.sign {
         let i = s.index as usize;
         let owner = owner_pub(s.kind, &unhex("sign.publicKey", &s.public_key)?)?;
         let e = entries.get(i).ok_or_else(|| Error::new(Code::InputRange, format!("sign index {i}")))?;
         if owner.payout().spk() != e.script_public_key || s.sighash_type != SIG_HASH_ALL {
             return Err(Error::new(Code::InputFormat, format!("sign item {i}: not the owner of its UTXO, or not SIG_HASH_ALL")));
+        }
+        if sign.last().is_some_and(|l| l.index >= i) {
+            return Err(Error::new(Code::InputFormat, format!("sign item {i}: not in input order")));
         }
         sign.push(SignInput { index: i, owner });
     }
@@ -320,22 +404,77 @@ pub fn unsigned_of(b: &BuiltTx) -> Result<Unsigned> {
             return Err(Error::new(Code::InputFormat, format!("input {i}: listed = {listed} but its signature script is {} bytes", inp.signature_script.len())));
         }
     }
-    let m = &b.masses;
-    let masses = harness::Masses {
-        compute: dec("masses.compute", &m.compute)?,
-        transient: dec("masses.transient", &m.transient)?,
-        storage: dec("masses.storage", &m.storage)?,
-        priority: dec("masses.priority", &m.priority)?,
-    };
     let units = b.units.iter().map(|u| dec("units", u)).collect::<Result<Vec<_>>>()?;
-    Ok(Unsigned { tx, entries, sign, masses, fee: dec("fee", &b.fee)?, units })
+    let differs = |what: &str| Error::new(Code::BuiltMismatch, format!("built.{what} is not what its transaction gives"));
+    // The fee: inputs - outputs.
+    let ins = entries.iter().try_fold(0u64, |a, e| a.checked_add(e.amount));
+    let outs = tx.outputs.iter().try_fold(0u64, |a, o| a.checked_add(o.value));
+    let fee = ins.zip(outs).and_then(|(i, o)| i.checked_sub(o)).ok_or_else(|| Error::new(Code::Overflow, "built: inputs below outputs, or a total overflows"))?;
+    if dec("fee", &b.fee)? != fee {
+        return Err(differs("fee"));
+    }
+    // The masses of the signed transaction: each listed input at its signed size.
+    let mut sized = tx.clone();
+    for s in &sign {
+        sized.inputs[s.index].signature_script = s.owner.placeholder();
+    }
+    let masses = harness::try_masses(&sized, &entries).map_err(|e| Error::new(Code::Mass, e))?;
+    let m = &b.masses;
+    let given = (dec("masses.compute", &m.compute)?, dec("masses.transient", &m.transient)?, dec("masses.storage", &m.storage)?, dec("masses.priority", &m.priority)?);
+    if given != (masses.compute, masses.transient, masses.storage, masses.priority) || tx.storage_mass() != masses.storage {
+        return Err(differs("masses"));
+    }
+    // The units: a listed input's are its signer class's; a covenant input's are those of its
+    // run here (its signature script is final), except the drawer's, whose
+    // OpChainblockSeqCommit needs the node's chain: its units are bound by the committed
+    // budget alone. Every input's units give its committed budget.
+    for (i, (inp, &u)) in tx.inputs.iter().zip(&units).enumerate() {
+        let want = match sign.iter().find(|s| s.index == i) {
+            Some(s) => Some(lottery::buy::external_signer_units(&s.owner).map_err(|e| Error::new(Code::Encode, e))?),
+            None => match harness::execute(&sized, &entries, i, false) {
+                Ok(n) => Some(n),
+                // OpChainblockSeqCommit is opcode 0xd4 (rusty-kaspa v2.1.0
+                // `crypto/txscript/src/opcodes/mod.rs:1387`); with no chain accessor it is
+                // InvalidOpcode, printed `Opcode<0xd4>`.
+                Err(harness::TxScriptError::InvalidOpcode(op)) if op.contains("<0xd4>") => None,
+                Err(e) => return Err(Error::new(Code::Engine, format!("covenant input {i}: {e}"))),
+            },
+        };
+        let budget = harness::try_budget_for(u).map_err(|e| Error::new(Code::Encode, e))?;
+        if want.is_some_and(|w| w != u) || inp.compute_commit.compute_budget() != Some(budget) {
+            return Err(differs(&format!("units[{i}]")));
+        }
+    }
+    let u = Unsigned { tx, entries, sign, masses, fee, units };
+    // Everything else, field by field: the boundary form recomputed from `u`.
+    let again = built_tx(net, &u)?;
+    for (what, same) in [
+        ("transaction", again.transaction == b.transaction),
+        ("id", again.id == b.id),
+        ("sign", again.sign == b.sign),
+        ("masses", again.masses == b.masses),
+        ("fee", again.fee == b.fee),
+        ("units", again.units == b.units),
+        ("summary.walletIn", again.summary.wallet_in == b.summary.wallet_in),
+        ("summary.walletBack", again.summary.wallet_back == b.summary.wallet_back),
+        ("summary.outputs", again.summary.outputs == b.summary.outputs),
+    ] {
+        if !same {
+            return Err(differs(what));
+        }
+    }
+    if again != *b {
+        return Err(differs("(a field)"));
+    }
+    Ok(u)
 }
 
 /// Spec 6.2: the post-sign check on the wallet's returned Safe JSON, then the final
 /// transaction (ours, with only the listed signature scripts taken from the wallet's), each
-/// signed input checked in the local engine.
+/// signed input checked in the local engine. `built` must be exactly what a builder returned:
+/// `unsigned_of` checks every figure the page showed against the transaction first.
 pub fn assemble(net: Net, i: &AssembleInput) -> Result<Signed> {
-    let u = unsigned_of(&i.built)?;
+    let u = unsigned_of(net, &i.built)?;
     let (got, got_entries, _) = safe_json::from_json(&i.signed).map_err(|e| Error::new(Code::InputFormat, format!("signed: {e}")))?;
     let tx: Transaction = sign::assemble(&u, &got, &got_entries)?;
     let transaction = safe_json::to_safe_json(&tx, &u.entries, &[], net.prefix()).map_err(|e| Error::new(Code::Encode, e))?;

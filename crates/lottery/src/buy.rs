@@ -853,8 +853,11 @@ pub enum InKind {
 }
 
 /// The public side of an owner key (front-end F1 part B, spec M5 D67): the owner's D11
-/// script without the secret. `P2sh` holds the x-only key of the wrapped Schnorr P2PK redeem
-/// script (the only P2SH owner class D67 defines).
+/// script without the secret. `P2sh` holds the x-only key of a wrapped Schnorr P2PK redeem
+/// script: the only P2SH form this library builds and signs. D67 itself accepts any P2SH
+/// owner (any redeem script, any wallet type) at the covenant level; the page restricts what
+/// it creates further (F1 review: `request_deposit` owners must be Schnorr P2PK, which every
+/// page signer can sign).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnerPub {
     Schnorr([u8; 32]),
@@ -1370,6 +1373,13 @@ impl Built {
 /// The units `finish_unsigned` gives an owner input signed outside this library: the
 /// signed run's units if their budget exceeds one signature check's, else P2PK_UNITS
 /// (exactly where `finish()`'s re-run loop ends for the same class, see `finish_inner`).
+/// The script units `finish_unsigned` commits for an input that `o` signs outside this
+/// library (a funding input is `OwnerPub::Schnorr` of its key): what the web layer checks a
+/// built transaction's units against (F1 review).
+pub fn external_signer_units(o: &OwnerPub) -> Result<u64, String> {
+    external_owner_units(o, harness::try_budget_for(P2PK_UNITS)?)
+}
+
 fn external_owner_units(o: &OwnerPub, p2pk_budget: u16) -> Result<u64, String> {
     let u = owner_signed_units(o)?;
     Ok(if harness::try_budget_for(u)? > p2pk_budget { u } else { P2PK_UNITS })
