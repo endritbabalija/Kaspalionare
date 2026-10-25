@@ -176,7 +176,46 @@ pub fn buy_figures(#[wasm_bindgen(unchecked_param_type = "BuyFiguresInput")] inp
     out(net().and_then(|n| api::buy_figures(n, &parse("input", input)?)))
 }
 
-/// The local store's format (spec 6.3, `webstore/1`): its name, version and object stores.
+// ------------------------------------------------------------------------------ my tickets (F4)
+
+/// Spec S2: a ticket card's figures (tiers, matches, each claim's prize, h and mode, when the
+/// deposit comes back, whether `return_deposit()` is valid now).
+#[wasm_bindgen(js_name = ticketCard, unchecked_return_type = "Outcome<TicketCard>")]
+pub fn ticket_card(#[wasm_bindgen(unchecked_param_type = "TicketCardInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::tickets::ticket_card(n, &parse("input", input)?)))
+}
+
+/// Spec S2, 7: the claim row's figures of a built `claim()`, each checked against its transaction.
+#[wasm_bindgen(js_name = claimFigures, unchecked_return_type = "Outcome<ClaimFigures>")]
+pub fn claim_figures(#[wasm_bindgen(unchecked_param_type = "ClaimFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::tickets::claim_figures(n, &parse("input", input)?)))
+}
+
+/// Spec S2, 7: a built `return_deposit()`'s figures, each checked against its transaction.
+#[wasm_bindgen(js_name = returnFigures, unchecked_return_type = "Outcome<ReturnFigures>")]
+pub fn return_figures(#[wasm_bindgen(unchecked_param_type = "ReturnFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::tickets::return_figures(n, &parse("input", input)?)))
+}
+
+/// Spec S8: the backup file of the store's records (text).
+#[wasm_bindgen(js_name = backupWrite, unchecked_return_type = "Outcome<string>")]
+pub fn backup_write(#[wasm_bindgen(unchecked_param_type = "BackupWriteInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::backup::backup_write(n, &parse("input", input)?)))
+}
+
+/// Spec S8: a backup file read back, every record checked (`backup_invalid` otherwise).
+#[wasm_bindgen(js_name = backupRead, unchecked_return_type = "Outcome<BackupContents>")]
+pub fn backup_read(#[wasm_bindgen(unchecked_param_type = "BackupReadInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::backup::backup_read(n, &parse("input", input)?)))
+}
+
+/// Spec 6.3, S2: a kept round copy against the node's live entries at its objects' scripts.
+#[wasm_bindgen(js_name = checkCopy, unchecked_return_type = "Outcome<CopyCheck>")]
+pub fn check_copy(#[wasm_bindgen(unchecked_param_type = "CopyCheckInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|_| crate::backup::check_copy(&parse("input", input)?)))
+}
+
+/// The local store's format (spec 6.3, `webstore/2`): its name, version and object stores.
 #[wasm_bindgen(js_name = webstoreInfo, unchecked_return_type = "WebstoreInfo")]
 pub fn webstore_info() -> JsValue {
     let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);

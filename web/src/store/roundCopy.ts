@@ -1,14 +1,28 @@
-// The round's copy (spec 6.3): after a purchase, the compact purchase lists of all the round's shards from
-// the indexer API, checked against the chain by `checkIndexerRound` (every object against the node's entry
-// for its outpoint), then kept in the local store. Every one of the k lists is checked before anything is
-// kept (F2/F3 review M1): while the round is open, against round r's live controller (m, k) and a live shard
-// for each index 0..k-1; once closed, against the marker's or a pool's frozen roots. The stage comes from the
-// chain's objects only (statusChecked). Right after a purchase the API may not have seen it yet (its shard's
-// old outpoint is then spent on the node, a chain_mismatch), so the copy retries.
-import type { RoundCopyStage, StoredRound } from '@wasm/web.js';
+// The round's copy (spec 6.3): the compact purchase lists of all the round's shards from the indexer API,
+// checked against the chain by `checkIndexerRound` (every object against the node's entry for its outpoint),
+// then kept in the local store. Every one of the k lists is checked before anything is kept (F2/F3 review
+// M1): while the round is open, against round r's live controller (m, k) and a live shard for each index
+// 0..k-1; once closed, against the marker's or a pool's frozen roots. The stage comes from the chain's
+// objects only (statusChecked). F4: a closed copy keeps the marker it was checked against, a drawn copy the
+// round result (the winning numbers, the claim deadline and every live pool's state), so a claim can later be
+// built from the copy alone, finding each pool on a node by its script. A copy never moves back a stage.
+// Right after a purchase the API may not have seen it yet (its shard's old outpoint is then spent on the
+// node, a chain_mismatch), so the copy retries.
+import type { CheckedObject, RoundCopyStage, StoredObject, StoredResult, StoredRound } from '@wasm/web.js';
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
-import { roundKey, type WebStore } from './webstore';
+import { laterStage, roundKey, type WebStore } from './webstore';
+
+function stored(o: CheckedObject): StoredObject {
+  return { role: o.role, state: o.object.state, scriptPublicKey: o.object.utxo.scriptPublicKey };
+}
+
+function resultOf(objects: CheckedObject[], round: string): StoredResult | undefined {
+  const pools = objects.filter((o) => o.view.role === 'pool' && o.view.round === round);
+  const first = pools[0]?.view;
+  if (first?.role !== 'pool') return undefined;
+  return { winning: first.win, claimDeadline: first.deadline, pools: pools.map(stored) };
+}
 
 export async function copyRound(
   ctx: Ctx,
@@ -31,6 +45,12 @@ export async function copyRound(
     );
   }
   const stage: RoundCopyStage = checked.status === 'open' ? 'open' : checked.status === 'drawn' ? 'drawn' : 'closed';
+  const marker = checked.objects.find((o) => o.view.role === 'marker' && o.view.round === checked.round);
+  const result = stage === 'drawn' ? resultOf(checked.objects, checked.round) : undefined;
+  if (stage === 'closed' && !marker)
+    throw new PageError('store_incomplete', `round ${round}: closed without its marker`);
+  if (stage === 'drawn' && !result)
+    throw new PageError('store_incomplete', `round ${round}: drawn without a live pool`);
   const rec: StoredRound = {
     key: roundKey(ctx.config.covenantId, checked.round),
     covenantId: ctx.config.covenantId,
@@ -41,8 +61,12 @@ export async function copyRound(
     stage,
     purchases: checked.purchases,
     roots: checked.roots.roots,
+    against: stage === 'closed' && marker ? stored(marker) : result?.pools[0],
+    result,
     checkedMs: String(now()),
   };
+  const prev = await store.round(ctx.config.covenantId, checked.round);
+  if (!laterStage(prev, rec)) return prev as StoredRound;
   await store.putRound(rec);
   return rec;
 }

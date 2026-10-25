@@ -260,10 +260,11 @@ describe('S3: a lost submit answer is settled from the chain, never shown as a p
     });
     const store = new WebStore(
       {
-        format: 'webstore/1',
+        format: 'webstore/2',
+        reads: ['webstore/1'],
         database: 'kaspalionare',
-        version: 1,
-        stores: ['meta', 'tickets', 'rounds'],
+        version: 2,
+        stores: ['meta', 'tickets', 'rounds', 'pending'],
         walletDatabase: 'w',
       },
       new MemoryKV(),
@@ -275,7 +276,9 @@ describe('S3: a lost submit answer is settled from the chain, never shown as a p
     expect(t.submitted).toEqual(['tx-3-1']);
     expect(t.signed).toHaveLength(1);
     expect(t.events).toContain('checking:true');
-    expect((await store.tickets(COV)).map((x) => x.buy.transactionId)).toEqual(['tx-3-1']);
+    expect((await store.tickets(COV)).map((x) => x.buy?.transactionId)).toEqual(['tx-3-1']);
+    // F4: the signed purchase was kept as pending before it was sent, and dropped once it was a ticket.
+    expect(await store.pending(COV)).toEqual([]);
   });
 
   it('lost answer, the node did not have it: the same signed transaction is sent again (one signature)', async () => {
@@ -343,6 +346,30 @@ describe('S3: a lost submit answer is settled from the chain, never shown as a p
     expect(new Set(t.submitted)).toEqual(new Set(['tx-3-1']));
     expect(t.events).toEqual(expect.arrayContaining(['checking:true', 'checking:false']));
     expect(t.events).not.toContain('rebuilt');
+  });
+
+  it('F4: an unknown outcome stays in the store as pending, signed, for a later visit to settle', async () => {
+    const w = world();
+    const t = setup(w, async () => {
+      throw lost();
+    });
+    const store = new WebStore(
+      {
+        format: 'webstore/2',
+        reads: ['webstore/1'],
+        database: 'kaspalionare',
+        version: 2,
+        stores: ['meta', 'tickets', 'rounds', 'pending'],
+        walletDatabase: 'w',
+      },
+      new MemoryKV(),
+    );
+    t.env.store = store;
+    await expect(buy(t.env, await first(t.env), undefined, t.on)).rejects.toMatchObject({ code: 'submit_unknown' });
+    const p = await store.pending(COV);
+    expect(p.map((x) => x.key)).toEqual(['tx-3-1']);
+    expect(p[0]?.signed.id).toBe('tx-3-1');
+    expect(await store.tickets(COV)).toEqual([]);
   });
 
   it('sent but not in a block in time: asked again, still held, then accepted; never a plain failure', async () => {

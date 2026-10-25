@@ -47,7 +47,7 @@ async function referralRow(page: Page) {
   return page.getByTestId('referral-to').getAttribute('data-value');
 }
 
-/** The ticket and the round's copy are in this browser's local store (webstore/1). */
+/** The ticket and the round's copy are in this browser's local store (webstore/2). */
 async function keptLocally(page: Page, id: string, round: string) {
   const run = devRun();
   await expect
@@ -66,7 +66,7 @@ async function keptLocally(page: Page, id: string, round: string) {
       },
       { timeout: 90_000 },
     )
-    .toEqual({ ticket: true, round: true, format: 'webstore/1' });
+    .toEqual({ ticket: true, round: true, format: 'webstore/2' });
 }
 
 test.describe.configure({ mode: 'serial' });

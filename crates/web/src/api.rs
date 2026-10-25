@@ -69,7 +69,7 @@ pub fn verify_state(net: Net, covenant_id: &str, role: RoleName, o: &CovUtxo) ->
     Ok(StateView::of(&cases::live(role.role(), &obj("state", o)?, &cov)?, net))
 }
 
-fn purchase_lists(p: &[String]) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn purchase_lists(p: &[String]) -> Result<Vec<Vec<u8>>> {
     if p.len() > K_MAX {
         return Err(Error::new(Code::InputRange, format!("{} purchase lists (at most {K_MAX})", p.len())));
     }
@@ -186,7 +186,7 @@ pub fn w_min(covenant_id: &str, vault: &CovUtxo) -> Result<String> {
 
 // ------------------------------------------------------------------------------ build
 
-fn cov_of(s: &str) -> Result<Hash> {
+pub(crate) fn cov_of(s: &str) -> Result<Hash> {
     Ok(Hash::from_bytes(hash32("covenantId", s)?))
 }
 

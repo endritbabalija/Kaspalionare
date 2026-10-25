@@ -49,19 +49,34 @@ pub fn origin_check(head: &str) -> Result<Option<&'static str>, String> {
     }
 }
 
+/// The dev wallet's coins the faucet has spent and its payment count; also the lock a dev round
+/// (`/round`, below) holds while it builds from the same wallet, so the two never spend one coin.
+pub type Spent = Arc<Mutex<(HashSet<Op>, usize)>>;
+
+/// F4 (TEST-ONLY dev tool, simnet binary only): a request to run the dev instance's rounds forward so
+/// that the page's combination `target` wins: the closing round is drawn, the open round closed, its
+/// anchor ground for `target` (the jackpot) and drawn (`dev.rs`, `advance`).
+pub struct DevRound {
+    pub main: [u8; 5],
+    pub bonus: u8,
+    pub reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
 struct State {
     c: Arc<KaspaRpcClient>,
     w: Wallet,
-    spent: Mutex<(HashSet<Op>, usize)>,
+    spent: Spent,
+    rounds: Option<tokio::sync::mpsc::Sender<DevRound>>,
 }
 
-/// Start the faucet on `bind` (loopback only); runs until the task is dropped.
-pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet) -> Result<tokio::task::JoinHandle<()>, String> {
+/// Start the faucet on `bind` (loopback only); runs until the task is dropped. With `rounds`, it
+/// also takes `POST /round?main=a,b,c,d,e&bonus=n` (F4, the e2e suite's deterministic draws).
+pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet, spent: Spent, rounds: Option<tokio::sync::mpsc::Sender<DevRound>>) -> Result<tokio::task::JoinHandle<()>, String> {
     if !bind.ip().is_loopback() {
         return Err("--faucet-bind: the dev faucet binds to a loopback address only".into());
     }
     let l = tokio::net::TcpListener::bind(bind).await.map_err(|e| format!("faucet bind {bind}: {e}"))?;
-    let st = Arc::new(State { c, w, spent: Mutex::new((HashSet::new(), 0)) });
+    let st = Arc::new(State { c, w, spent, rounds });
     println!("dev faucet: POST http://{bind}/faucet?address=<kaspasim:...> pays {} KAS (simnet only)", AMOUNT / KAS);
     Ok(tokio::spawn(async move {
         loop {
@@ -71,7 +86,8 @@ pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet) -> Resul
             }
             let st = st.clone();
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(30), handle(s, st)).await;
+                // A dev round mines a whole round forward: minutes, not seconds.
+                let _ = tokio::time::timeout(Duration::from_secs(900), handle(s, st)).await;
             });
         }
     }))
@@ -123,11 +139,39 @@ async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
             },
             None => err("400 Bad Request", origin, "address= is required"),
         },
+        ("POST", Some(("/round", q))) => match (&st.rounds, parse_round(q)) {
+            (None, _) => err("404 Not Found", origin, "no dev rounds in this run"),
+            (_, Err(e)) => err("400 Bad Request", origin, &e),
+            (Some(tx), Ok((main, bonus))) => {
+                let (back, rx) = tokio::sync::oneshot::channel();
+                if tx.send(DevRound { main, bonus, reply: back }).await.is_err() {
+                    err("503 Service Unavailable", origin, "the dev loop stopped")
+                } else {
+                    match rx.await {
+                        Ok(Ok(v)) => reply("200 OK", origin, &v.to_string()),
+                        Ok(Err(e)) => err("500 Internal Server Error", origin, &e),
+                        Err(_) => err("503 Service Unavailable", origin, "the dev loop dropped the request"),
+                    }
+                }
+            }
+        },
         ("POST", _) | ("GET", _) => err("404 Not Found", origin, "POST /faucet?address=<kaspasim:...>"),
         _ => err("405 Method Not Allowed", origin, "POST only"),
     };
     let _ = s.write_all(resp.as_bytes()).await;
     let _ = s.shutdown().await;
+}
+
+/// `main=a,b,c,d,e&bonus=n`: five ascending distinct numbers in 1..=30 and a bonus of at least 1.
+pub fn parse_round(q: &str) -> Result<([u8; 5], u8), String> {
+    let get = |k: &str| q.split('&').find_map(|kv| kv.strip_prefix(k)).ok_or(format!("{k} is required"));
+    let main: Vec<u8> = get("main=")?.replace("%2C", ",").replace("%2c", ",").split(',').map(|n| n.parse::<u8>().map_err(|_| format!("main: {n}"))).collect::<Result<_, _>>()?;
+    let bonus: u8 = get("bonus=")?.parse().map_err(|_| "bonus: not a number".to_string())?;
+    let main: [u8; 5] = main.try_into().map_err(|_| "main: five numbers".to_string())?;
+    if !main.windows(2).all(|w| w[0] < w[1]) || main[0] < 1 || main[4] > 30 || bonus < 1 {
+        return Err("main: five ascending numbers in 1..=30; bonus >= 1".into());
+    }
+    Ok((main, bonus))
 }
 
 /// The most coins one faucet payment spends (its mass stays far below the standard limit).
@@ -164,6 +208,15 @@ async fn pay(st: &State, address: &str) -> Result<(String, u64), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_round_requests_are_parsed() {
+        assert_eq!(parse_round("main=1,5,9,14,30&bonus=2"), Ok(([1, 5, 9, 14, 30], 2)));
+        assert_eq!(parse_round("bonus=1&main=1%2C2%2C3%2C4%2C5"), Ok(([1, 2, 3, 4, 5], 1)));
+        for bad in ["main=1,2,3,4&bonus=1", "main=5,4,3,2,1&bonus=1", "main=1,2,3,4,31&bonus=1", "main=1,2,3,4,5&bonus=0", "main=1,2,3,4,5", "bonus=1"] {
+            assert!(parse_round(bad).is_err(), "{bad}");
+        }
+    }
 
     /// F2/F3 review note: only the dev page's origin (or no browser at all) may ask for coins.
     #[test]

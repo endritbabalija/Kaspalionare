@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { StoredTicket, WebstoreInfo } from '@wasm/web.js';
+import type { StoredRound, StoredTicket, WebstoreInfo } from '@wasm/web.js';
 import { MemoryKV } from './kv';
-import { roundKey, ticketKey, WebStore } from './webstore';
+import { laterStage, roundKey, ticketKey, WebStore } from './webstore';
 
 const info: WebstoreInfo = {
-  format: 'webstore/1',
+  format: 'webstore/2',
+  reads: ['webstore/1'],
   database: 'kaspalionare',
-  version: 1,
-  stores: ['meta', 'tickets', 'rounds'],
+  version: 2,
+  stores: ['meta', 'tickets', 'rounds', 'pending'],
   walletDatabase: 'kaspalionare-wallet',
 };
 
@@ -44,25 +45,29 @@ function ticket(cov: string, txid: string): StoredTicket {
   };
 }
 
-describe('local store webstore/1 (spec 6.3)', () => {
+function round(cov: string, stage: StoredRound['stage']): StoredRound {
+  return {
+    key: roundKey(cov, '3'),
+    covenantId: cov,
+    network: 'simnet',
+    round: '3',
+    m: 2,
+    k: 16,
+    stage,
+    purchases: Array<string>(16).fill(''),
+    checkedMs: '1',
+  };
+}
+
+describe('local store webstore/2 (spec 6.3)', () => {
   it('writes its format once, keeps tickets and rounds per instance', async () => {
     const kv = new MemoryKV();
     const s = new WebStore(info, kv, () => 42);
     await s.putTicket(ticket('aa', '11'));
     await s.putTicket(ticket('bb', '22'));
-    expect(kv.data.get('meta')?.get('format')).toEqual({ format: 'webstore/1', createdMs: '42' });
+    expect(kv.data.get('meta')?.get('format')).toEqual({ format: 'webstore/2', createdMs: '42' });
     expect((await s.tickets('aa')).map((t) => t.key)).toEqual(['11:1']);
-    await s.putRound({
-      key: roundKey('aa', '3'),
-      covenantId: 'aa',
-      network: 'simnet',
-      round: '3',
-      m: 2,
-      k: 16,
-      stage: 'open',
-      purchases: Array<string>(16).fill(''),
-      checkedMs: '1',
-    });
+    await s.putRound(round('aa', 'open'));
     expect((await s.round('aa', '3'))?.purchases).toHaveLength(16);
     expect(await s.round('bb', '3')).toBeUndefined();
   });
@@ -71,5 +76,28 @@ describe('local store webstore/1 (spec 6.3)', () => {
     const kv = new MemoryKV();
     await kv.put('meta', 'format', { format: 'webstore/9', createdMs: '1' });
     await expect(new WebStore(info, kv).tickets('aa')).rejects.toMatchObject({ code: 'store_format' });
+  });
+
+  it('migrates an F3 webstore/1 store in place: its records read unchanged, the meta record says webstore/2', async () => {
+    // A store as F3 wrote it: webstore/1 meta, a ticket with shardIndex and buy, an open round copy.
+    const kv = new MemoryKV();
+    await kv.put('meta', 'format', { format: 'webstore/1', createdMs: '5' });
+    const old = ticket('aa', '11');
+    await kv.put('tickets', old.key, old);
+    await kv.put('rounds', roundKey('aa', '3'), round('aa', 'open'));
+    const s = new WebStore(info, kv);
+    expect(await s.tickets('aa')).toEqual([old]);
+    expect((await s.round('aa', '3'))?.stage).toBe('open');
+    expect(await s.format()).toBe('webstore/2');
+    expect(kv.data.get('meta')?.get('format')).toEqual({ format: 'webstore/2', createdMs: '5' });
+    expect(await s.pending('aa')).toEqual([]);
+  });
+
+  it('a round copy never moves back a stage', () => {
+    expect(laterStage(undefined, round('aa', 'open'))).toBe(true);
+    expect(laterStage(round('aa', 'open'), round('aa', 'closed'))).toBe(true);
+    expect(laterStage(round('aa', 'drawn'), round('aa', 'drawn'))).toBe(true);
+    expect(laterStage(round('aa', 'drawn'), round('aa', 'closed'))).toBe(false);
+    expect(laterStage(round('aa', 'closed'), round('aa', 'open'))).toBe(false);
   });
 });

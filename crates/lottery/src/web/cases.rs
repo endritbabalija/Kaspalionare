@@ -194,6 +194,17 @@ impl crate::store::ClaimStore for ChainStore {
 /// wins a tier with a live pool; `Some(i)` claims index i.
 pub fn claim(cov: &Hash, ticket_obj: &Obj, pools: &[Obj], purchases: &[Vec<u8>], idx: Option<i64>, funds: &Funds) -> Result<Unsigned> {
     funds.check()?;
+    let (case, pool_obj) = claim_case(cov, ticket_obj, pools, purchases, idx, funds)?;
+    let u = build::claim(&case, ticket_obj.outpoint, pool_obj.outpoint, funds)?;
+    chain_inputs(u, &[of(ticket_obj), of(pool_obj)])
+}
+
+/// The claim `claim` builds, as the model (`ClaimCase`, every output from the `game`
+/// reference), with the pool object it spends; no transaction is built (front end F4: the claim
+/// row's figures and their binding to a built claim, `crates/web` `claimFigures`). The same
+/// checks as `claim`: the ticket and every pool against their UTXOs, the purchases against
+/// every live pool's frozen roots, and the reference's own refusals.
+pub fn claim_case<'a>(cov: &Hash, ticket_obj: &Obj, pools: &'a [Obj], purchases: &[Vec<u8>], idx: Option<i64>, funds: &Funds) -> Result<(ClaimCase, &'a Obj)> {
     let t = embedded()?;
     let tk = ticket(ticket_obj, cov)?;
     ensure(pools.len() <= 64, Code::InputRange, || format!("{} pools", pools.len()))?;
@@ -221,8 +232,7 @@ pub fn claim(cov: &Hash, ticket_obj: &Obj, pools: &[Obj], purchases: &[Vec<u8>],
     .code(Code::Refused)?;
     let pool_op = *ops.get(1).ok_or_else(|| Error::new(Code::StoreIncomplete, "no pool outpoint"))?;
     let pool_obj = pools.iter().find(|o| o.outpoint == pool_op).ok_or_else(|| Error::new(Code::StoreIncomplete, "the pool is not one given"))?;
-    let u = build::claim(&case, ticket_obj.outpoint, pool_op, funds)?;
-    chain_inputs(u, &[of(ticket_obj), of(pool_obj)])
+    Ok((case, pool_obj))
 }
 
 // ------------------------------------------------------------------------------ return

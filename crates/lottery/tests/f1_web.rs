@@ -459,7 +459,8 @@ fn error_codes_are_stable() {
          17 policy,18 encode,19 mass,20 engine,21 templates,22 fee_rate,23 signed_changed,24 signed_missing,25 signature_form,26 signature_invalid,\
          27 address_network,28 input_format,29 not_started,30 mainnet_refused,31 built_mismatch,32 owner_type,33 change_dust,34 mixed_signers,\
          35 node_unavailable,36 node_network,37 node_refused,38 indexer_unavailable,39 worker_stopped,40 node_conflict,\
-         41 wallet_missing,42 wallet_rejected,43 wallet_network,44 storage_unavailable,45 sales_closed,46 purchase_changed,47 submit_unknown,48 wallet_timeout,49 wallet_changed"
+         41 wallet_missing,42 wallet_rejected,43 wallet_network,44 storage_unavailable,45 sales_closed,46 purchase_changed,47 submit_unknown,48 wallet_timeout,49 wallet_changed,\
+         50 backup_invalid,51 backup_mismatch,52 copy_mismatch,53 fee_above_prize"
     );
     let msgs: std::collections::HashSet<&str> = Code::ALL.iter().map(|c| c.message()).collect();
     assert_eq!(msgs.len(), Code::ALL.len(), "one distinct message per code");

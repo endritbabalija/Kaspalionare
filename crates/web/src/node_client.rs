@@ -146,6 +146,18 @@ async fn entries(n: Net, objects: Vec<ApiObject>) -> Result<Vec<Utxo>> {
     Ok(node::entries_for(&objects, out))
 }
 
+/// The instance's covenant objects at each script (F4: a pool by its script; dust dropped as
+/// the answer streams past, at most `SCRIPT_ENTRIES_MAX` per script).
+async fn script_entries(n: Net, i: node::ScriptEntriesInput) -> Result<Vec<Utxo>> {
+    let c = client()?;
+    let mut out = vec![];
+    for (script, a) in node::script_addresses(n, &i)? {
+        let v = utxos_at(&c, n, &a).await?;
+        out.extend(node::script_entries(&i.covenant_id, &script, v.into_iter().map(dto_of)));
+    }
+    Ok(out)
+}
+
 /// The address's plain coins: the `limit` largest, the largest first (None: all, for the balance).
 async fn coins(n: Net, address: String, limit: Option<usize>) -> Result<Vec<Utxo>> {
     let c = client()?;
@@ -224,6 +236,17 @@ pub async fn node_entries(#[wasm_bindgen(unchecked_param_type = "ApiObject[]")] 
         let n = net()?;
         let objects: Vec<ApiObject> = parse("objects", objects)?;
         entries(n, objects).await
+    };
+    out(r.await)
+}
+
+/// The instance's covenant objects at these scripts, as a public node holds them (F4: a prize
+/// pool found by its script, which its claims never change; at most 8 per script).
+#[wasm_bindgen(js_name = nodeScriptEntries, unchecked_return_type = "Outcome<Utxo[]>")]
+pub async fn node_script_entries(#[wasm_bindgen(unchecked_param_type = "ScriptEntriesInput")] input: JsValue) -> JsValue {
+    let r = async {
+        let n = net()?;
+        script_entries(n, parse("input", input)?).await
     };
     out(r.await)
 }

@@ -218,6 +218,85 @@ async fn close(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Template
     Ok(next)
 }
 
+// ------------------------------------------------------------------ dev rounds (F4, TEST-ONLY)
+
+/// `draw()` of the closed `round` from the index, with the anchor proof read from the node; when
+/// `target` is given, the anchor X is ground first so that `target` is the winning combination (the
+/// jackpot; `sn::grind`, D114). Returns the caller output for the next step.
+#[allow(clippy::too_many_arguments)]
+async fn draw_round(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templates>, round: i64, target: Option<Combo>, fund: Utxo) -> Result<(Utxo, [u8; 6]), String> {
+    use lottery::store::{Funding, Payer};
+    let close = x.ix.round(round).and_then(|r| r.close.clone()).ok_or(format!("round {round} is not closed in the index"))?;
+    let start = x.chain_block_of(&close.txid).ok_or(format!("round {round}: its close's chain block is not known"))?;
+    let (seed_offset, m) = live_where(x, |s| matches!(s, State::Marker(mk) if mk.round == round))
+        .find_map(|l| if let Some(State::Marker(mk)) = &l.state { Some(mk.m) } else { None })
+        .zip(live_where(x, |s| matches!(s, State::Controller(cc) if cc.round == round + 1)).find_map(|l| if let Some(State::Controller(cc)) = &l.state { Some(cc.seed_offset) } else { None }))
+        .map(|(m, so)| (so, m))
+        .ok_or(format!("round {round}: no live marker and next controller"))?;
+    let d = lottery::game::anchor_daa(close.marker_daa as i64, seed_offset) as u64;
+    match target {
+        Some(tg) => {
+            let hb = tg.bytes();
+            let p = 1.0 / (N as f64 * m as f64);
+            sn::grind(c, w, &x.cov.as_bytes(), round, m, d, "the page's combination wins the jackpot", p, move |s| win6(s) == hb, move |s| format!("win {:?}+{}", s.main, s.bonus)).await?;
+            mine(c, &w.addr, 50).await?;
+        }
+        None => {
+            mine_past_daa(c, &w.addr, d + 60).await?;
+        }
+    }
+    let to = crate::anchor::Timeouts { anchor: Duration::from_secs(30), blue_score: Duration::from_secs(30), poll: Duration::from_millis(20) };
+    let a = crate::anchor::rpc_anchor(c, start, d, &to).await?;
+    let sim = Arc::new(harness::ChainSim::from_real_chain(harness::Hash::from_bytes(a.p.fields.parent_commit), &[a.p.sim, a.x.sim]));
+    let funding = [Funding { outpoint: fund.op, value: fund.entry.amount, daa: fund.entry.block_daa_score }];
+    let me = Payout::Schnorr(w.xonly());
+    let fin = |fee: u64| -> Result<(lottery::buy::Final, lottery::draw::DrawCase), String> {
+        let (mut dc, ops) = lottery::draw::DrawCase::from_store(&x.ix, Some(a.proof), &funding, me, &Payer { funding_sk: w.sk, fee })?;
+        dc.sim = Some(sim.clone());
+        let mut b = dc.build_with(t.clone());
+        b.outpoints = ops;
+        Ok((b.finish(), dc))
+    };
+    let fee = lottery_fee(&fin(0)?.0);
+    let (f, dc) = fin(fee)?;
+    f.run().map_err(|(i, e)| format!("local engine rejects draw at input {i}: {e:?}"))?;
+    let dx = dc.expected();
+    let tx = finalized(&f);
+    submit_and_accept(c, w, &format!("dev round: round {round} draw()"), &tx, &f.entries).await?;
+    let win = [dc.seed().main[0], dc.seed().main[1], dc.seed().main[2], dc.seed().main[3], dc.seed().main[4], dc.seed().bonus];
+    println!("dev round: round {round} drawn, winning {win:?}, pools {:?}", dx.values.len());
+    let next = own_utxo(c, w, Op::new(tx.id(), dx.caller_output() as u32)).await?;
+    catch_up(c, x).await?;
+    Ok((next, win))
+}
+
+/// F4 (`POST /round` on the dev faucet; TEST-ONLY, simnet only): the closing round is drawn, the open
+/// round mined past its deadline, closed, its anchor ground so that the page's combination `target`
+/// wins the jackpot, and drawn. The faucet's lock is held throughout, so the faucet and this never
+/// spend one coin of the dev wallet.
+async fn advance(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templates>, starts: &Starts, spent: &crate::faucet::Spent, target: Combo) -> Result<serde_json::Value, String> {
+    let g = spent.lock().await;
+    let vdaa = c.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+    let mut coins: Vec<Utxo> = w.spendable(c, vdaa).await?.into_iter().filter(|u| !g.0.contains(&u.op)).collect();
+    coins.sort_by_key(|u| std::cmp::Reverse(u.entry.amount));
+    let mut fund = coins.into_iter().next().filter(|u| u.entry.amount >= 20 * KAS).ok_or("the dev wallet has no coin of 20 KAS; retry in a minute")?;
+    let mut drawn = vec![];
+    // The closing round (a live marker), drawn honestly.
+    let closing = live_where(x, |s| matches!(s, State::Marker(_))).find_map(|l| if let Some(State::Marker(mk)) = &l.state { Some(mk.round) } else { None });
+    if let Some(r) = closing {
+        fund = draw_round(c, w, x, t, r, None, fund).await?.0;
+        drawn.push(r);
+    }
+    // The open round: closed, then drawn with the page's combination winning.
+    let open = live_where(x, |s| matches!(s, State::Controller(cc) if cc.drawn == 1)).find_map(|l| if let Some(State::Controller(cc)) = &l.state { Some(cc.round) } else { None }).ok_or("no open round whose predecessor is drawn")?;
+    fund = close(c, w, x, t, open, fund).await?;
+    note_closes(x, starts);
+    let (_, win) = draw_round(c, w, x, t, open, Some(target), fund).await?;
+    note_closes(x, starts);
+    drop(g);
+    Ok(serde_json::json!({ "drawn": drawn, "round": open.to_string(), "winning": { "main": &win[..5], "bonus": win[5] } }))
+}
+
 // ------------------------------------------------------------------ self-check (as the page)
 
 /// GET `path` on the local API (HTTP/1.1, `Connection: close`): (status, body).
@@ -391,7 +470,9 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
     note_closes(&x, &starts);
     acfg.anchor = Some(Arc::new(NodeAnchor { c: c.clone(), starts: starts.clone() }));
     let api = tokio::spawn(indexer_api::run(acfg));
-    let faucet = crate::faucet::serve(o.faucet_bind, c.clone(), Wallet { sk: w.sk, addr: w.addr.clone() }).await?;
+    let spent: crate::faucet::Spent = Default::default();
+    let (round_tx, mut round_rx) = tokio::sync::mpsc::channel::<crate::faucet::DevRound>(1);
+    let faucet = crate::faucet::serve(o.faucet_bind, c.clone(), Wallet { sk: w.sk, addr: w.addr.clone() }, spent.clone(), Some(round_tx)).await?;
     // The page's default referrer (spec 6.5, 7: the site owner's address) for the dev run: a
     // fresh address whose key is dropped at once (nobody spends what it receives on this
     // throwaway node); only its address goes into current.json.
@@ -428,6 +509,16 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
         tokio::select! {
             _ = &mut stop => { println!("dev: Ctrl-C; stopping"); break; }
             _ = tokio::time::sleep(Duration::from_millis(o.block_ms)) => {}
+            Some(req) = round_rx.recv() => {
+                let target = Combo::new(req.main, req.bonus);
+                println!("dev round: the page's combination {:?}+{} to win", req.main, req.bonus);
+                let r = advance(&c, &w, &mut x, &t, &starts, &spent, target).await;
+                if let Err(e) = &r {
+                    eprintln!("dev round: {e}");
+                }
+                let _ = req.reply.send(r);
+                continue;
+            }
         }
         mine_one(&*c, &w.addr).await?;
         if let Err(e) = catch_up(&c, &mut x).await {

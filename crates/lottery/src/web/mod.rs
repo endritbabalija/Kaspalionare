@@ -204,6 +204,20 @@ codes! {
     /// Front end F2/F3 review S1 (the page): the quick wallet's key in this browser is no longer
     /// the one this page connected with (another tab replaced it); nothing is signed with it.
     WalletChanged = 49, "wallet_changed", "The wallet's key changed in another tab.";
+    /// Front end F4 (S8): a backup file that does not read as this page's backup: not the
+    /// backup format, damaged (its checksum or a record does not hold), too large, or of
+    /// another instance or network. Nothing is imported.
+    BackupInvalid = 50, "backup_invalid", "The backup file is damaged or not for this page.";
+    /// Front end F4 (S8): a backup that reads, but whose tickets or purchase lists the chain
+    /// contradicts (a list that does not rebuild the frozen roots, a ticket whose state is not
+    /// its live UTXO's). Nothing is imported.
+    BackupMismatch = 51, "backup_mismatch", "The backup does not match the chain.";
+    /// Front end F4 (S2, the local-copy box): a round copy kept on this device no longer
+    /// rebuilds the chain's frozen roots.
+    CopyMismatch = 52, "copy_mismatch", "The copy saved on this device does not match the chain.";
+    /// Front end F4 (S2, spec 7 "Claims"): a warning, not a refusal: the built claim's network fee
+    /// is larger than its prize (D82: under load a small claim can cost several times P_MIN).
+    FeeAbovePrize = 53, "fee_above_prize", "The network fee is larger than the prize.";
 }
 
 impl fmt::Display for Code {

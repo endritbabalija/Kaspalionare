@@ -20,6 +20,8 @@ import type {
   Combination,
   GameShape,
   Signed,
+  StoredBuy,
+  StoredPending,
   Utxo,
 } from '@wasm/web.js';
 import type { TxStep } from '@/components/TxProgress';
@@ -338,12 +340,15 @@ export async function signAndSubmit(
   onStep: (s: TxStep) => void,
   dev?: DevHooks,
   settle?: SettleOpts,
+  onSigned?: (final: Signed) => Promise<void>,
 ): Promise<{ id: string; final: Signed }> {
   const signed = await wallet.signInputs(
     built,
     built.sign.map((s) => s.index),
   );
   const final = unwrap(await lottery.call('assemble', { built, signed }));
+  // F4: kept before it is sent (a purchase whose outcome the page does not learn is settled on a later visit).
+  if (onSigned) await onSigned(final);
   onStep('signed');
   if (dev?.holdBeforeSubmit) {
     await new Promise<void>((resolve) => {
@@ -469,6 +474,17 @@ async function prepareFresh(
   throw last;
 }
 
+function buyRecord(id: string, f: BuyFigures): StoredBuy {
+  return {
+    transactionId: id,
+    price: f.price,
+    deposit: f.deposit,
+    depositBack: f.depositBack,
+    fee: f.fee,
+    referral: f.referral,
+  };
+}
+
 function ticketObject(id: string, f: BuyFigures): ApiObject {
   return {
     role: 'ticket',
@@ -556,6 +572,20 @@ export async function buy(
   for (;;) {
     onEvent({ kind: 'step', step: 'built' });
     const f = prepared.figures;
+    const pendingOf = (final: Signed): StoredPending => ({
+      key: final.id,
+      covenantId: ctx.config.covenantId,
+      network: ctx.config.network,
+      round: f.round,
+      shardIndex: f.shardIndex,
+      ticket: f.ticket,
+      bundle,
+      payout: env.address,
+      buy: buyRecord(final.id, f),
+      signed: final,
+      savedMs: String(Date.now()),
+    });
+    let pendingKey: string | undefined;
     try {
       const sent = await signAndSubmit(
         ctx.lottery,
@@ -571,11 +601,21 @@ export async function buy(
           tries: t.settleTries,
           delayMs: t.settleDelayMs,
         },
+        env.store
+          ? async (final) => {
+              pendingKey = final.id;
+              await env.store?.putPending(pendingOf(final));
+            }
+          : undefined,
       );
       id = sent.id;
       entry = await waitAccepted(env, id, f, sent.final, onChecking);
       break;
     } catch (e) {
+      // Kept only while the outcome is unknown; any other ending is known (refused, or settled as a conflict).
+      if (pendingKey && env.store && !(e instanceof PageError && e.code === 'submit_unknown')) {
+        await env.store.delPending(pendingKey).catch(() => undefined);
+      }
       if (!(e instanceof PageError && e.code === 'node_conflict') || rebuilds >= REBUILDS_MAX) throw e;
       exclude.add(prepared.shardIndex);
       rebuilds++;
@@ -602,16 +642,10 @@ export async function buy(
       ticket: { utxo: entry, state: f.ticket.state },
       bundle,
       payout: env.address,
-      buy: {
-        transactionId: id,
-        price: f.price,
-        deposit: f.deposit,
-        depositBack: f.depositBack,
-        fee: f.fee,
-        referral: f.referral,
-      },
+      buy: buyRecord(id, f),
       savedMs: String(Date.now()),
     });
+    await store.delPending(id).catch(() => undefined);
     copy = copyRoundSoon(ctx, store, f.round);
     copy.catch((e: unknown) => console.warn(`round copy ${f.round} failed`, e));
   }

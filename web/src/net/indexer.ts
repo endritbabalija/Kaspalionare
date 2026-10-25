@@ -2,7 +2,7 @@
 // come from the wasm: indexerLimits) and parsed by the worker's parseIndexer* call; nothing it says is
 // used before the worker has checked it against the node (net/round.ts). Unreachable, or an error status,
 // is indexer_unavailable (the API's own error body goes into the detail).
-import type { ApiAnchorProof, ApiPurchases, ApiRound, ApiRounds, ApiStatus, Limits } from '@wasm/web.js';
+import type { ApiAnchorProof, ApiPurchases, ApiRound, ApiRounds, ApiStatus, ApiTickets, Limits } from '@wasm/web.js';
 import { PageError, unwrap } from '@/lib/errors';
 import type { LotteryClient } from '@/worker/client';
 import { fetchText } from './fetchText';
@@ -65,6 +65,17 @@ export class Indexer {
       await this.lottery.call(
         'parseIndexerPurchases',
         (await this.get(`rounds/${encodeURIComponent(r)}/purchases`, c.purchases)) ?? '',
+      ),
+    );
+  }
+
+  /** The live tickets paying out to `payout`, and its purchase history (J3; checked against the node by the caller). */
+  async tickets(payout: string): Promise<ApiTickets> {
+    const c = await this.caps();
+    return unwrap(
+      await this.lottery.call(
+        'parseIndexerTickets',
+        (await this.get(`tickets?payout=${encodeURIComponent(payout)}`, c.objects)) ?? '',
       ),
     );
   }

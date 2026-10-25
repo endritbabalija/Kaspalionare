@@ -35,6 +35,8 @@
 //! comes from `lottery::web` (`cases`, `build`, `sign`, `verify`).
 
 pub mod api;
+/// The backup file and the re-check of a kept round copy against the chain (spec S8, 6.3; F4).
+pub mod backup;
 pub mod bindings;
 pub mod convert;
 pub mod dto;
@@ -51,8 +53,10 @@ pub mod node_client;
 #[cfg(not(feature = "mainnet"))]
 pub mod quick_wallet;
 pub mod safe_json;
+/// My tickets (spec S2; F4): the ticket card, the claim row and the deposit return, from Rust.
+pub mod tickets;
 pub mod views;
-/// The page's local store format (`webstore/1`, spec 6.3; front end F3 part B): the records the
+/// The page's local store format (`webstore/2`, spec 6.3; front end F3 part B, F4): the records the
 /// page keeps in IndexedDB, declared here so the page has no hand-written copy of them.
 pub mod webstore;
 /// The wRPC feasibility probe (feature `wrpc-probe`, wasm32 only; spec 6.1 "Anchor proof").

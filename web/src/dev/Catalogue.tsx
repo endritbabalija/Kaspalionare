@@ -4,7 +4,11 @@
 // sample figures for the catalogue only.
 import type { ReactNode } from 'react';
 import { Amount } from '@/components/Amount';
+import { BallRow } from '@/components/BallRow';
 import { BonusTile, type BonusTileState } from '@/components/BonusTile';
+import { ClaimRow } from '@/components/ClaimRow';
+import { LocalCopyBox } from '@/components/LocalCopyBox';
+import { TicketCard } from '@/components/TicketCard';
 import { CostPanel } from '@/components/CostPanel';
 import { HashOrAddress } from '@/components/HashOrAddress';
 import { JackpotCountdown } from '@/components/JackpotCountdown';
@@ -14,6 +18,7 @@ import { Time } from '@/components/Time';
 import { TicketRow } from '@/components/TicketRow';
 import { TxProgress } from '@/components/TxProgress';
 import { RoundCardView } from '@/screens/play/RoundCard';
+import { claimView, SAMPLE_TX, sampleCard, sampleFigures, sampleStored } from './ticketSamples';
 
 /** Searched for by scripts/check-bundle.mjs: present in development, absent from production bundles. */
 export const CATALOGUE_MARKER = 'KASPALIONARE_DEV_CATALOGUE';
@@ -121,6 +126,102 @@ function Sheet() {
             />
           </div>
         ))}
+      </Row>
+      <Row name="Ball row: drawn, four main numbers and the bonus matched">
+        <BallRow
+          combination={{ main: [3, 7, 12, 19, 28], bonus: 2 }}
+          matchedMain={[true, true, false, true, true]}
+          bonusMatched
+          testId="cat-balls"
+        />
+      </Row>
+      <Row name="Claim row: claimable · claiming · claimed · accrued below P_MIN · fee exceeds prize">
+        <div className="flex w-full flex-col gap-2">
+          <ClaimRow
+            testId="cat-claim-claimable"
+            claim={claimView('pay', '1240000000', '2')}
+            figures={sampleFigures(claimView('pay', '1240000000', '2'), '25019700')}
+            deadline="6100000"
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+          />
+          <ClaimRow
+            testId="cat-claim-claiming"
+            claim={claimView('final', '1240000000')}
+            figures={sampleFigures(claimView('final', '1240000000'), '6172000', '26000000')}
+            tx={{ step: 'signed' }}
+          />
+          <ClaimRow testId="cat-claim-claimed" claimed />
+          <ClaimRow
+            testId="cat-claim-accrued"
+            claim={claimView('accrue', '2240000')}
+            figures={sampleFigures(claimView('accrue', '1000'), '1000')}
+          />
+          <ClaimRow
+            testId="cat-claim-fee"
+            claim={claimView('final', '2240000')}
+            figures={sampleFigures(claimView('final', '2240000'), '14474100', '26000000')}
+          />
+        </div>
+      </Row>
+      <Row name="Ticket card: open · win · no win · partly claimed · fully claimed · void · deposit returnable · deposit returned">
+        <div className="flex w-full flex-col gap-2">
+          {(['open', 'win', 'no-win', 'partly', 'void', 'returnable'] as const).map((k) => (
+            <TicketCard
+              key={k}
+              testId={`cat-ticket-${k}`}
+              stored={sampleStored('12')}
+              status={k === 'open' ? 'open' : k === 'void' ? 'void' : 'drawn'}
+              card={sampleCard(k)}
+              clock={{ virtualDaa: VDAA, observedAt: NOW }}
+              claims={{ 0: { figures: sampleFigures(claimView('pay', '1240000000', '2'), '25019700') } }}
+              ret={{
+                figures: {
+                  round: '12',
+                  path: 'alone',
+                  amount: '26000000',
+                  payout: ADDR,
+                  fee: '5166400',
+                  lockTime: '12109662',
+                },
+              }}
+            />
+          ))}
+          <TicketCard
+            testId="cat-ticket-claimed"
+            stored={sampleStored('11', {
+              kind: 'claimed',
+              transactionId: SAMPLE_TX,
+              amount: '1266000000',
+              endedMs: '1',
+            })}
+            status="drawn"
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+          />
+          <TicketCard
+            testId="cat-ticket-returned"
+            stored={sampleStored('10', {
+              kind: 'returned',
+              transactionId: SAMPLE_TX,
+              amount: '26000000',
+              endedMs: '1',
+            })}
+            status="drawn"
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+          />
+        </div>
+      </Row>
+      <Row name="Local-copy box: complete and verified · incomplete · mismatch · not needed">
+        <div className="flex w-full flex-col gap-2">
+          {(['complete', 'incomplete', 'mismatch', 'not-needed'] as const).map((s) => (
+            <LocalCopyBox
+              key={s}
+              state={s}
+              rounds={s === 'not-needed' ? 0 : 2}
+              tickets={s === 'not-needed' ? 0 : 3}
+              onDownload={() => undefined}
+            />
+          ))}
+        </div>
       </Row>
       <Row name="Round card: loading · error · ready">
         <div className="w-full">

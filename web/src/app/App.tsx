@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect } from 'react';
 import type { Ctx } from '@/net/round';
 import { captureReferral } from '@/referral/referral';
+import { Backup } from '@/screens/Backup';
+import { MyTickets } from '@/screens/MyTickets';
 import { Play } from '@/screens/Play';
 import { Placeholder } from '@/screens/Placeholder';
 import { Wallet } from '@/screens/Wallet';
@@ -43,7 +45,7 @@ function Screens({ ctx }: { ctx: Ctx }) {
       screen = <Play />;
       break;
     case 'tickets':
-      screen = <Placeholder title="My tickets" testId="tickets" />;
+      screen = <MyTickets />;
       break;
     case 'rounds':
       screen = <Placeholder title="Rounds" testId="rounds" />;
@@ -55,7 +57,7 @@ function Screens({ ctx }: { ctx: Ctx }) {
       screen = <Placeholder title="How it works" testId="how" />;
       break;
     case 'backup':
-      screen = <Placeholder title="Backup" testId="backup" />;
+      screen = <Backup />;
       break;
     case 'wallet':
       screen = <Wallet />;

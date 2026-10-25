@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
 use crate::convert::{self, Net};
-use crate::dto::{Address, Dec, Utxo};
+use crate::dto::{Address, Dec, Hex, Utxo};
 use crate::indexer::ApiObject;
 
 /// The most objects one `nodeEntries` call takes (the indexer's own list cap).
@@ -256,6 +256,49 @@ pub fn coins_total(coins: &[Utxo]) -> Result<Dec> {
     Ok(t.to_string())
 }
 
+
+/// At most this many entries kept per script by `nodeScriptEntries` (a live covenant object has
+/// one UTXO; anything else at its address is somebody's dust).
+pub const SCRIPT_ENTRIES_MAX: usize = 8;
+
+/// `nodeScriptEntries` (front end F4): the covenant objects to read by script, not outpoint (a
+/// prize pool keeps its state, so its script, through every claim; its outpoint moves).
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScriptEntriesInput {
+    pub covenant_id: Hex,
+    /// Script public keys (Safe JSON form), at most 16.
+    pub scripts: Vec<Hex>,
+}
+
+/// The distinct addresses of the scripts (each must be a standard script on `net`).
+pub fn script_addresses(net: Net, i: &ScriptEntriesInput) -> Result<Vec<(String, Address)>> {
+    if i.scripts.len() > 16 {
+        return Err(Error::new(Code::InputRange, format!("{} scripts (at most 16)", i.scripts.len())));
+    }
+    convert::hash32("covenantId", &i.covenant_id)?;
+    let mut out: Vec<(String, Address)> = vec![];
+    for s in &i.scripts {
+        let spk = convert::spk("scripts", s)?;
+        let a = net.address(&spk).ok_or_else(|| Error::new(Code::WalletScript, "not a standard script"))?;
+        let key = convert::spk_hex(&spk);
+        if !out.iter().any(|(k, _)| *k == key) {
+            out.push((key, a));
+        }
+    }
+    Ok(out)
+}
+
+/// The entries at exactly `script` that carry the instance's covenant ID, at most
+/// `SCRIPT_ENTRIES_MAX`, filtered as the node's answer streams past (as `keep_outpoints`: dust
+/// at the address is never counted or kept).
+pub fn script_entries(covenant_id: &str, script: &str, node: impl IntoIterator<Item = Utxo>) -> Vec<Utxo> {
+    node.into_iter()
+        .filter(|u| u.script_public_key.eq_ignore_ascii_case(script) && u.covenant_id.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(covenant_id)))
+        .take(SCRIPT_ENTRIES_MAX)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +444,32 @@ mod tests {
         let t = error_table();
         assert_eq!(t.len(), Code::ALL.len());
         assert!(t.iter().enumerate().all(|(i, e)| e.number as usize == i + 1));
+    }
+
+    /// F4: a pool is read by its script; only entries at exactly that script carrying the
+    /// instance's covenant ID count, at most SCRIPT_ENTRIES_MAX, however much dust is there.
+    #[test]
+    fn script_entries_keep_only_the_instances_objects() {
+        let cov = "cc".repeat(32);
+        let at = |spk: &str, c: Option<&str>, n: u32| Utxo {
+            transaction_id: format!("{n:064x}"),
+            index: 0,
+            amount: "1".into(),
+            script_public_key: spk.into(),
+            block_daa_score: "1".into(),
+            is_coinbase: false,
+            covenant_id: c.map(String::from),
+        };
+        let mut node: Vec<Utxo> = (0..9_000).map(|n| at("0000aa", None, n)).collect();
+        node.push(at("0000aa", Some(&"dd".repeat(32)), 9_001));
+        node.push(at("0000bb", Some(&cov), 9_002));
+        node.push(at("0000AA", Some(&cov), 9_003));
+        let kept = script_entries(&cov, "0000aa", node.clone());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].transaction_id, format!("{:064x}", 9_003));
+        let many: Vec<Utxo> = (0..20).map(|n| at("0000aa", Some(&cov), n)).collect();
+        assert_eq!(script_entries(&cov, "0000aa", many).len(), SCRIPT_ENTRIES_MAX);
+        let i = ScriptEntriesInput { covenant_id: cov.clone(), scripts: vec!["00".into(); 17] };
+        assert_eq!(script_addresses(Net::Testnet10, &i).unwrap_err().code, Code::InputRange);
     }
 }

@@ -1083,9 +1083,13 @@ const PAGE_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/src/
 
 fn page_fixtures() -> String {
     let mut m = serde_json::Map::new();
-    for name in ["buy b=1 ref", "buy b=4", "close k=16"] {
+    for name in ["buy b=1 ref", "buy b=4", "close k=16", "claim k=4", "return after", "return with pool"] {
         let (_, inp) = find(name);
         m.insert(name.into(), inp.json());
+    }
+    // F4: one claim of each mode (D56), for the page's claim tests.
+    for (name, call, _) in lottery::web::fixtures::claim_calls().expect("claim calls") {
+        m.insert(name, common::input(&call).json());
     }
     serde_json::to_string_pretty(&serde_json::Value::Object(m)).unwrap() + "\n"
 }

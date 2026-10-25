@@ -189,3 +189,25 @@ pub fn calls() -> Result<Vec<(String, Call, Unsigned)>> {
     }
     Ok(out)
 }
+
+/// Front end F4: one claim of each mode (D56), as page calls: PAY on a combination held twice
+/// (h = 2, prize 0.1 KAS), ACCRUE (a prize below P_MIN), and FINAL (the ticket's last unclaimed
+/// index: the prize plus the ticket's value). Not part of `calls()`, whose digests are golden.
+pub fn claim_calls() -> Result<Vec<(String, Call, Unsigned)>> {
+    let mut fin = ClaimCase::new(4);
+    fin.make_final();
+    let cases = [
+        ("claim pay h=2", ClaimCase::fabricated(4, 10, crate::state::TIER_LOWER0, 20_000_000, &[1, 1])),
+        ("claim accrue", ClaimCase::fabricated(4, 10, crate::state::TIER_LOWER0, 1_000_000, &[1])),
+        ("claim final", fin),
+    ];
+    let mut out = vec![];
+    for (name, c) in cases {
+        let f = wallet_funds(&fd(&c.funding), 2, c.fee);
+        let u = build::claim(&c, outpoint(0), outpoint(1), &f)?;
+        let o = objs(&u, &[State::Ticket(c.ticket.clone()), State::Pool(c.pool.clone())])?;
+        let purchases = c.trees.iter().map(|t| t.purchases()).collect();
+        out.push((name.into(), Call::Claim { cov: c.cov, ticket: o[0].clone(), pools: vec![o[1].clone()], purchases, idx: Some(c.idx), funds: f }, u));
+    }
+    Ok(out)
+}

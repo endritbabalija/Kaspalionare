@@ -176,7 +176,7 @@ async fn mine_to_sink_daa<C: RpcApi + ?Sized>(c: &C, w: &Wallet, target: u64) ->
 /// Grind the anchor X for D (see the module doc). `want` decides on the seed numbers;
 /// `p` is its probability per try (for the expected count); `note` describes a result.
 #[allow(clippy::too_many_arguments)]
-async fn grind<C: RpcApi + ?Sized>(
+pub(crate) async fn grind<C: RpcApi + ?Sized>(
     c: &C,
     w: &Wallet,
     cov: &[u8; 32],
