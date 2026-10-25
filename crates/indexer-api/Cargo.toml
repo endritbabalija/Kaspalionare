@@ -1,0 +1,65 @@
+[package]
+name = "indexer-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Front-end F2 (spec frontend 6.3): a read-only HTTP JSON server over the M8 indexer's store
+# (`index/1`, `lottery::index`). It holds no keys and makes no transactions. It follows the
+# store an indexer writes (`tn10 indexer`, the simnet dev run) and serves the response types
+# of `web::indexer`, which the page parses and checks against the chain. Not a default
+# workspace member. Commands: CLAUDE.md, "Indexer API".
+
+[features]
+# TEST-ONLY: the untrusted-API fixtures (spec 8): the `indexer-api-doctored` binary and the
+# `doctor` module, which serve deliberately wrong responses. Off by default; the production
+# binary `indexer-api` has no flag for it in any build, and a build without this feature has
+# no doctor code at all (`tests/production.rs` scans the binary).
+doctored = []
+
+[[bin]]
+name = "indexer-api"
+path = "src/bin/indexer-api.rs"
+
+[[bin]]
+name = "indexer-api-doctored"
+path = "src/bin/indexer-api-doctored.rs"
+required-features = ["doctored"]
+
+[[test]]
+name = "doctored"
+required-features = ["doctored"]
+
+[dependencies]
+# The response types and their checks (the page's), and the address parsing. `simnet` so the
+# server can serve the private simnet (D125) as well as testnet-10; this is the server's
+# build only, never the page's wasm (W4 checks the release artifact).
+web = { path = "../web", features = ["simnet"] }
+# The embedded templates only (no SilverScript compiler, no file reads).
+lottery = { path = "../lottery", default-features = false }
+harness = { path = "../harness", default-features = false }
+kaspa-consensus-core.workspace = true
+kaspa-hashes.workspace = true
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+# HTTP: axum 0.8.9 on hyper 1 and tokio, all already in Cargo.lock (tonic, which rusty-kaspa
+# links, uses axum); no default features (no JSON or query extractors: bodies are written
+# with serde_json, the one query parameter is parsed here). tower-http only for CORS.
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "service"] }
+tower-http = { version = "=0.6.11", features = ["cors"] }
+tokio = { version = "1.42.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs"] }
+percent-encoding = "2.3.2"
+
+[dev-dependencies]
+# The fixture game of the tests (lottery's own test chain, `lottery/tests/common`, compiled
+# in through `#[path]`): the compiler and the fixtures.
+lottery = { path = "../lottery" }
+harness = { path = "../harness" }
+kaspa-txscript.workspace = true
+silverscript-abi.workspace = true
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"

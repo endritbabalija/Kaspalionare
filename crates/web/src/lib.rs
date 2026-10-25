@@ -21,6 +21,10 @@
 //! - `assemble({built, signed})`: every figure of `built` checked against its transaction
 //!   (spec 7, F1 review), the post-sign check (spec 6.2) and the final transaction;
 //! - estimate: `feeFor`, `wMin`; and `addressOf`, `scriptOf`;
+//! - the indexer API (F2): `indexerLimits`, `parseIndexer*` (each response kind, its size
+//!   capped before parsing) and `checkIndexerInstance`, `checkIndexerObjects`,
+//!   `checkIndexerRound` (the API's copy against the chain; any difference is
+//!   `chain_mismatch`), with the response types in `indexer`;
 //! - the quick testnet wallet's key hook (`quickWalletNew`, `quickWalletImport`,
 //!   `quickWalletSign`), absent from a `mainnet` build.
 //!
@@ -34,6 +38,9 @@ pub mod api;
 pub mod bindings;
 pub mod convert;
 pub mod dto;
+/// The indexer API's response types (served by `crates/indexer-api`) and the page's checks of
+/// them against the chain (spec 6.3; F2).
+pub mod indexer;
 #[cfg(not(feature = "mainnet"))]
 pub mod quick_wallet;
 pub mod safe_json;

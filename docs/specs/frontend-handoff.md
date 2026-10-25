@@ -39,9 +39,9 @@ Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this f
 
 | Stage | Status | Notes |
 |---|---|---|
-| F0 wallet experiment | part A done, waiting for owner | Probe `tn10 wallet-probe` built and self-tested on testnet-10 (stand-in signer). Part B (the owner's clicks, KasWare only; Kaspire not available, untested) is scheduled for 2026-10-26: see "F0 part B: owner steps". |
+| F0 wallet experiment | done (2026-10-26) | Part B on testnet-10 with KasWare (owner): `signPskt` with the P2PK index list signed only that input for `buy()` and an 18-covenant-input `close()`; both passed the post-sign check and were accepted. Without a list KasWare overwrote covenant sigscripts and the check refused both. `pushPskt` is not exposed. So the page always passes `signInputs` and submits itself. Kaspire untested (not installed). Records: `docs/tn10-mass-check.md` "Front end F0", DECISIONS 2026-10-26 row (`eedf3c5`). |
 | F1 builder refactor for wasm | done (parts A, B, C; review and re-review fixed) | Re-review (`covenant-reviewer` on `f7f8102`): one should-fix, fixed test first with negative controls: before the draw the anchor proof's X.hash was free, so whoever served the proof chose the winning numbers; now the anchor block's header from a public node binds X (`anchor_invalid`) and `winningNumbers` says `final` (drawn) or `provisional` (closed). Hardening: one signing key per build (34 `mixed_signers`); liveness docs fixed; W1 signs 14 of 18 shapes in wasm. Requirements for F3, F5 and F6 recorded (node-only entries and headers, the deployed artifact in W4, no beta launch through `cases.rs`/`wallet_probe.rs`). One owner decision (show provisional numbers before the draw). See "F1 re-review and fixes". Review (`covenant-reviewer` on `b3b3520`): no must-fix; the six should-fix items and four notes are fixed, each test first, with negative controls: page values out of `checkRoots`/`winningNumbers` (round, m, D derived in Rust), every `BuiltTx` figure bound to its transaction (`built_mismatch`), Schnorr-only deposit owners (`owner_type`), W1 runs signing, verification, decode and verify in wasm (97 + 18 + 290 lines, 7 signed), 20 golden lines appended (77 untouched), W4 checks the release artifact for the simnet and the fixtures; `change_dust`, the draw's `funding_short`, redacted keys, the `fixtures` feature. One owner decision (small change: refuse or pay as fee). See "F1 review and fixes". Before the review: A: the templates embedded (W2), the compiler behind `compiler`, one rusty-kaspa version, the wasm links. B: `lottery::web` (decode, verify, the 8 unsigned builders, the signing split, the post-sign check, typed errors, W3). C: the builders from chain objects (`lottery::web::cases`), the wasm-bindgen API in `crates/web` with a generated, typed `.d.ts`, one Safe JSON serialiser (tn10 calls it), W1 in wasm under Node (77 + 18 digests equal), W4 (the mainnet build has no quick-wallet symbol and refuses to load), the quick-wallet key hook, the wRPC client running in wasm against testnet-10, sizes (1.69 MB brotli at its smallest). Owner questions: simnet addresses; an npm accident in the home folder. See "F1 part A", "F1 part B" and "F1 part C". |
-| F2 indexer API | not started | |
+| F2 indexer API | done (not reviewed) | `crates/indexer-api`: a read-only HTTP JSON server (axum 0.8.9 on hyper 1 and tokio, all already in Cargo.lock) over the M8 store it follows (`index-log.jsonl` + the verified `bundle/1`); 11 GET endpoints under `/v1/`, typed JSON errors, CORS, size caps, a request deadline, a concurrency limit, header-read and connection timeouts; no keys, no writes. The response types and the page's checks are `web::indexer` (tsify, in the `.d.ts`): `parseIndexer*` (size-capped before parsing) and `checkIndexerInstance`/`checkIndexerObjects`/`checkIndexerRound`, which reuse the F1 checks; any disagreement with the chain is `chain_mismatch`. Six TEST-ONLY doctored modes behind the `doctored` feature and a separate loopback-only binary; each is refused by the page's checks (tests, negative controls); the production binary has none (byte scan). Served a simnet instance (`simnet dev`: round 1 drawn, 2 closing with a node-built anchor proof, 3 open; every endpoint self-checked against the node) and, read-only, the M8 testnet-10 store. See "F2". |
 | F3 web shell and Play | not started | |
 | F4 My tickets, claims, backup | not started | |
 | F5 Rounds, verify, run the round | not started | |
@@ -1422,3 +1422,273 @@ What is left, in plain words:
 - `crates/web`: `api` 17 passed, 2 ignored; W1 1/1 in wasm (18 + 97 + 291 lines, 14 signed and assembled); W4 1/1.
 - Native transactions byte-identical: `f1_digests.txt` and `w1_api.txt` unchanged. No covenant or template change. `Cargo.toml` and `Cargo.lock` unchanged.
 - Not committed (as asked).
+
+## F2 (stage agent, 2026-10-25)
+
+### What was built
+
+1. **`crates/indexer-api`** (new; a workspace member, not a default one): a read-only HTTP JSON server over the M8 indexer's store. It holds no keys, builds no transaction and writes no file.
+   - **Source of truth: the store an indexer writes.**
+     - It reads `index-log.jsonl` (`index/1`) from the start and applies each add line to `lottery::index::Rebuild`. Every rebuilt state is checked against the transaction's outputs, as the indexer does. It reverts on each remove line and ignores re-anchor lines (they change no state, M8 S4).
+     - Then it polls the file (`--poll-ms`, default 1 s). New complete lines are applied, a partial last line waits, and a shorter file is read again from the start.
+     - A line that does not apply stops it there. The last good state stays served, and `/v1/status` shows the error.
+     - `index.json` is read only for `last_chain_block` and `last_chain_daa` (how far the indexer has got).
+     - The genesis states come from the launch bundle (`bundle/1`), verified with `lottery::bundle::verify`. Its covenant ID must be `--cov`.
+   - **Why follow the store and not embed the indexer loop:**
+     - The server stays small and keyless, with no RPC client in it.
+     - The same binary serves any store (tn10's, the simnet's, a copy).
+     - It can run next to a live indexer without sharing its process.
+     - For DX the one-process case is still there: a process that runs an indexer embeds the server with one call (`indexer_api::run(cfg)`), which is what `simnet dev` does. An embedding process can also give the server an anchor-proof source (`AnchorProvider`) for rounds that are closed but not drawn.
+   - **Stack pick:**
+     - axum 0.8.9 (`default-features = false, features = ["http1", "tokio"]`), hyper 1 and hyper-util 0.1.21 for the accept loop, tower-http 0.6.11 for CORS only, and tokio.
+     - All of them were already in `Cargo.lock` (rusty-kaspa's tonic uses axum). The lock gains only the `indexer-api` package and the axum feature edges to hyper, hyper-util and tokio. No new crate.
+     - No JSON or query extractor features: bodies are written with serde_json, and the one query parameter is parsed in `routes.rs`.
+   - **Server basics:**
+     - GET and HEAD only. Any other method is `method_not_allowed`, and no request body is read.
+     - Everything is under `/v1/`; anything else is `not_found`.
+     - Errors are typed JSON, `{error: {code, message, detail}}`, with one message per code.
+     - CORS: GET and HEAD for any origin by default, or for the `--allow-origin` list.
+     - Each response kind has a size cap (`web::indexer::LIMITS`, the same caps the page enforces).
+     - Limits: a 10 s request deadline (`timeout`), 64 requests at once (`busy` above that), a 10 s header-read timeout, a 120 s connection lifetime and 256 connections.
+     - Headers `cache-control: no-cache` and `x-content-type-options: nosniff`.
+   - **Configuration:** flags with `INDEXER_API_*` environment fallbacks (`config.rs`):
+     - `--store` and `--cov` (required);
+     - `--bundle` (default `<store>/bundle.json`);
+     - `--bind` (default `127.0.0.1:8790`);
+     - `--allow-origin`, `--poll-ms`, `--timeout-ms`, `--max-connections`.
+
+     Unknown flags are refused.
+2. **`web::indexer`** (new module in `crates/web`): the response types, defined once in Rust and declared to TypeScript by tsify, so they are in the `.d.ts` the page imports (spec 1.1). The server serves them and the page parses them. The server depends on `web` natively; the wasm has no server dependency.
+   - **Parsing:** `indexerLimits()`, and one `parseIndexer*` per response kind (`Status`, `Rounds`, `Round`, `Shard`, `Purchases`, `AnchorProof`, `Tickets`, `Objects`, `Error`).
+     - Each takes the body *text* and checks its size cap before any JSON is read. So a huge response never becomes an object in the worker (F1 part C open question 4).
+     - Unknown fields are refused.
+   - **`checkIndexerInstance({bundle, covenantId, bundleHash?})`:** the bundle text is verified locally (`bundle::verify`) for this page's network and instance. The blake2b-256 of its bytes is the bundle hash (spec 6.5's build-time "launch bundle hash").
+   - **`checkIndexerObjects({covenantId, objects, utxos})`:** each API object against the node's entry for its outpoint.
+     - A missing entry means the object is not live: a mismatch.
+     - The entry the API states must equal the node's.
+     - The state bytes must rebuild the entry's script under the instance's covenant ID (`cases::live`).
+
+     It returns each object as a `CovUtxo` ready for a builder, with its decoded view.
+   - **`checkIndexerRound({covenantId, round, utxos, purchases?, anchorProof?, anchorBlock?})`** checks:
+     - the objects, as above, each of the round it is served for;
+     - the status, m and k against the chain objects (`statusChecked` says whether a live object showed the status);
+     - the frozen roots against the marker's or a pool's;
+     - the purchases against the chain's roots: `api::check_roots` against the marker or a pool once the round is closed, and each live shard's root while it is open;
+     - the winning numbers against every live pool's `win`;
+     - the anchor proof, through `api::winning_numbers`: drawn rounds give `final` numbers, equal to the pools'; closing rounds give `provisional` numbers, bound to the node's anchor block (F1 re-review S1);
+     - the API's D and anchor hash against the proof's.
+   - **One refusal code:** every disagreement these checks find is `chain_mismatch` ("The indexer's copy does not match the chain.", spec 6.3), whatever check found it. The detail names the underlying code (`tree_mismatch: ...`). The F1 exports keep their own codes.
+   - Also: `RoleName::of` (`views.rs`) and `api_object` (the server's side of `ApiObject`).
+3. **Doctored modes (TEST-ONLY, spec 8 "Untrusted API")**, in `indexer-api/src/doctor.rs`, compiled only with the feature `doctored`. The modes:
+
+   | Mode | The lie |
+   |---|---|
+   | `wrong_state` | every object's state bytes describe another state (one integer field changed and re-encoded) |
+   | `wrong_tree` | the first purchase of the first non-empty shard gets another bonus |
+   | `missing_purchase` | the last purchase of that shard is dropped |
+   | `extra_purchase` | a purchase is added to shard 0 |
+   | `wrong_winning` | the round's winning bonus is changed |
+   | `wrong_anchor_proof` | one byte of the proof's X.hash is flipped |
+
+   **Gating:**
+   1. The module exists only with the feature.
+   2. Only the separate binary `indexer-api-doctored` (`required-features = ["doctored"]`) has a `--doctor` flag. The production binary `indexer-api` has none, in any build.
+   3. The doctored binary refuses a non-loopback `--bind`, prints a `KASPALIONARE_DOCTORED_API ... TEST-ONLY` banner, and marks every response `x-indexer-doctored: <mode>`.
+   4. `tests/production.rs` builds the production binary without the feature, as it ships. It finds neither the marker nor any mode name in it, and checks that the binary refuses `--doctor`. The doctored binary is the positive control.
+4. **`simnet dev`** (new subcommand, `crates/simnet/src/dev.rs`). On a fresh private node:
+   1. Round 1 runs through `sn::run_round`, with the production templates and the M8 testnet knobs (round_len = d_min = 6,000): buys, close, an anchor ground so that a held combination wins a prize tier, and the draw.
+   2. The M8 indexer follows the node from its genesis into `crates/target/simnet-dev/<cov>/`, with `bundle.json`. It is `tn10/src/indexer.rs`, compiled in unchanged by `#[path]`, as simnet already does with `anchor.rs`.
+   3. Round 2: buys made from the index's shard states, then a close. The round is left closing, mined past D + 60.
+   4. Round 3: buys (open).
+   5. The indexer API serves on `--api-bind`, with the node as its anchor-proof source.
+   6. A **self-check** fetches every endpoint and runs the `web::indexer` checks against entries read from the node by address, and against the anchor block read from the node.
+   7. Then it mines a block every `--block-ms` and the indexer follows, until Ctrl-C or `--for`.
+
+   `crates/target/simnet-dev/current.json` names the API URL, the node's Borsh wRPC URL, the covenant ID and the store.
+   - **`sn.rs` changes** (additive; SN1–SN4 unchanged):
+     - the helpers are now `pub(crate)`;
+     - `Cfg.edit: Option<fn(&mut GenesisCase)>` (None in SN1–SN4);
+     - `Round.gf`: the genesis `Final`, for the bundle.
+   - **The first attempt failed with round_len = 600.** The grind and the 50-block wait after round 1's close passed round 2's sales deadline, and a shard takes only one buy after its deadline (design 7.1), so the local engine refused the second buy on a shard. 6,000 fixes it; simnet mines through 6,000 blocks in seconds.
+5. **CLAUDE.md:** the layout entry for `indexer-api`, and two command lines (Indexer API, Simnet dev instance).
+
+### Endpoints (v1), with real responses from the simnet instance
+
+The run that was self-checked: covenant ID `5719df78…0db5`, store `crates/target/simnet-dev/5719df78…0db5/`.
+
+| Endpoint | Returns (type in `web::indexer`) | Simnet example |
+|---|---|---|
+| `GET /v1/status` | `ApiStatus` | `{"api":"v1","network":"simnet","covenantId":"84e27426…","logLines":"14","lastChainBlock":"0faca088…","lastChainDaaScore":"8369","currentRound":"3","gaps":[],"error":null,…}`, from the first run of the same scenario; its DAA went 8,369 → 8,718 in 80 s as the indexer followed |
+| `GET /v1/instance` | the bundle file, byte for byte (`bundle/1`) | 332,069 B; `checkIndexerInstance`: ok, k 16, B_MAX 4, bundle hash `4146e95b…ff7f` |
+| `GET /v1/rounds[?before=r]` | `ApiRounds` (newest first, 200 per page) | `{"round":"3","status":"open","m":2,"k":16,"buys":3,"combinations":4,"sales":"400000000","jackpot":"0",…}`, then round 2 `closing` and round 1 `drawn` (m 3, 4 buys, 7 combinations) |
+| `GET /v1/rounds/{r}` | `ApiRound` | round 1 (7,254 B): `{"round":"1","status":"drawn","m":3,"k":16,"deadline":"1662","anchorDaaScore":"2269","draw":{"void":false,"winning":{"main":[1,3,4,5,6],"bonus":2},"anchorHash":"644a2cd6…","claimDeadline":"6914269","pools":[{"tier":2,"slice":"224000","value":"197000000",…},…]},"objects":[drawer, pool, pool, pool],…}`; round 2: `closing`, D 8,269, objects drawer, vault, controller, marker; round 3: `open`, T 13,662, 18 objects (controller, params, 16 shards) |
+| `GET /v1/rounds/{r}/purchases` | `ApiPurchases` | round 3: `{"round":"3","m":2,"k":16,"shards":["","","","","0e1012191d01070a0c0e1e02","",…,"050b0d191e0102090f1d1e01",…]}` |
+| `GET /v1/rounds/{r}/shards/{i}` | `ApiShard` | `{"round":"3","shardIndex":4,"m":2,"count":2,"purchases":"0e1012191d01070a0c0e1e02"}` |
+| `GET /v1/rounds/{r}/anchor-proof` | `ApiAnchorProof` (the fallback, spec 6.1) | round 1: 272 bytes, `"source":"draw"`; round 2 (closing): 272 bytes, `"source":"node"`, built by the dev run's node; round 3: `404 anchor_unavailable` ("round 3 is not closed") |
+| `GET /v1/tickets?payout=` | `ApiTickets` (live tickets and purchase history) | 10 live tickets of the dev wallet, 10 purchases |
+| `GET /v1/vault` | `ApiObjects` (the vault, the newest controller, the drawer, the live records) | 3 objects |
+| `GET /v1/positions?owner=`, `GET /v1/requests?owner=` | `ApiObjects` (requests come with the live records of their rounds) | 1 position (the genesis position), 0 requests |
+| errors | `ApiErrorBody` | `/v1/rounds/9`: `404 {"error":{"code":"round_unknown","message":"The index has no such round.","detail":"round 9"}}`; `POST /v1/status`: `405 method_not_allowed`; `/v1/nope`: `404 not_found`; a `kaspatest:` address on the simnet server: `400 address_network` |
+
+The self-check of that run (the page's checks against the node):
+```
+SELF-CHECK instance: ok (k 16, B_MAX 4, bundle hash 4146e95b292f22d43bb02f5c7e7f7205ea7a5c230d61fed50780c13a87a8ff7f)
+SELF-CHECK round 3: ok, Open (from the chain objects: true), 18 objects against the node, roots 16, numbers -
+SELF-CHECK round 2: ok, Closing (from the chain objects: true), 4 objects against the node, roots 16, numbers [5, 6, 12, 20, 30]+2 Provisional (D 8269)
+SELF-CHECK round 1: ok, Drawn (from the chain objects: true), 4 objects against the node, roots 16, numbers [1, 3, 4, 5, 6]+2 Final (D 2269)
+SELF-CHECK tickets: ok, 10 live tickets of kaspasim:qpsneutp…phyfvu against the node (10 purchases)
+SELF-CHECK /v1/vault: ok, 3 objects against the node
+SELF-CHECK /v1/positions?owner=kaspasim:qpsneutp…phyfvu: ok, 1 objects against the node
+SELF-CHECK /v1/requests?owner=kaspasim:qpsneutp…phyfvu: ok, 0 objects against the node
+dev: ready in 9 s: {"api":"http://127.0.0.1:8790/v1/","covenantId":"5719df78…0db5","network":"simnet","rounds":{"1":"drawn","2":"closing","3":"open"},…,"wrpcBorsh":"ws://127.0.0.1:56074"}
+```
+The doctored binary on the same store (`--doctor missing_purchase --bind 127.0.0.1:8791`) answered with `x-indexer-doctored: missing_purchase` and served round 3 shard 4 as `0e1012191d01`, one of its two purchases dropped. The honest server serves `0e1012191d01070a0c0e1e02`.
+
+**Testnet-10 data (read-only).** The release production binary ran on the M8 store `tn10-data/e9f4f810…88d6/` (a 36.8 MB log). The files' sizes and times were unchanged afterwards.
+- It was up in 2 s: `412 log lines, 9 rounds, 383 live objects`; status `lastChainDaaScore 605601500`, no gaps, no error.
+- Rounds 1–8 are drawn and round 9 is open. Their buy counts (76, 77, 0, 36, 40, 40, 0, 75, 0) are the same as in the indexer's own `index.json`.
+- `/v1/rounds/8`: drawn with `[2, 6, 8, 13, 17]+2` and three live pools. Round 6's purchases: 160 combinations. Round 8's anchor proof is served from its draw.
+
+### Tests (`crates/indexer-api/tests/`)
+
+- **`api.rs`** (6 tests):
+  - `endpoints_serve_their_types`: every endpoint's body parses as its `web::indexer` type, and the instance is the file byte for byte. It also checks:
+    - the statuses (3 open, 2 closing, 1 drawn) and paging;
+    - the per-shard lists equal the round's list and sum to its combinations;
+    - the anchor proof is 272 bytes, from the draw;
+    - tickets by payout, also percent-encoded; positions and requests by owner.
+  - `errors_are_typed_and_writes_refused`:
+    - 15 bad requests, each with its code;
+    - a mainnet `kaspa:` address is `address_network`;
+    - POST, PUT, DELETE and PATCH on three paths are `method_not_allowed`; HEAD is ok.
+  - `cors_for_a_static_site`: any origin; the preflight allows GET only; with a list, only the listed origin.
+  - `follows_a_growing_log`:
+    - a partial line waits, and growth is applied;
+    - a line whose txid is not its transaction's stops the follower, with the error and the last good state;
+    - a rewritten, shorter log is read again.
+  - `refuses_another_instance`.
+  - `real_socket_and_header_timeout`: on a real socket, an idle connection was closed after 509 ms with a 500 ms header timeout.
+- **`doctored.rs`** (3 tests, feature `doctored`):
+  - `honest_answers_pass_every_check`, the positive control:
+    - rounds 1/2/3 are `drawn`/`closing`/`open` with `statusChecked`, and their roots rebuilt;
+    - round 1's numbers are `final`;
+    - tickets, vault and positions pass, and so does the instance with its hash.
+  - `every_doctored_answer_is_refused`: each mode, on each response it changes, gives `chain_mismatch` with the page message. The test also requires that the doctor changed exactly the expected rounds: 3 for the state and purchase modes, 1 for the winning numbers and the anchor proof.
+  - `builders_refuse_doctored_purchases`: a buy built from a doctored shard list is `tree_mismatch` (the F1 builder check).
+- **`production.rs`** (1 test): the production binary, built without the feature, contains none of the marker and the 6 mode names (0 each) and refuses `--doctor` (exit 2, "unknown flag --doctor"). The doctored binary contains each one (1 each) and refuses a non-loopback bind.
+- **The fixture:** a three-round game on lottery's own test chain (`lottery/tests/common`, compiled into the tests by `#[path]`; every transaction comes from the builders and runs in the engine), written as a store. The chain's ledger plays the public node.
+  - Round 1 is drawn: jackpot and lower-tier holdings, a claim, a settled deposit.
+  - Round 2 is closing; round 3 is open.
+- **Negative controls.** The tests were written before the server ever ran, and all passed on the first run. So three negative controls show they catch faults (each a temporary edit, restored from a copy, `cmp` equal):
+
+  | Disabled | Result |
+  |---|---|
+  | the `chain_mismatch` mapping in `web::indexer` | FAILED: `wrong_tree round 1: refused with tree_mismatch …, not chain_mismatch` |
+  | the winning-number comparisons (pools and proof) | FAILED: `wrong_winning round 1: the doctored response passed the page's check` |
+  | the doctor's purchase edits | FAILED: `wrong_tree: rounds whose answer the doctor changed: left 0` |
+
+Output of the doctored test (abridged):
+```
+mode wrong_state
+  wrong_state round 1: chain_mismatch (Drawer: the state's P2SH is not the UTXO's script)
+  wrong_state round 3: chain_mismatch (Shard: the state's P2SH is not the UTXO's script)
+  wrong_state tickets: chain_mismatch (Ticket: the state's P2SH is not the UTXO's script)
+mode wrong_tree
+  wrong_tree round 1: chain_mismatch (tree_mismatch: a rebuilt shard root differs from the frozen root)
+  wrong_tree round 3: chain_mismatch (tree_mismatch: shard 2's purchases do not rebuild its live root)
+mode missing_purchase, extra_purchase: the same three rounds, tree_mismatch under chain_mismatch
+mode wrong_winning
+  wrong_winning round 1: chain_mismatch (round 1: the indexer's winning numbers are not pool tier 0's)
+mode wrong_anchor_proof
+  wrong_anchor_proof round 1: chain_mismatch (the anchor proof's numbers are not the pool's)
+test result: ok. 3 passed; 0 failed
+```
+"Refused by the node" for a wrong anchor proof (spec 8): the page refuses such a proof before building. It does so above, and on the closed path through the node's anchor block (F1 re-review S1). A draw built from it anyway is refused on chain by `OpChainblockSeqCommit` (M7). F2 did not submit such a draw on simnet.
+
+### Commands run (outputs)
+
+- `cargo test -j 2 -p indexer-api --features doctored --test api --test doctored -- --nocapture --test-threads=1`: api 6 passed; doctored 3 passed.
+- `cargo test -j 2 -p indexer-api --test production -- --nocapture`: 1 passed (168 s, with two nested builds into `target/indexer-api-prod`).
+- `cargo build -j 2 -p indexer-api`, with and without `--features doctored`: no warnings. `cargo check -j 2 -p web`: no warnings.
+- `cargo build -j 2 -p simnet --release`: 8 min after the lottery and web changes (RocksDB was cached). Then `target/release/simnet.exe dev --for 1500`: ready in 9 s, with the self-check above.
+- `cargo build -j 2 -p indexer-api --release`, then `indexer-api --store ../tn10-data/e9f4f810… --cov e9f4f810… --bind 127.0.0.1:8792`: see above.
+
+### Suite at the end of F2
+
+- `cargo test -j 2 --no-fail-fast` (from `crates/`, debug; the default members `harness` and `lottery`): 55 test binaries, 1,109 passed, 0 failed, 2 ignored. This is the same as at the end of the F1 re-review: `lottery` is unchanged.
+  - It includes `m7_seed`, so the SP12 seed gate holds.
+  - As before (D113), `spike_vdf` overflows its stack in debug and is the one failed target.
+- `cargo test -j 2 -p lottery --release --test spike_vdf`: 14 passed (200 s).
+- `cargo test -j 1 --release -p tn10`: 25 passed (tn10 now compiles `web` with the new module).
+- `crates/web`:
+  - `api`: 17 passed, 2 ignored; `--features simnet other_network`: 1 passed;
+  - W1 in wasm: 1 passed (18 + 97 + 291 lines, 14 signed and assembled);
+  - W4: 1 passed. The release artifact is 6,975,707 B (was 6,372,732); the dev and mainnet builds are the controls. The quick-wallet names: release 3/4/5/8/1 (`quickWalletNew`: 3, was 4; still present, the positive control), mainnet 0; fixtures: release 0, dev 2/5/1.
+- `crates/indexer-api`: api 6, doctored 3, production 1: all passed.
+- `cargo check -j 2 -p simnet`: clean. The simnet release binary was rebuilt after the last change (a log-line condition in `dev.rs`).
+- The `.d.ts` (`wasm-bindgen --target web`) declares `ApiRound`, `ApiObject`, `RoundStatus`, `ApiErrorCode`, `CheckedRound`, `Limits`, and the exports, for example `checkIndexerRound(input: RoundCheckInput): Outcome<CheckedRound>`.
+- Size: after wasm-bindgen 6,005,095 B, 1,951,336 B brotli -q 11, against 5,423,397 B and 1,846,862 B at F1 part C (opt-level 3), so +104 KB brotli. Most of it is the bundle check (`bundle::verify` with the genesis validation) and serde_json parsing.
+- Native transactions are byte-identical: `git diff` is empty on `lottery/tests/fixtures` and `web/tests/fixtures`. No covenant or template change.
+- Not committed (as asked).
+
+### Files changed
+
+- **New:**
+  - `crates/indexer-api/`: `Cargo.toml`, `src/{lib,config,store,routes,server,doctor}.rs`, `src/bin/{indexer-api,indexer-api-doctored}.rs`, `tests/{api,doctored,production}.rs`, `tests/common/mod.rs`;
+  - `crates/web/src/indexer.rs`;
+  - `crates/simnet/src/dev.rs`.
+- **Changed:**
+  - `crates/Cargo.toml` (the member) and `crates/Cargo.lock` (the package; no new crate);
+  - `crates/web/src/{lib,bindings,views}.rs`: the module, 13 exports, `RoleName::of`;
+  - `crates/simnet/{Cargo.toml,src/main.rs,src/sn.rs}`;
+  - `CLAUDE.md` and this file.
+- **Not touched:** `covenants/`, `crates/lottery/` (no change at all), `f1_digests.txt`, `w1_api.txt`, `w1_verify.txt`, tn10, `tn10-data/` (read only), and the unrelated uncommitted files.
+
+### Proposed DECISIONS rows (for the orchestrator)
+
+- (a) **The indexer API follows the store, not the chain.**
+  - `crates/indexer-api` rebuilds `index/1` from `index-log.jsonl` and the verified `bundle/1`, and follows the log.
+  - It has no RPC client, no keys and no writes.
+  - A process that runs an indexer embeds it (`indexer_api::run`) and may give it an anchor-proof source.
+- (b) **Stack:** axum 0.8.9 (no default features) on hyper 1, hyper-util and tokio, with tower-http for CORS; all were already in `Cargo.lock`.
+- (c) **API v1:**
+  - 11 GET endpoints: spec 6.3's table, plus `/v1/status` and `/v1/rounds/{r}/purchases` (all shards in one response, the form the builders take);
+  - `/v1/instance` serves the bundle file byte for byte;
+  - typed errors (`ApiErrorBody`, 11 codes);
+  - GET and HEAD only; CORS for any origin by default.
+- (d) **One type source for the API:** the response types live in `web::indexer` (tsify). The server serializes them and the page parses them. Per-kind size caps (`LIMITS`) are checked on both sides, by the page before parsing.
+- (e) **One refusal for the API's copy:** `checkIndexerInstance`, `checkIndexerObjects` and `checkIndexerRound` report every disagreement with the chain as `chain_mismatch`, with the underlying code in the detail. They reuse `cases::live`, `check_roots` and `winning_numbers`.
+- (f) **The launch bundle hash** (spec 6.5) is the blake2b-256 of the bundle file's bytes.
+- (g) **Doctored modes are TEST-ONLY:** the feature `doctored`, a separate loopback-only binary that marks its responses, no flag in the production binary, and a byte scan of the production build.
+- (h) **`simnet dev` is the dev instance:**
+  - the production templates, with round_len = d_min = 6,000 (600 is too short: the anchor wait after a close passes the next deadline);
+  - a ground win in round 1, and the three statuses at once;
+  - the indexer and the API in one process;
+  - a self-check of every endpoint against the node.
+- (i) **The anchor-proof fallback:**
+  - a drawn round's proof is served from its draw transaction;
+  - a closed round that is not drawn yet gets a proof from a node, only when the serving process follows one;
+  - otherwise the answer is `anchor_unavailable`.
+
+### Open items
+
+- **For F3 (the one-command dev run):**
+  - `simnet dev` gives the instance, the store and the API. F3's command still needs:
+    - a fixed (or advertised) node wRPC port, and probably the JSON wRPC listener for kaspa-wasm (today: Borsh on a free port, written to `current.json`);
+    - a faucet for the page's quick wallet: the dev run's wallet key is a throwaway, never printed. F3 can add an endpoint or a `simnet dev --fund <kaspasim: address>` flag;
+    - the site's dev server, started against `current.json`;
+    - the dev page built with `web --features simnet`.
+  - Pace: on this PC under load, the loop mines about one block a second (one RPC template and submit per block, plus an indexer poll); `--block-ms` is the knob. Round 3's sales close about 6,000 blocks after round 2's deadline.
+  - The page must read every entry from the node by outpoint or address, and X's header from the node (the F1 requirements). The `checkIndexer*` calls take them as inputs. The self-check in `dev.rs` (`node_utxos`, the anchor block) is a working example, in Rust, of what the worker will do.
+  - Call `parseIndexer*` on the response text, never `JSON.parse` first.
+- **For F5:**
+  - `checkIndexerRound` is the base of "Verify in this browser". `statusChecked: false` (a void round, or a drawn round whose pools are all gone) must be shown as not checkable.
+  - The node-built proof path is shown on simnet. On testnet-10 the server has no node, so a closed round's proof needs one of two things: the browser building it (F1 part C: this needs `anchor.rs` shared), or an indexer process that embeds the API with a node (`AnchorProvider`).
+- **For F6 (hosting):**
+  - The server is one binary plus the store directory the indexer writes. It needs the indexer running on the same machine (or a synced copy of its directory).
+  - It speaks plain HTTP/1.1, so it needs a TLS reverse proxy in front, with `--bind 0.0.0.0:<port>` behind it and `--allow-origin <the site's origin>`.
+  - Memory is about the size of the index (the M8 store: 412 lines, starts in 2 s).
+  - Rate limiting per client is not implemented (only global limits); the proxy should add it.
+  - A security review should look at the follower (untrusted log lines from the local indexer) and at the caps.
+- The follower re-reads `index.json` whenever its time changes, to get the two status fields: 18 MB for the M8 store, every 10 s while tn10 writes it. Fine now; worth a lighter source later.
+- Not done: a simnet submission of a draw with a doctored proof ("refused by the node").

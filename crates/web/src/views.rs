@@ -152,6 +152,24 @@ pub enum RoleName {
 }
 
 impl RoleName {
+    /// The name of a role (the inverse of `role`).
+    pub fn of(r: lottery::index::Role) -> Self {
+        use lottery::index::Role as R;
+        match r {
+            R::Controller => RoleName::Controller,
+            R::Params => RoleName::Params,
+            R::Shard => RoleName::Shard,
+            R::Marker => RoleName::Marker,
+            R::Drawer => RoleName::Drawer,
+            R::Vault => RoleName::Vault,
+            R::Pool => RoleName::Pool,
+            R::Ticket => RoleName::Ticket,
+            R::Position => RoleName::Position,
+            R::Request => RoleName::Request,
+            R::Record => RoleName::Record,
+        }
+    }
+
     pub fn role(self) -> lottery::index::Role {
         use lottery::index::Role as R;
         match self {

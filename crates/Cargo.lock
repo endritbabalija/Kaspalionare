@@ -750,6 +750,8 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -758,6 +760,7 @@ dependencies = [
  "pin-project-lite",
  "serde_core",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -2454,6 +2457,29 @@ name = "include_bytes_aligned"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ee796ad498c8d9a1d68e477df8f754ed784ef875de1414ebdaf169f70a6a784"
+
+[[package]]
+name = "indexer-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "harness",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "kaspa-consensus-core 2.1.0",
+ "kaspa-hashes 2.1.0",
+ "kaspa-txscript 2.1.0",
+ "lottery",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "silverscript-abi",
+ "tokio",
+ "tower",
+ "tower-http 0.6.11",
+ "web",
+]
 
 [[package]]
 name = "indexmap"
@@ -5950,6 +5976,7 @@ name = "simnet"
 version = "0.1.0"
 dependencies = [
  "harness",
+ "indexer-api",
  "kaspa-addresses 2.1.0",
  "kaspa-alloc",
  "kaspa-consensus-core 2.1.0",
@@ -5965,7 +5992,9 @@ dependencies = [
  "kaspad",
  "lottery",
  "secp256k1",
+ "serde_json",
  "tokio",
+ "web",
 ]
 
 [[package]]

@@ -7,6 +7,9 @@
 //! - `smoke [n]`: start a fresh node, mine max(n, 1,060) blocks (coinbase maturity is
 //!   1,000 DAA on simnet), then genesis, buy() and close() of round 1 with the production
 //!   templates, each mined from the node's templates.
+//! - `dev [--api-bind <addr:port>] [--for <seconds>] [--block-ms <n>]` (front-end F2): one
+//!   instance with a drawn, a closing and an open round, indexed and served by the indexer
+//!   API, then blocks mined every `--block-ms` until Ctrl-C (`dev.rs`).
 //! - `sn1` .. `sn4`: the forced-jackpot scenarios of spec A5b (one fresh node and genesis
 //!   each; the anchor block ground, `sn.rs`); `sn5` runs SN1 and reports its grinding numbers;
 //!   `all` runs SN1-SN4, each in a child process (one node per process), and SN5 over
@@ -23,6 +26,12 @@ use kaspa_alloc::init_allocator_with_default_settings;
 #[allow(dead_code)]
 #[path = "../../tn10/src/anchor.rs"]
 mod anchor;
+mod dev;
+// The M8 indexer, shared with tn10 unchanged (generic over `RpcApi`); the dev run follows the
+// node with it and writes `index/1` for the indexer API.
+#[allow(dead_code)]
+#[path = "../../tn10/src/indexer.rs"]
+mod indexer;
 mod miner;
 mod net;
 mod node;
@@ -31,7 +40,7 @@ mod sn;
 mod wallet;
 
 fn usage() -> ! {
-    eprintln!("usage: simnet <mine [n] | smoke [n] | sn1 | sn2 | sn3 | sn4 | sn5 | all>");
+    eprintln!("usage: simnet <mine [n] | smoke [n] | sn1 | sn2 | sn3 | sn4 | sn5 | all | dev [--api-bind <addr:port>] [--for <seconds>] [--block-ms <n>]>");
     std::process::exit(2);
 }
 
@@ -43,6 +52,7 @@ fn main() {
     let r = match args.first().map(String::as_str) {
         Some("mine") => rt.block_on(mine_cmd(n(100))),
         Some("smoke") => rt.block_on(smoke::run(n(0))),
+        Some("dev") => dev_opts(&args[1..]).and_then(|o| rt.block_on(dev::run(o))),
         Some(id @ ("sn1" | "sn2" | "sn3" | "sn4" | "sn5" | "all")) => rt.block_on(sn_cmd(id)),
         _ => usage(),
     };
@@ -50,6 +60,26 @@ fn main() {
         eprintln!("ERROR: {e}");
         std::process::exit(1);
     }
+}
+
+fn dev_opts(a: &[String]) -> Result<dev::Opts, String> {
+    let mut o = dev::Opts { api_bind: "127.0.0.1:8790".parse().expect("bind"), run_for: None, block_ms: 200 };
+    let mut it = a.iter();
+    while let Some(f) = it.next() {
+        let v = it.next().ok_or(format!("{f} needs a value"))?;
+        match f.as_str() {
+            "--api-bind" => {
+                o.api_bind = v.parse().map_err(|e| format!("--api-bind {v}: {e}"))?;
+                if !o.api_bind.ip().is_loopback() {
+                    return Err("--api-bind: the dev API binds to a loopback address only".into());
+                }
+            }
+            "--for" => o.run_for = Some(std::time::Duration::from_secs(v.parse().map_err(|e| format!("--for {v}: {e}"))?)),
+            "--block-ms" => o.block_ms = v.parse().map_err(|e| format!("--block-ms {v}: {e}"))?,
+            _ => return Err(format!("unknown flag {f}")),
+        }
+    }
+    Ok(o)
 }
 
 async fn mine_cmd(n: u64) -> Result<(), String> {

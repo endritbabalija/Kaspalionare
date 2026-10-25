@@ -45,16 +45,16 @@ use crate::wallet::{COINBASE_MATURITY, KAS, Utxo, Wallet};
 
 const K: usize = 16;
 
-fn kas(v: i64) -> String {
+pub(crate) fn kas(v: i64) -> String {
     format!("{:.8}", v as f64 / KAS as f64)
 }
 
-fn lottery_fee(f: &Final) -> u64 {
+pub(crate) fn lottery_fee(f: &Final) -> u64 {
     let m = harness::masses(&f.tx, &f.entries);
     harness::priority_fee(&m).max(m.compute.max(m.transient.div_ceil(2)) * 100) + 10_000
 }
 
-fn finalized(f: &Final) -> Transaction {
+pub(crate) fn finalized(f: &Final) -> Transaction {
     let mut tx = f.tx.clone();
     tx.finalize();
     tx
@@ -90,7 +90,7 @@ impl Log {
 }
 
 /// Submit `tx`, mine until a chain block accepts it; returns (accepting DAA, sink before).
-async fn submit_and_accept<C: RpcApi + ?Sized>(c: &C, w: &Wallet, what: &str, tx: &Transaction, entries: &[UtxoEntry]) -> Result<(u64, Hash), String> {
+pub(crate) async fn submit_and_accept<C: RpcApi + ?Sized>(c: &C, w: &Wallet, what: &str, tx: &Transaction, entries: &[UtxoEntry]) -> Result<(u64, Hash), String> {
     let m = harness::masses(tx, entries);
     let start = c.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
     c.submit_transaction(RpcTransaction::from(tx), false).await.map_err(|e| format!("{what}: REJECTED by the node: {e}"))?;
@@ -110,7 +110,7 @@ async fn submit_and_accept<C: RpcApi + ?Sized>(c: &C, w: &Wallet, what: &str, tx
 }
 
 /// The node's own UTXO entry of `op` (script `spk`), from the UTXO index.
-async fn node_entry<C: RpcApi + ?Sized>(c: &C, op: Op, spk: &ScriptPublicKey) -> Result<UtxoEntry, String> {
+pub(crate) async fn node_entry<C: RpcApi + ?Sized>(c: &C, op: Op, spk: &ScriptPublicKey) -> Result<UtxoEntry, String> {
     let addr = kaspa_txscript::extract_script_pub_key_address(spk, Prefix::Simnet).map_err(|e| e.to_string())?;
     crate::net::check_simnet(&addr)?;
     let v = c.get_utxos_by_addresses(vec![addr]).await.map_err(|e| e.to_string())?;
@@ -118,7 +118,7 @@ async fn node_entry<C: RpcApi + ?Sized>(c: &C, op: Op, spk: &ScriptPublicKey) ->
 }
 
 /// The builder's covenant input entries must equal the node's (amount, script, DAA, covenant ID).
-async fn same_entries<C: RpcApi + ?Sized>(c: &C, what: &str, ops: &[Op], built: &[UtxoEntry]) -> Result<(), String> {
+pub(crate) async fn same_entries<C: RpcApi + ?Sized>(c: &C, what: &str, ops: &[Op], built: &[UtxoEntry]) -> Result<(), String> {
     for (i, op) in ops.iter().enumerate() {
         let n = node_entry(c, *op, &built[i].script_public_key).await?;
         if n != built[i] {
@@ -132,7 +132,7 @@ async fn same_entries<C: RpcApi + ?Sized>(c: &C, what: &str, ops: &[Op], built: 
     Ok(())
 }
 
-async fn own_utxo<C: RpcApi + ?Sized>(c: &C, w: &Wallet, op: Op) -> Result<Utxo, String> {
+pub(crate) async fn own_utxo<C: RpcApi + ?Sized>(c: &C, w: &Wallet, op: Op) -> Result<Utxo, String> {
     w.utxos(c).await?.into_iter().find(|u| u.op == op).ok_or(format!("{op} not in the UTXO index"))
 }
 
@@ -289,6 +289,9 @@ pub struct Cfg {
     pub buys: Vec<(usize, Vec<Combo>)>,
     /// Request the deployer position's full withdrawal in round 1 (SN4).
     pub withdraw_full: bool,
+    /// A last change to the genesis case before it is validated (the dev run's short rounds;
+    /// None in SN1-SN4).
+    pub edit: Option<fn(&mut GenesisCase)>,
 }
 
 #[derive(Clone)]
@@ -319,9 +322,11 @@ pub struct Round {
     pub marker: lottery::state::MarkerState,
     /// A plain UTXO of ours for the next step (the draw's caller output).
     pub fund: Utxo,
+    /// The genesis transaction as built (for the launch bundle; the dev run).
+    pub gf: Final,
 }
 
-async fn run_round<C: RpcApi + ?Sized>(
+pub(crate) async fn run_round<C: RpcApi + ?Sized>(
     c: &C,
     w: &Wallet,
     cfg: &Cfg,
@@ -373,6 +378,9 @@ async fn run_round<C: RpcApi + ?Sized>(
     }
     g.pot = cfg.pot;
     g.controller.deadline = deadline;
+    if let Some(edit) = cfg.edit {
+        edit(&mut g);
+    }
     g.validate_with(&t).map_err(|e| format!("genesis refused: {e}"))?;
     let mut gf = g.build_with(t.clone()).finish();
     g.fee = lottery_fee(&gf);
@@ -595,7 +603,7 @@ async fn run_round<C: RpcApi + ?Sized>(
     log.ok(rr.x_hash == gr.x.as_bytes() && rr.win[..5] == gr.won.main && rr.win[5] == gr.won.bonus, "round result X.hash and win = the ground header's seed numbers".into())?;
     let fund = own_utxo(c, w, Op::new(dtx.id(), dx.caller_output() as u32)).await?;
     log.grind = Some(gr.clone());
-    Ok(Round { t, cov, g, tickets, d, dx, dtx, ddaa, rr, grind: gr, vault_in: vault_in.1, wreq, marker: x.marker, fund })
+    Ok(Round { t, cov, g, tickets, d, dx, dtx, ddaa, rr, grind: gr, vault_in: vault_in.1, wreq, marker: x.marker, fund, gf })
 }
 
 // ------------------------------------------------------------------ claims
@@ -762,6 +770,7 @@ pub async fn sn1() -> Result<Log, String> {
             g: None,
             buys: vec![(0, vec![cmb])],
             withdraw_full: false,
+            edit: None,
         };
         let held = cmb.bytes();
         let r = run_round(
@@ -830,6 +839,7 @@ pub async fn sn2() -> Result<Log, String> {
             g: None,
             buys: vec![(0, vec![cmb]), (1, vec![cmb, filler])],
             withdraw_full: false,
+            edit: None,
         };
         let held = cmb.bytes();
         let r = run_round(
@@ -889,6 +899,7 @@ pub async fn sn3() -> Result<Log, String> {
             g: Some(1_000),
             buys: vec![(0, vec![c1]), (1, vec![c2])],
             withdraw_full: false,
+            edit: None,
         };
         let r = run_round(
             &c,
@@ -941,6 +952,7 @@ pub async fn sn4() -> Result<Log, String> {
             g: Some(1_000),
             buys: vec![(0, vec![c1]), (1, vec![c2])],
             withdraw_full: true,
+            edit: None,
         };
         let r = run_round(
             &c,

@@ -1,5 +1,5 @@
 [workspace]
-members = ["harness", "lottery", "tn10", "simnet", "web", "vendor/silverscript-abi"]
+members = ["harness", "lottery", "tn10", "simnet", "web", "indexer-api", "vendor/silverscript-abi"]
 default-members = ["harness", "lottery"]
 resolver = "2"
 

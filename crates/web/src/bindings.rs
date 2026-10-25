@@ -170,6 +170,54 @@ pub fn script_of(address: &str) -> JsValue {
     out(net().and_then(|n| api::script_of(n, address)))
 }
 
+// ------------------------------------------------------------------------------ indexer API (F2)
+
+/// The size caps of the indexer API's responses (bytes; the server enforces the same).
+#[wasm_bindgen(js_name = indexerLimits, unchecked_return_type = "Limits")]
+pub fn indexer_limits() -> JsValue {
+    let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    crate::indexer::LIMITS.serialize(&ser).unwrap_or(JsValue::NULL)
+}
+
+macro_rules! parse_indexer {
+    ($js:literal, $f:ident, $parse:ident, $ty:literal, $doc:tt) => {
+        #[doc = $doc]
+        #[wasm_bindgen(js_name = $js, unchecked_return_type = $ty)]
+        pub fn $f(body: &str) -> JsValue {
+            out(net().and_then(|_| crate::indexer::$parse(body)))
+        }
+    };
+}
+
+parse_indexer!("parseIndexerStatus", parse_indexer_status, parse_status, "Outcome<ApiStatus>", "`GET /v1/status`, from its body text (size-capped first).");
+parse_indexer!("parseIndexerRounds", parse_indexer_rounds, parse_rounds, "Outcome<ApiRounds>", "`GET /v1/rounds`.");
+parse_indexer!("parseIndexerRound", parse_indexer_round, parse_round, "Outcome<ApiRound>", "`GET /v1/rounds/{r}`.");
+parse_indexer!("parseIndexerShard", parse_indexer_shard, parse_shard, "Outcome<ApiShard>", "`GET /v1/rounds/{r}/shards/{i}`.");
+parse_indexer!("parseIndexerPurchases", parse_indexer_purchases, parse_purchases, "Outcome<ApiPurchases>", "`GET /v1/rounds/{r}/purchases`.");
+parse_indexer!("parseIndexerAnchorProof", parse_indexer_anchor_proof, parse_anchor_proof, "Outcome<ApiAnchorProof>", "`GET /v1/rounds/{r}/anchor-proof`.");
+parse_indexer!("parseIndexerTickets", parse_indexer_tickets, parse_tickets, "Outcome<ApiTickets>", "`GET /v1/tickets?payout=`.");
+parse_indexer!("parseIndexerObjects", parse_indexer_objects, parse_objects, "Outcome<ApiObjects>", "`GET /v1/vault`, `/v1/positions?owner=`, `/v1/requests?owner=`.");
+parse_indexer!("parseIndexerError", parse_indexer_error, parse_error, "Outcome<ApiErrorBody>", "An error response body.");
+
+/// Spec 6.3: the launch bundle the API serves, verified locally for this page's instance.
+#[wasm_bindgen(js_name = checkIndexerInstance, unchecked_return_type = "Outcome<CheckedInstance>")]
+pub fn check_indexer_instance(#[wasm_bindgen(unchecked_param_type = "InstanceCheckInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::indexer::check_instance(n, &parse("input", input)?)))
+}
+
+/// Spec 6.3: API objects against the node's entries for their outpoints.
+#[wasm_bindgen(js_name = checkIndexerObjects, unchecked_return_type = "Outcome<CheckedObject[]>")]
+pub fn check_indexer_objects(#[wasm_bindgen(unchecked_param_type = "ObjectsCheckInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::indexer::check_objects(n, &parse("input", input)?)))
+}
+
+/// Spec 6.3: a round (objects, status, roots, purchases, winning numbers, anchor proof)
+/// against the chain.
+#[wasm_bindgen(js_name = checkIndexerRound, unchecked_return_type = "Outcome<CheckedRound>")]
+pub fn check_indexer_round(#[wasm_bindgen(unchecked_param_type = "RoundCheckInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::indexer::check_round(n, &parse("input", input)?)))
+}
+
 // ------------------------------------------------------------------------------ dev only
 
 /// The names of the library's fixture calls (feature `fixtures`: dev builds only, never the
