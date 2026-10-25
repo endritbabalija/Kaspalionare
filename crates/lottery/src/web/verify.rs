@@ -5,9 +5,12 @@
 //! - Decoders: `decode_state` (a role's encoded state bytes, as the indexer API and
 //!   `bundle/1` serve them), `decode_redeem` (a full redeem script), `anchor_proof`,
 //!   `read_wallet`, `read_index_log`, `read_index_snapshot`, `read_bundle`.
-//! - Chain checks: `verify_state` (the state's P2SH equals the live UTXO's script, 6.3),
+//! - Chain checks: `verify_state` (the state's P2SH equals the given UTXO entry's script,
+//!   6.3; that the entry is live, i.e. unspent, is the caller's to know: it reads the entry
+//!   from a node by outpoint),
 //!   `rebuild_tree` and `check_roots` (purchases rebuilt into a shard tree and compared with
-//!   the frozen roots), `winning_numbers` (the seed mapping from the anchor's X.hash, D42/D94).
+//!   the frozen roots), `winning_numbers` (the seed mapping from the anchor's X.hash, D42/D94),
+//!   `check_anchor_block` (the proof's X against the anchor block's header from a node).
 //! - Ranges: `check_shard`, `check_ticket`, `check_pool`, `check_controller`, `check_params`,
 //!   `check_marker`, `check_drawer`, `check_vault`, `check_position`, `check_request`,
 //!   `check_record`: the range checks each covenant applies to its own state (cited per
@@ -104,6 +107,18 @@ pub fn anchor_proof(bytes: &[u8]) -> Result<AnchorProof> {
 /// commitment, dX >= D > dP).
 pub fn check_anchor(proof: &AnchorProof, d: i64) -> Result<()> {
     ensure(proof.consistent_with(d), Code::AnchorInvalid, || format!("the anchor proof does not anchor D = {d}"))
+}
+
+/// F1 re-review S1: the proof's X bound to the anchor block as a public node reports it,
+/// the way `draw()` binds it on chain (`OpChainblockSeqCommit(X.hash)` returns the stored
+/// header's commitment only for a selected-chain block, rusty-kaspa v2.1.0
+/// `crypto/txscript/src/opcodes/mod.rs:1389-1404`): `header` hashes to X.hash and commits
+/// to X's fields (`BlockFields::check_header`), and the node reports X on its selected
+/// chain (`is_chain_block`, its `getBlock` verbose data). Before `draw()` this is the node's
+/// view, which can still change (a reorg), so numbers checked this way are provisional.
+pub fn check_anchor_block(proof: &AnchorProof, header: &kaspa_consensus_core::header::Header, is_chain_block: bool) -> Result<()> {
+    proof.x.check_header(header).map_err(|e| Error::new(Code::AnchorInvalid, format!("anchor block: {e}")))?;
+    ensure(is_chain_block, Code::AnchorInvalid, || "anchor block: the node does not report X on its selected chain".to_string())
 }
 
 /// The winning numbers of a round (D42, spec M7 D94): instance ID `cov`, the marker's round

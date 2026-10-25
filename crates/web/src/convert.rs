@@ -9,7 +9,7 @@ use lottery::state::Payout;
 use lottery::web::build::payout_of_spk;
 use lottery::web::{Code, Error, Result};
 
-use crate::dto::{CovUtxo, Utxo};
+use crate::dto::{BlockHeader, CovUtxo, Utxo};
 
 /// The longest hex string accepted (2 MiB of bytes; the decoders cap at 1 MiB).
 const HEX_MAX: usize = 4 << 20;
@@ -128,6 +128,61 @@ pub fn obj(what: &str, c: &CovUtxo) -> Result<lottery::web::cases::Obj> {
 /// A covenant object printed back.
 pub fn obj_dto(o: &lottery::web::cases::Obj) -> CovUtxo {
     CovUtxo { utxo: utxo_dto(&o.outpoint, &o.entry), state: hex(&o.state) }
+}
+
+/// The most parents a header may list here: the consensus bound on a header's parents
+/// (`consensus/core/src/header.rs:87`, 255 levels x 2,048) is far above any real header
+/// (one direct-parent level of at most a few dozen, then fewer per level); this caps what
+/// the page can make the worker parse.
+const HEADER_PARENTS_MAX: usize = 255 * 64;
+
+/// A node's block header (F1 re-review S1). Its `hash` field is taken as stated;
+/// `lottery::anchor::BlockFields::check_header` compares it with the recomputed hash.
+pub fn header(h: &BlockHeader) -> Result<kaspa_consensus_core::header::Header> {
+    let n: usize = h.parents_by_level.iter().map(Vec::len).fold(0, usize::saturating_add);
+    if h.parents_by_level.len() > 255 || n > HEADER_PARENTS_MAX {
+        return Err(Error::new(Code::InputRange, format!("header.parentsByLevel: {} levels, {n} parents", h.parents_by_level.len())));
+    }
+    let hash = |what: &str, s: &str| hash32(what, s).map(Hash::from_bytes);
+    let parents: Vec<Vec<Hash>> =
+        h.parents_by_level.iter().map(|l| l.iter().map(|p| hash("header.parentsByLevel", p)).collect::<Result<Vec<_>>>()).collect::<Result<_>>()?;
+    let parents = parents.try_into().map_err(|e| fmt("header.parentsByLevel", e))?;
+    let blue_work = kaspa_consensus_core::BlueWorkType::from_hex(&h.blue_work).map_err(|e| fmt("header.blueWork", e))?;
+    Ok(kaspa_consensus_core::header::Header {
+        hash: hash("header.hash", &h.hash)?,
+        version: h.version,
+        parents_by_level: parents,
+        hash_merkle_root: hash("header.hashMerkleRoot", &h.hash_merkle_root)?,
+        accepted_id_merkle_root: hash("header.acceptedIdMerkleRoot", &h.accepted_id_merkle_root)?,
+        utxo_commitment: hash("header.utxoCommitment", &h.utxo_commitment)?,
+        timestamp: dec("header.timestamp", &h.timestamp)?,
+        bits: h.bits,
+        nonce: dec("header.nonce", &h.nonce)?,
+        daa_score: dec("header.daaScore", &h.daa_score)?,
+        blue_work,
+        blue_score: dec("header.blueScore", &h.blue_score)?,
+        pruning_point: hash("header.pruningPoint", &h.pruning_point)?,
+    })
+}
+
+/// A header printed back (`blueWork` as 48 hex digits, as rusty-kaspa's serde writes it).
+pub fn header_dto(h: &kaspa_consensus_core::header::Header) -> BlockHeader {
+    let parents: Vec<Vec<Hash>> = (&h.parents_by_level).into();
+    BlockHeader {
+        hash: hex(&h.hash.as_bytes()),
+        version: h.version,
+        parents_by_level: parents.iter().map(|l| l.iter().map(|p| hex(&p.as_bytes())).collect()).collect(),
+        hash_merkle_root: hex(&h.hash_merkle_root.as_bytes()),
+        accepted_id_merkle_root: hex(&h.accepted_id_merkle_root.as_bytes()),
+        utxo_commitment: hex(&h.utxo_commitment.as_bytes()),
+        timestamp: h.timestamp.to_string(),
+        bits: h.bits,
+        nonce: h.nonce.to_string(),
+        daa_score: h.daa_score.to_string(),
+        blue_work: hex(&h.blue_work.to_be_bytes()),
+        blue_score: h.blue_score.to_string(),
+        pruning_point: hex(&h.pruning_point.as_bytes()),
+    }
 }
 
 /// The networks the page may run on (CLAUDE.md Safety: testnet-10 and the private simnet,

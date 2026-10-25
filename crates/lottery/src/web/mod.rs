@@ -155,6 +155,10 @@ codes! {
     /// The coins cover the transaction without change, but the change left over is too
     /// small to pay for its own output (its storage mass). F1 review.
     ChangeDust = 33, "change_dust", "The change left over is too small to send back.";
+    /// The inputs to sign belong to more than one key: a page build has one payer, so every
+    /// coin it signs is of one wallet address (F1 re-review N2: otherwise a summary could
+    /// show a second key's output as coming back to the wallet).
+    MixedSigners = 34, "mixed_signers", "All the coins to sign must come from one wallet address.";
 }
 
 impl fmt::Display for Code {

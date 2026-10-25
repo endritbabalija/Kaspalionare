@@ -216,9 +216,14 @@ pub fn output_of(tx: &kaspa_consensus_core::tx::Transaction, state: &lottery::in
 
 /// A draw with winners (a jackpot holder in shard 2, two second-prize holders in shard 1;
 /// the fixture draw has none, so it creates no pool), built by the web builder as the API
-/// builds it (the wallet's coins, its change address as the funder), and the live objects
+/// builds it (the wallet's coins, its change address as the funder), and the objects
 /// around it: its marker and next controller (inputs 1 and 3), the round r drawer (input 0),
 /// the pools it creates and the next round's drawer.
+///
+/// F1 re-review S1: its anchor X has a real header hash. The sim's X fields do not depend on
+/// X.hash, so the case's X.hash is set to the hash of a header committing to them
+/// (`lottery::anchor::header_committing_to`) before the winners are placed; `anchor_block`
+/// is that header as a node would report it (a chain block).
 pub struct Drawn {
     pub cov: kaspa_hashes::Hash,
     pub marker: CovUtxo,
@@ -228,15 +233,21 @@ pub struct Drawn {
     pub proof: Vec<u8>,
     pub pools: Vec<(CovUtxo, [u8; 6])>,
     pub drawer: CovUtxo,
+    pub anchor_block: AnchorBlock,
 }
 
 pub fn drawn() -> Drawn {
     use lottery::index::State;
     let mut c = lottery::draw::DrawCase::new(4);
+    let fields = lottery::anchor::AnchorProof::from_sim(&c.chain(), c.d() as u64).x;
+    let header = lottery::anchor::header_committing_to(&fields, 1);
+    c.x_hash = header.hash.as_bytes();
     c.hold_jackpot(2, 1);
     let b2 = c.other_bonus(0);
     c.hold(1, b2, 2);
     let p = lottery::anchor::AnchorProof::from_sim(&c.chain(), c.d() as u64);
+    assert_eq!(p.x_hash(), header.hash.as_bytes(), "X's fields do not depend on its hash");
+    p.x.check_header(&header).expect("the header binds X");
     c.x_hash = p.x_hash();
     c.proof = Some(p.clone());
     let wspk = lottery::buy::spk_of(&WALLET_SK);
@@ -267,6 +278,7 @@ pub fn drawn() -> Drawn {
         proof: p.to_bytes().to_vec(),
         pools,
         drawer: created(&u.tx, output_of(&u.tx, &dr), &c.cov, 2_000_000, &dr),
+        anchor_block: AnchorBlock { header: web::convert::header_dto(&header), is_chain_block: true },
     }
 }
 
@@ -342,9 +354,11 @@ pub fn verify_calls() -> Vec<(String, Verify)> {
     other.x.hash[0] ^= 1;
     let other = hex(&other.to_bytes());
     let proof = hex(&x.proof);
-    let closed = RoundObjs::Closed { marker: x.marker.clone(), controller: x.controller.clone() };
-    v.push(("winningNumbers closed".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: closed, anchor_proof: proof.clone() })));
-    let wrong = RoundObjs::Closed { marker: x.marker.clone(), controller: x.drawer_before.clone() };
+    let closed = RoundObjs::Closed { marker: x.marker.clone(), controller: x.controller.clone(), anchor_block: x.anchor_block.clone() };
+    v.push(("winningNumbers closed".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: closed.clone(), anchor_proof: proof.clone() })));
+    // F1 re-review S1: another X.hash is refused on the closed path too (the header binds X).
+    v.push(("winningNumbers closed, another X".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: closed, anchor_proof: other.clone() })));
+    let wrong = RoundObjs::Closed { marker: x.marker.clone(), controller: x.drawer_before.clone(), anchor_block: x.anchor_block.clone() };
     v.push(("winningNumbers closed, a drawer as the controller".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: wrong, anchor_proof: proof.clone() })));
     for (n, (pool, _)) in x.pools.iter().enumerate() {
         let from = RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone() };

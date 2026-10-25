@@ -90,21 +90,23 @@ pub fn decode_redeem(redeem: &str) -> JsValue {
     out(net().and_then(|n| api::decode_redeem(n, redeem)))
 }
 
-/// Spec 6.3: the indexer's state bytes against the live UTXO (its script and the instance).
+/// Spec 6.3: the indexer's state bytes against a UTXO entry from a public node (its script
+/// and the instance; the entry's liveness is the page's: read it by outpoint).
 #[wasm_bindgen(js_name = verifyState, unchecked_return_type = "Outcome<StateView>")]
 #[allow(non_snake_case)]
 pub fn verify_state(covenantId: &str, #[wasm_bindgen(unchecked_param_type = "RoleName")] role: JsValue, #[wasm_bindgen(unchecked_param_type = "CovUtxo")] object: JsValue) -> JsValue {
     out(net().and_then(|n| api::verify_state(n, covenantId, parse("role", role)?, &parse("object", object)?)))
 }
 
-/// Spec 6.3, J6: the shard trees rebuilt from their purchases against a live marker's or
-/// pool's frozen roots.
+/// Spec 6.3, J6: the shard trees rebuilt from their purchases against a marker's or pool's
+/// frozen roots (its entry from a public node by outpoint).
 #[wasm_bindgen(js_name = checkRoots, unchecked_return_type = "Outcome<RootsOut>")]
 pub fn check_roots(#[wasm_bindgen(unchecked_param_type = "RootsInput")] input: JsValue) -> JsValue {
     out(net().and_then(|_| api::check_roots(&parse("input", input)?)))
 }
 
-/// Spec J6: the winning numbers from the round's anchor proof.
+/// Spec J6: the winning numbers from the round's anchor proof: `final` after the draw (the
+/// pool's), `provisional` before it (X bound to the anchor block a public node reports).
 #[wasm_bindgen(js_name = winningNumbers, unchecked_return_type = "Outcome<WinningOut>")]
 pub fn winning_numbers(#[wasm_bindgen(unchecked_param_type = "WinningInput")] input: JsValue) -> JsValue {
     out(net().and_then(|_| api::winning_numbers(&parse("input", input)?)))
@@ -118,7 +120,7 @@ pub fn fee_for(#[wasm_bindgen(unchecked_param_type = "FeeInput")] input: JsValue
     out(net().and_then(|_| api::fee_for(&parse("input", input)?)))
 }
 
-/// The withdrawal minimum (shares) of the live vault (spec S5, D86).
+/// The withdrawal minimum (shares) of the vault (spec S5, D86).
 #[wasm_bindgen(js_name = wMin, unchecked_return_type = "Outcome<string>")]
 #[allow(non_snake_case)]
 pub fn w_min(covenantId: &str, #[wasm_bindgen(unchecked_param_type = "CovUtxo")] vault: JsValue) -> JsValue {

@@ -6,9 +6,12 @@
 //!   build refuses and throws at instantiation (spec 6.6, W4);
 //! - decode: `decodeState(role, stateHex)`, `decodeRedeem(redeemHex)`;
 //! - verify: `verifyState(covenantId, role, {utxo, state})` (spec 6.3), `checkRoots`
-//!   (trees from purchases against a live marker's or pool's frozen roots), `winningNumbers`
-//!   (from the anchor proof, J6); both take chain objects only and derive the round, m and
-//!   D in Rust (F1 review);
+//!   (trees from purchases against a marker's or pool's frozen roots), `winningNumbers`
+//!   (from the anchor proof, J6: `final` after the draw, `provisional` before it, with the
+//!   anchor block's header from a public node binding X, F1 re-review S1); both take chain
+//!   objects only and derive the round, m and D in Rust (F1 review). No call checks that a
+//!   UTXO entry is live (unspent): the page reads every entry it passes from a public node
+//!   by outpoint, never from the indexer (F1 re-review N1);
 //! - build: `buildBuy`, `buildClaim`, `buildReturnDeposit`, `buildClose`, `buildDraw` (the
 //!   void without a proof), `buildRequestDeposit`, `buildRequestWithdraw`, `buildSettle`:
 //!   each from the covenant UTXOs as a node shows them plus their state bytes, the user's

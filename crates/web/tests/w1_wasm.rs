@@ -18,8 +18,9 @@
 //!   `common::verify_calls` (decodeState, decodeRedeem, verifyState, checkRoots,
 //!   winningNumbers; accepted and refused) against `tests/fixtures/w1_verify.txt`, which
 //!   `tests/api.rs` compares natively.
-//! - `w1_sign_and_assemble_in_wasm` (F1 review): quickWalletSign and assemble in wasm
-//!   (Schnorr signing and verification), with a flipped signature and a changed figure.
+//! - `w1_sign_and_assemble_in_wasm` (F1 review; 14 of the 18 shapes since the re-review):
+//!   quickWalletSign and assemble in wasm (Schnorr signing and verification), with a flipped
+//!   signature and a changed figure.
 //!
 //! The four parts run in this order in one test, `w1_wasm_equals_native`: the session is
 //! module state (`start`), so the `not_started` check must come before any part starts it,
@@ -133,15 +134,33 @@ fn w1_verify_through_the_js_boundary() {
 }
 
 /// Signing and the post-sign check in wasm (F1 review, item 4; the reviewer's
-/// `review_f1_wasm_assemble.rs` folded in): for buys, a claim, a close, a draw, a void and a
-/// withdrawal, `quickWalletSign` signs (Schnorr signing in wasm) and `assemble` accepts
+/// `review_f1_wasm_assemble.rs` folded in; F1 re-review N4: every shape the quick wallet
+/// can sign, 14 of 18), `quickWalletSign` signs (Schnorr signing in wasm) and `assemble` accepts
 /// (Schnorr verification in the wasm engine); the assembled transaction is the built one
 /// with only the listed signature scripts; a flipped signature byte is `signature_invalid`;
 /// a changed figure is `built_mismatch`.
 fn w1_sign_and_assemble_in_wasm() {
     let _ = bindings::start("testnet-10");
     let mut n = 0;
-    for name in ["buy b=1 ref", "buy b=4", "claim k=4", "close k=16", "draw k=4", "void k=4", "request_withdraw 0 partial"] {
+    // F1 re-review N4: every shape the quick wallet can sign (14 of the 18 fixture calls);
+    // the other 4 are the ECDSA and P2SH owners' withdrawals, which it cannot sign
+    // (`signed_missing`, asserted natively in `api.rs`).
+    for name in [
+        "buy b=1 ref",
+        "buy b=4",
+        "claim k=4",
+        "return after",
+        "return with pool",
+        "close k=4",
+        "close k=16",
+        "draw k=4",
+        "void k=4",
+        "request_deposit",
+        "request_withdraw 0 partial",
+        "request_withdraw 0 whole",
+        "settle deposit",
+        "settle withdrawal",
+    ] {
         let (_, c, _) = lottery::web::fixtures::calls().unwrap().into_iter().find(|(x, _, _)| x == name).unwrap();
         let i = input(&c);
         let built: BuiltTx = ok(name, call(&i));

@@ -107,7 +107,10 @@ pub struct Utxo {
 }
 
 /// A covenant UTXO and the state bytes given for it (by the indexer API or the local copy;
-/// checked against the UTXO's script before use, spec 6.3).
+/// checked against the UTXO's script and the instance's covenant ID before use, spec 6.3).
+/// No call can check that the UTXO is live (unspent): the page reads `utxo` from a public
+/// node by outpoint, never from the indexer (F1 re-review N1). A builder given a spent one
+/// builds a transaction the node rejects, at no cost.
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CovUtxo {
@@ -363,7 +366,8 @@ pub struct Signed {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RootsInput {
     pub covenant_id: Hex,
-    /// The frozen state to compare with: a live marker or a live pool of the round.
+    /// The frozen state to compare with: a marker or a pool of the round (checked against
+    /// its UTXO entry; the page reads the entry from a public node by outpoint).
     pub against: CovUtxo,
     /// One hex purchase list per shard, shard order.
     pub purchases: Vec<Hex>,
@@ -378,18 +382,63 @@ pub struct RootsOut {
     pub roots: Vec<Hex>,
 }
 
-/// The live chain objects that fix a round's winning numbers (F1 review: the round, m and
-/// the reference D are derived from them in Rust, never passed by the page).
+/// A block header as a public node returns it (`getBlock`; the fields of rusty-kaspa
+/// v2.1.0 `RpcHeader`, `rpc/core/src/model/header.rs:35-51`, every 64-bit integer as a
+/// decimal string). `blueWork` is big-endian hex of at most 24 bytes (leading zeros
+/// optional). F1 re-review S1.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlockHeader {
+    pub hash: Hex,
+    pub version: u16,
+    pub parents_by_level: Vec<Vec<Hex>>,
+    pub hash_merkle_root: Hex,
+    pub accepted_id_merkle_root: Hex,
+    pub utxo_commitment: Hex,
+    /// Milliseconds.
+    pub timestamp: Dec,
+    pub bits: u32,
+    pub nonce: Dec,
+    pub daa_score: Dec,
+    pub blue_work: Hex,
+    pub blue_score: Dec,
+    pub pruning_point: Hex,
+}
+
+/// The anchor block X as a public node reports it, fetched by the anchor proof's X.hash
+/// (`getBlock(hash)`): its header and the verbose data's `isChainBlock`. Never from the
+/// indexer: the indexer could make a header for any hash it likes (another nonce gives
+/// another hash); only a node that holds the block vouches for it. F1 re-review S1.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorBlock {
+    pub header: BlockHeader,
+    pub is_chain_block: bool,
+}
+
+/// The chain objects that fix a round's winning numbers (F1 review: the round, m and the
+/// reference D are derived from them in Rust, never passed by the page). Each is checked
+/// against its UTXO entry (the state rebuilds the entry's script, under the instance's
+/// covenant ID); that the entry is live (unspent) is the page's to ensure: it reads every
+/// entry from a public node by outpoint, never from the indexer (F1 re-review N1).
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub enum RoundObjs {
-    /// Closed, not drawn yet: the live marker of round r and the live controller of round
-    /// r + 1. D = the marker's creation DAA score + the controller's seed_offset (what
-    /// `draw()` uses).
-    Closed { marker: CovUtxo, controller: CovUtxo },
-    /// Drawn: a live pool of round r (its numbers, round and m) and the instance's live
-    /// drawer. D = the pool's claim deadline - draw_window - claim_window (drawer check 19);
-    /// the numbers from the proof must be the pool's.
+    /// Closed, not drawn yet: the marker of round r, the controller of round r + 1, and
+    /// the anchor block from a public node. D = the marker's creation DAA score + the
+    /// controller's seed_offset (what `draw()` uses). The numbers are `provisional`: X is
+    /// bound to the node's header and chain (F1 re-review S1), but until `draw()` the
+    /// node's chain can still change.
+    Closed {
+        marker: CovUtxo,
+        controller: CovUtxo,
+        #[serde(rename = "anchorBlock")]
+        anchor_block: AnchorBlock,
+    },
+    /// Drawn: a pool of round r (its numbers, round and m) and the instance's drawer. D =
+    /// the pool's claim deadline - draw_window - claim_window (drawer check 19); the
+    /// numbers from the proof must be the pool's, which `draw()` wrote after checking the
+    /// anchor on chain: `final`.
     Drawn { pool: CovUtxo, drawer: CovUtxo },
 }
 
@@ -403,15 +452,31 @@ pub struct WinningInput {
     pub anchor_proof: Hex,
 }
 
+/// Whether winning numbers are the round's for good (F1 re-review S1).
+#[derive(Tsify, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NumbersStatus {
+    /// Drawn: equal to the pool's `win`, which `draw()` wrote on chain. The page may show
+    /// them as verified.
+    Final,
+    /// Closed, before `draw()`: from the anchor block as a public node reports it now. The
+    /// page shows them as provisional, never as verified.
+    Provisional,
+}
+
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WinningOut {
     pub winning: Combination,
+    /// `final` (drawn path) or `provisional` (closed path).
+    pub status: NumbersStatus,
     /// The round, its m and its reference D, as derived from the chain objects.
     pub round: Dec,
     pub m: u32,
     pub d: Dec,
-    /// The anchor block X (the seed source) and its DAA score.
+    /// The anchor block X (the seed source) and its DAA score, from the proof. On the
+    /// closed path X.hash is bound to the node's header; on the drawn path the numbers are
+    /// bound (to the pool's) but X.hash is the proof's only.
     pub anchor_hash: Hex,
     pub anchor_daa_score: Dec,
 }

@@ -23,6 +23,16 @@
 //!   takes Schnorr P2PK owners only; such an owner's deposit, settlement and withdrawal go
 //!   through, signed by the quick wallet.
 //! - `small_change_is_change_dust` (note, P5) and `quick_keys_are_redacted_in_debug` (note).
+//!
+//! F1 re-review (the reviewer's probes of `review_f1fix_probes.rs` on f7f8102, folded in;
+//! P1 and P2 reproduced the fault on the unchanged tree first):
+//! - `closed_numbers_are_provisional_and_bound_to_the_nodes_block` (S1, P1): before the
+//!   draw X.hash is bound to the anchor block's header from a node, and the numbers are
+//!   `provisional`; the reviewer's ground proof is refused; a made-up header passes as
+//!   provisional only (the residual: the page fetches the header from a node by X.hash).
+//! - `calls_check_entries_not_liveness` (N1, P1b), `one_key_signs_a_page_build` (N2, P2),
+//!   `deposit_owner_encodings_are_refused` (P3), and the ignored
+//!   `old_to_wallet_rule_reproduces_the_pre_review_golden_file` (P5, needs `REVIEW_OLD_W1`).
 
 mod common;
 
@@ -458,26 +468,29 @@ fn roots_and_numbers_come_from_chain_objects() {
     let d = lottery::game::anchor_daa(marker_daa, ctrl.seed_offset);
     let want = lottery::web::verify::winning_numbers_from_anchor(&x.cov.as_bytes(), mk.round, &x.proof, d, mk.m).unwrap();
     let win = |from: RoundObjs, proof: &[u8]| api::winning_numbers(&WinningInput { covenant_id: cov.clone(), from, anchor_proof: hex(proof) });
-    let closed = RoundObjs::Closed { marker: x.marker.clone(), controller: x.controller.clone() };
+    let closed = RoundObjs::Closed { marker: x.marker.clone(), controller: x.controller.clone(), anchor_block: x.anchor_block.clone() };
     let w = win(closed.clone(), &x.proof).unwrap();
     assert_eq!([w.winning.main.to_vec(), vec![w.winning.bonus]].concat(), want.to_vec());
+    assert_eq!(w.status, NumbersStatus::Provisional, "before the draw the numbers are provisional");
+    assert_eq!(want, x.pools[0].1, "the closed path gives the numbers the draw later wrote");
     assert_eq!((w.round.clone(), w.m, w.d.clone()), (mk.round.to_string(), mk.m as u32, d.to_string()));
     println!("closed: round {} m {} D {} -> {:?} + {}", w.round, w.m, w.d, w.winning.main, w.winning.bonus);
     // The marker's own creation DAA fixes D: the same proof for a marker created later is refused.
     let mut later = x.marker.clone();
     later.utxo.block_daa_score = (marker_daa + 10).to_string();
-    assert_eq!(win(RoundObjs::Closed { marker: later, controller: x.controller.clone() }, &x.proof).unwrap_err().code, Code::AnchorInvalid);
+    assert_eq!(win(RoundObjs::Closed { marker: later, controller: x.controller.clone(), anchor_block: x.anchor_block.clone() }, &x.proof).unwrap_err().code, Code::AnchorInvalid);
     // The controller must be the marker's next round's: the round r drawer (or any other
     // role) in its place is refused, and so is a controller of another round.
-    assert!(win(RoundObjs::Closed { marker: x.marker.clone(), controller: x.drawer_before.clone() }, &x.proof).is_err());
+    assert!(win(RoundObjs::Closed { marker: x.marker.clone(), controller: x.drawer_before.clone(), anchor_block: x.anchor_block.clone() }, &x.proof).is_err());
     let (Call::Close { controller: c_close, .. }, _) = find("close k=4") else { unreachable!() };
-    let e = win(RoundObjs::Closed { marker: x.marker.clone(), controller: web::convert::obj_dto(&c_close) }, &x.proof).unwrap_err();
+    let e = win(RoundObjs::Closed { marker: x.marker.clone(), controller: web::convert::obj_dto(&c_close), anchor_block: x.anchor_block.clone() }, &x.proof).unwrap_err();
     assert_eq!(e.code, Code::ChainMismatch, "a controller of another round: {e}");
     // winningNumbers after the draw: a pool of the round + the live drawer; D from the
     // pool's claim deadline; the numbers must be the pool's.
     for (pool, pool_win) in &x.pools {
         let w = win(RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone() }, &x.proof).unwrap();
         assert_eq!([w.winning.main.to_vec(), vec![w.winning.bonus]].concat(), pool_win.to_vec());
+        assert_eq!(w.status, NumbersStatus::Final, "after the draw the numbers are the pool's: final");
         assert_eq!((w.round.clone(), w.m, w.d.clone()), (mk.round.to_string(), mk.m as u32, d.to_string()), "D from the pool equals D from the marker");
     }
     println!("drawn: {} pools give the same numbers and D", x.pools.len());
@@ -486,15 +499,24 @@ fn roots_and_numbers_come_from_chain_objects() {
     let mut other = lottery::anchor::AnchorProof::from_bytes(&x.proof).unwrap();
     other.x.hash[0] ^= 1;
     let other = other.to_bytes().to_vec();
-    assert!(win(closed.clone(), &other).is_ok(), "off-chain, another X.hash still anchors D (only the node knows the chain)");
+    // F1 re-review S1: before the fix the closed path took it (off-chain it still anchors
+    // D); now the node's anchor block binds X.hash.
+    let e = win(closed.clone(), &other).unwrap_err();
+    assert_eq!(e.code, Code::AnchorInvalid, "{e}");
     let e = win(RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer.clone() }, &other).unwrap_err();
     assert_eq!(e.code, Code::ChainMismatch, "{e}");
     // The drawer that has not drawn the pool's round (the round r drawer) is refused.
     let e = win(RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer_before.clone() }, &x.proof).unwrap_err();
     assert_eq!(e.code, Code::ChainMismatch, "{e}");
     // The page's JSON has no field for a derived value.
-    let j = serde_json::json!({"covenantId": cov, "from": {"closed": {"marker": x.marker, "controller": x.controller}}, "anchorProof": hex(&x.proof), "m": 10});
-    assert!(serde_json::from_value::<WinningInput>(j).is_err(), "an extra `m` field is refused");
+    let j = serde_json::json!({"covenantId": cov, "from": {"closed": {"marker": x.marker, "controller": x.controller, "anchorBlock": x.anchor_block}}, "anchorProof": hex(&x.proof)});
+    assert!(serde_json::from_value::<WinningInput>(j.clone()).is_ok(), "the page's closed input, as JSON");
+    let mut jm = j.clone();
+    jm["m"] = serde_json::json!(10);
+    assert!(serde_json::from_value::<WinningInput>(jm).is_err(), "an extra `m` field is refused");
+    let mut jn = j;
+    jn["from"]["closed"].as_object_mut().unwrap().remove("anchorBlock");
+    assert!(serde_json::from_value::<WinningInput>(jn).is_err(), "the closed path needs the anchor block");
     let j = serde_json::json!({"covenantId": cov, "against": x.marker, "purchases": lists, "m": 10});
     assert!(serde_json::from_value::<RootsInput>(j).is_err(), "an extra `m` field is refused");
 }
@@ -696,4 +718,251 @@ fn quick_keys_are_redacted_in_debug() {
         assert!(s.contains(web::dto::REDACTED));
     }
     assert!(format!("{k:?}").contains(&k.public_key), "the public parts still print");
+}
+
+// ------------------------------------------------------------------------------ F1 re-review
+// The reviewer's probes of `review_f1fix_probes.rs` (on f7f8102), folded in as regression
+// tests. Before the fixes, P1 returned the ground numbers as Ok on the closed path and P2
+// showed a second key's change as `toWallet` (both reproduced on the unchanged tree).
+
+fn closed_with(x: &common::Drawn, anchor_block: AnchorBlock) -> RoundObjs {
+    RoundObjs::Closed { marker: x.marker.clone(), controller: x.controller.clone(), anchor_block }
+}
+
+fn numbers(w: &WinningOut) -> [u8; 6] {
+    [w.winning.main[0], w.winning.main[1], w.winning.main[2], w.winning.main[3], w.winning.main[4], w.winning.bonus]
+}
+
+/// S1 (reviewer P1): before the draw, the anchor proof's X.hash is bound to the anchor
+/// block a public node reports (its header hashes to X.hash and commits to X's fields; the
+/// node says X is on its selected chain), and the numbers are `provisional`; after the draw
+/// they are the pool's and `final`.
+///
+/// The reviewer ground X.hash until the closed path returned target numbers as Ok (1,751,388
+/// tries); the drawn path gave the real ones for the same round. Now that proof is refused
+/// on both paths. Negative control: the ground proof still anchors D off-chain (the whole of
+/// the old closed-path check) and maps to the target.
+///
+/// The residual, pinned here: a header made up for the ground proof (the commitment does
+/// not depend on the hash, so grinding the nonce works) passes, because no call can tell a
+/// made-up header from a node's. So the page must take the anchor block from a public node
+/// by X.hash, never from the indexer (handoff, F3), and even then the result is only
+/// `provisional`: no ground proof gives an Ok `final` result.
+#[test]
+fn closed_numbers_are_provisional_and_bound_to_the_nodes_block() {
+    let x = drawn();
+    let cov = hex(&x.cov.as_bytes());
+    let real = x.pools[0].1;
+    let mk = lottery::web::cases::marker(&web::convert::obj("m", &x.marker).unwrap(), &x.cov).unwrap();
+    let win = |from: RoundObjs, proof: &[u8]| api::winning_numbers(&WinningInput { covenant_id: cov.clone(), from, anchor_proof: hex(proof) });
+    let drawn_from = RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer.clone() };
+
+    // Honest: the same numbers on both paths, provisional before the draw, final after.
+    let c = win(closed_with(&x, x.anchor_block.clone()), &x.proof).unwrap();
+    let d = win(drawn_from.clone(), &x.proof).unwrap();
+    assert_eq!((numbers(&c), c.status), (real, NumbersStatus::Provisional));
+    assert_eq!((numbers(&d), d.status), (real, NumbersStatus::Final));
+    assert_eq!((c.anchor_hash.clone(), c.d.clone()), (d.anchor_hash.clone(), d.d.clone()));
+
+    // The reviewer's grind: X.hash only, target = the next combination with bonus 1.
+    let real_rank = lottery::combo::Combo::new([real[0], real[1], real[2], real[3], real[4]], real[5]).rank();
+    let target_main = lottery::combo::unrank((real_rank + 1) % lottery::game::N as u32);
+    let hit = |h: &[u8; 32]| {
+        let s = lottery::game::seed_numbers(&x.cov.as_bytes(), mk.round, h, mk.m);
+        s.main == target_main && s.bonus == 1
+    };
+    let mut p = lottery::anchor::AnchorProof::from_bytes(&x.proof).unwrap();
+    let mut tries = 0u64;
+    while !hit(&p.x.hash) {
+        tries += 1;
+        p.x.hash[..8].copy_from_slice(&tries.to_le_bytes());
+        assert!(tries < 50_000_000, "no grind hit");
+    }
+    let forged = p.to_bytes();
+    let target = [target_main[0], target_main[1], target_main[2], target_main[3], target_main[4], 1];
+    let dd: i64 = d.d.parse().unwrap();
+    assert_eq!(
+        lottery::web::verify::winning_numbers_from_anchor(&x.cov.as_bytes(), mk.round, &forged, dd, mk.m).unwrap(),
+        target,
+        "control: off-chain the ground proof anchors D and maps to the target"
+    );
+    let e = win(closed_with(&x, x.anchor_block.clone()), &forged).unwrap_err();
+    assert_eq!(e.code, Code::AnchorInvalid, "{e}");
+    assert!(e.detail.contains("hashes to"), "{e}");
+    assert_eq!(win(drawn_from.clone(), &forged).unwrap_err().code, Code::ChainMismatch);
+    println!("S1: X.hash ground in {tries} tries to {target:?}: closed path anchor_invalid (the node's header hashes to the real X), drawn path chain_mismatch");
+
+    // The residual: a made-up header (nonce ground) for that target passes, as provisional.
+    let mut q = lottery::anchor::AnchorProof::from_bytes(&x.proof).unwrap();
+    let mut nonce = 0u64;
+    let made_up = loop {
+        nonce += 1;
+        let h = lottery::anchor::header_committing_to(&q.x, nonce);
+        if hit(&h.hash.as_bytes()) {
+            break h;
+        }
+        assert!(nonce < 50_000_000, "no nonce hit");
+    };
+    q.x.hash = made_up.hash.as_bytes();
+    let w = win(closed_with(&x, AnchorBlock { header: web::convert::header_dto(&made_up), is_chain_block: true }), &q.to_bytes()).unwrap();
+    assert_eq!((numbers(&w), w.status), (target, NumbersStatus::Provisional), "only a node can tell this header is not a block");
+    assert_eq!(win(drawn_from, &q.to_bytes()).unwrap_err().code, Code::ChainMismatch, "and it is never final");
+    println!("S1 residual: a made-up header ({nonce} nonces) gives the target as provisional only; the page takes the header from a node by X.hash");
+
+    // Each check of the anchor block on its own (the honest proof and header otherwise).
+    let hdr = web::convert::header(&x.anchor_block.header).unwrap();
+    let refused = |ab: AnchorBlock, proof: &[u8], what: &str, code: Code, says: &str| {
+        let e = win(closed_with(&x, ab), proof).unwrap_err();
+        assert_eq!(e.code, code, "{what}: {e}");
+        assert!(e.detail.contains(says), "{what}: {e}");
+    };
+    let ab = |h: &kaspa_consensus_core::header::Header| AnchorBlock { header: web::convert::header_dto(h), is_chain_block: true };
+    refused(AnchorBlock { is_chain_block: false, ..x.anchor_block.clone() }, &x.proof, "not a chain block", Code::AnchorInvalid, "selected chain");
+    let mut stated = x.anchor_block.clone();
+    stated.header.hash = "ab".repeat(32);
+    refused(stated, &x.proof, "a wrong stated hash", Code::AnchorInvalid, "states hash");
+    let mut next = hdr.clone();
+    next.nonce += 1;
+    next.finalize();
+    refused(ab(&next), &x.proof, "another block's header", Code::AnchorInvalid, "hashes to");
+    type Edit = fn(&mut kaspa_consensus_core::header::Header);
+    let edits: [(&str, Edit, &str); 3] = [
+        ("commitment", |h| h.accepted_id_merkle_root = kaspa_hashes::Hash::from_bytes([9; 32]), "commitment"),
+        ("DAA score", |h| h.daa_score += 1, "scores"),
+        ("blue score", |h| h.blue_score += 1, "scores"),
+    ];
+    for (what, f, says) in edits {
+        // Re-finalized, and the proof's X.hash moved to it: only the named field is wrong.
+        let mut m = hdr.clone();
+        f(&mut m);
+        m.finalize();
+        let mut pm = lottery::anchor::AnchorProof::from_bytes(&x.proof).unwrap();
+        pm.x.hash = m.hash.as_bytes();
+        refused(ab(&m), &pm.to_bytes(), what, Code::AnchorInvalid, says);
+    }
+    // Malformed headers are input errors, never a panic.
+    let mut bw = x.anchor_block.clone();
+    bw.header.blue_work = "zz".into();
+    refused(bw, &x.proof, "blue work not hex", Code::InputFormat, "blueWork");
+    let mut bw = x.anchor_block.clone();
+    bw.header.blue_work = "1".repeat(49);
+    refused(bw, &x.proof, "blue work over 24 bytes", Code::InputFormat, "blueWork");
+    let mut many = x.anchor_block.clone();
+    many.header.parents_by_level = vec![vec!["00".repeat(32); 64]; 256];
+    refused(many, &x.proof, "256 parent levels", Code::InputRange, "parentsByLevel");
+    // The header DTO round-trips (a node's header as the page passes it).
+    let back = web::convert::header(&web::convert::header_dto(&hdr)).unwrap();
+    assert_eq!((web::convert::header_dto(&back), kaspa_consensus_core::hashing::header::hash(&back)), (x.anchor_block.header.clone(), hdr.hash));
+    let mut short = x.anchor_block.clone();
+    short.header.blue_work = short.header.blue_work.trim_start_matches('0').to_string();
+    assert!(win(closed_with(&x, short), &x.proof).is_ok(), "blue work without leading zeros");
+}
+
+/// N1 (reviewer P1b): what the calls check of a chain object is its state against its UTXO
+/// entry (script) and the instance (covenant ID); not that the outpoint is live. An entry
+/// of another instance is refused; an entry at an outpoint that does not exist is taken as
+/// given. Liveness is the page's: it reads every entry from a public node by outpoint
+/// (handoff, F3).
+#[test]
+fn calls_check_entries_not_liveness() {
+    let x = drawn();
+    let cov = hex(&x.cov.as_bytes());
+    let win = |pool: CovUtxo| api::winning_numbers(&WinningInput { covenant_id: cov.clone(), from: RoundObjs::Drawn { pool, drawer: x.drawer.clone() }, anchor_proof: hex(&x.proof) });
+    let mut other = x.pools[0].0.clone();
+    other.utxo.covenant_id = Some("11".repeat(32));
+    assert_eq!(win(other).unwrap_err().code, Code::ChainMismatch, "another instance's covenant ID");
+    let mut ghost = x.pools[0].0.clone();
+    ghost.utxo.transaction_id = "ab".repeat(32);
+    assert!(win(ghost).is_ok(), "an outpoint that is not on chain: not checkable here");
+}
+
+/// N2 (reviewer P2): a page build has one payer. Coins of two keys (the builder library
+/// accepts any Schnorr P2PK coins) are refused with `mixed_signers`: before the fix the
+/// second key's change was shown as `toWallet`. Coins of one key still build, and their
+/// change is `toWallet`. `built_tx` itself, which `unsigned_of` (so `assemble` and
+/// `quickWalletSign`) runs on every `BuiltTx`, refuses sign items of two keys.
+#[test]
+fn one_key_signs_a_page_build() {
+    let (_, Input::Buy(b)) = find("buy b=1 ref") else { unreachable!() };
+    let attacker = lottery::state::Payout::Schnorr(lottery::params::xonly(&[9u8; 32]));
+    let mut two = b.clone();
+    let mut c2 = two.funds.coins[0].clone();
+    c2.transaction_id = "cd".repeat(32);
+    c2.script_public_key = web::convert::spk_hex(&attacker.spk());
+    c2.amount = "100000000".into();
+    two.funds.coins.push(c2.clone());
+    two.funds.change = addr(&attacker);
+    let e = api::build_buy(Net::Testnet10, &two).unwrap_err();
+    assert_eq!(e.code, Code::MixedSigners, "{e}");
+    two.funds.change = b.funds.change.clone();
+    assert_eq!(api::build_buy(Net::Testnet10, &two).unwrap_err().code, Code::MixedSigners, "with the wallet's own change address too");
+    // Control: a second coin of the wallet's own key builds; its change comes back.
+    let mut one = b.clone();
+    let mut c3 = c2;
+    c3.script_public_key = one.funds.coins[0].script_public_key.clone();
+    one.funds.coins.push(c3);
+    let built = api::build_buy(Net::Testnet10, &one).expect("one key, two coins");
+    assert_eq!(built.sign.len(), 2);
+    assert!(built.summary.outputs.iter().any(|o| o.to_wallet && o.address.as_deref() == Some(b.funds.change.as_str())));
+    // built_tx on an Unsigned whose second sign item is another key's.
+    let mut u = api::unsigned_of(Net::Testnet10, &built).unwrap();
+    u.sign[1].owner = lottery::buy::OwnerPub::Schnorr(lottery::params::xonly(&[9u8; 32]));
+    assert_eq!(api::built_tx(Net::Testnet10, &u).unwrap_err().code, Code::MixedSigners);
+    // Every fixture build has one key (a withdrawal's owner coin is its funder's too).
+    for (name, _, inp) in all_inputs() {
+        let b = inp.run().unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(b.sign.windows(2).all(|w| (w[0].kind, &w[0].public_key) == (w[1].kind, &w[1].public_key)), "{name}");
+    }
+}
+
+/// Reviewer P3: a `request_deposit` owner in upper case or without the network prefix is
+/// refused (`address_network`), like any address that is not `kaspatest:`.
+#[test]
+fn deposit_owner_encodings_are_refused() {
+    let (_, Input::Deposit(d)) = find("request_deposit") else { unreachable!() };
+    for o in [d.owner.to_uppercase(), d.owner.trim_start_matches("kaspatest:").to_string()] {
+        let e = api::build_request_deposit(Net::Testnet10, &DepositInput { owner: o.clone(), ..d.clone() }).unwrap_err();
+        assert_eq!(e.code, Code::AddressNetwork, "{o}: {e}");
+    }
+}
+
+/// Reviewer P5 (evidence for the F1 review's `toWallet` rewrite, kept for re-runs): the
+/// current `BuiltTx` of every fixture call, with the summary recomputed by the pre-review
+/// rule (`toWallet` = the output pays `funds.change`), digested as the golden file is,
+/// equals the pre-review golden file (b3b3520's `w1_api.txt`, path in `REVIEW_OLD_W1`) on
+/// every line: the rewrite changed only `toWallet` and `walletBack`. Run with
+/// `REVIEW_OLD_W1=<file> cargo test -j 2 -p web --release --test api -- --ignored old_to_wallet_rule`.
+#[test]
+#[ignore]
+fn old_to_wallet_rule_reproduces_the_pre_review_golden_file() {
+    let path = std::env::var("REVIEW_OLD_W1").expect("REVIEW_OLD_W1: the pre-review w1_api.txt");
+    let old = std::fs::read_to_string(path).unwrap();
+    let old: Vec<&str> = old.lines().collect();
+    let mut same = 0;
+    for ((name, _, i), want) in all_inputs().into_iter().zip(&old) {
+        let mut b = i.run().unwrap();
+        let change = match &i {
+            Input::Buy(x) => &x.funds.change,
+            Input::Claim(x) => &x.funds.change,
+            Input::Return(x) => &x.funds.change,
+            Input::Close(x) => &x.funds.change,
+            Input::Draw(x) => &x.funds.change,
+            Input::Deposit(x) => &x.funds.change,
+            Input::Withdraw(x) => &x.funds.change,
+            Input::Settle(x) => &x.funds.change,
+        }
+        .clone();
+        let mut back = 0u64;
+        for o in &mut b.summary.outputs {
+            o.to_wallet = o.address.as_deref() == Some(change.as_str());
+            if o.to_wallet {
+                back += o.value.parse::<u64>().unwrap();
+            }
+        }
+        b.summary.wallet_back = back.to_string();
+        let eq = digest_line(&name, &b) == *want;
+        same += eq as usize;
+        println!("P5 {name}: old-rule digest equals the pre-review golden line: {eq}");
+    }
+    assert_eq!(same, old.len());
 }

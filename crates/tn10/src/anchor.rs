@@ -101,7 +101,9 @@ async fn block<C: RpcApi + ?Sized>(c: &C, h: Hash, txs: bool) -> Result<RpcBlock
 /// (1) `H_seq(ctx ‖ mpr) == payload_and_ctx_digest` for the mergeset order used;
 /// (2) `parent_seq_commit` == the selected parent's `accepted_id_merkle_root`;
 /// (3) the full KIP-21 recomputation (kaspa_seq_commit) == the block's `accepted_id_merkle_root`;
-/// (4) `lottery::anchor::seq_commit` (the script's formula over the A3 bytes) == the same.
+/// (4) `lottery::anchor::seq_commit` (the script's formula over the A3 bytes) == the same;
+/// (5) the header hashes to the block's hash and binds the fields (`BlockFields::check_header`,
+/// what the page's `winningNumbers` checks before the draw).
 /// Any failure is an error; nothing is built from an unchecked proof (spec D103).
 pub async fn anchor_from_rpc<C: RpcApi + ?Sized>(c: &C, hash: Hash) -> Result<RpcBlockProof, String> {
     let b = block(c, hash, false).await?;
@@ -195,6 +197,11 @@ pub async fn anchor_from_rpc<C: RpcApi + ?Sized>(c: &C, hash: Hash) -> Result<Rp
     if fields.seq_commit() != hdr.accepted_id_merkle_root.as_bytes() {
         return Err(format!("block {hash}: the script's formula over the A3 bytes differs from the header commitment"));
     }
+    // (5) F1 re-review S1: the header binds the fields as the page's `winningNumbers` checks
+    // them (`BlockFields::check_header`: the header hashes to the block's hash, commits to
+    // the fields, and has their DAA and blue score), on the node's real header.
+    let consensus_hdr = kaspa_consensus_core::header::Header::try_from(hdr).map_err(|e| format!("block {hash}: header: {e}"))?;
+    fields.check_header(&consensus_hdr).map_err(|e| format!("block {hash}: {e}"))?;
     let sim = SimBlock {
         hash,
         parent: sp,

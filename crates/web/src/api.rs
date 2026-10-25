@@ -61,7 +61,9 @@ pub fn decode_redeem(net: Net, redeem: &str) -> Result<StateView> {
     Ok(StateView::of(&verify::decode_redeem(&unhex("redeem", redeem)?)?, net))
 }
 
-/// Spec 6.3: a state from the indexer against its live UTXO (script and instance).
+/// Spec 6.3: a state from the indexer against its UTXO entry (the state rebuilds the
+/// entry's script, under the instance's covenant ID). That the entry is live (unspent) is
+/// not checked here: the page reads it from a public node by outpoint (F1 re-review N1).
 pub fn verify_state(net: Net, covenant_id: &str, role: RoleName, o: &CovUtxo) -> Result<StateView> {
     let cov = cov_of(covenant_id)?;
     Ok(StateView::of(&cases::live(role.role(), &obj("state", o)?, &cov)?, net))
@@ -74,8 +76,10 @@ fn purchase_lists(p: &[String]) -> Result<Vec<Vec<u8>>> {
     p.iter().enumerate().map(|(i, s)| unhex(&format!("purchases[{i}]"), s)).collect()
 }
 
-/// Spec 6.3, J6: the shard trees rebuilt from their purchases against a live marker's or
-/// pool's frozen roots. The round, m, k and roots are the chain object's (F1 review).
+/// Spec 6.3, J6: the shard trees rebuilt from their purchases against a marker's or pool's
+/// frozen roots (the object checked against its UTXO entry as in `verify_state`; liveness
+/// is the page's, F1 re-review N1). The round, m, k and roots are the chain object's (F1
+/// review).
 pub fn check_roots(i: &RootsInput) -> Result<RootsOut> {
     let cov = cov_of(&i.covenant_id)?;
     let o = obj("against", &i.against)?;
@@ -95,23 +99,33 @@ pub fn check_roots(i: &RootsInput) -> Result<RootsOut> {
     Ok(RootsOut { round: round.to_string(), m: m as u32, roots: trees.iter().map(|t| hex(&t.root())).collect() })
 }
 
-/// Spec J6: the winning numbers from the anchor proof, for the round the live chain objects
-/// fix (F1 review: round, m and D are derived here, never passed by the page).
+/// Spec J6: the winning numbers from the anchor proof, for the round the chain objects fix
+/// (F1 review: round, m and D are derived here, never passed by the page). Each object is
+/// checked against its UTXO entry (state, script, covenant ID); that the entries are live
+/// is the page's (it reads them from a public node by outpoint, F1 re-review N1).
 /// - `closed`: the round r marker and the round r + 1 controller (`draw()`'s inputs 1 and
-///   3): D = the marker's creation DAA score + seed_offset.
-/// - `drawn`: a live pool of round r and the live drawer: D = the pool's claim deadline -
+///   3): D = the marker's creation DAA score + seed_offset. F1 re-review S1: off-chain,
+///   the proof alone leaves X.hash free (anyone can grind it to pick the numbers), so the
+///   anchor block as a public node reports it must bind X: its header hashes to X.hash and
+///   commits to X's fields, and the node reports X on its selected chain
+///   (`verify::check_anchor_block`). The result is `provisional`: the node's chain can
+///   still change until `draw()`.
+/// - `drawn`: a pool of round r and the drawer: D = the pool's claim deadline -
 ///   draw_window - claim_window (drawer check 19; draw() copies both windows unchanged),
-///   and the proof's numbers must be the pool's `win`, which `draw()` wrote.
+///   and the proof's numbers must be the pool's `win`, which `draw()` wrote after checking
+///   the anchor on chain: `final`.
 ///
-/// A proof that does not anchor D is `anchor_invalid`; objects that do not belong together,
-/// or numbers that are not the pool's, are `chain_mismatch`.
+/// A proof that does not anchor D, or an anchor block that does not bind it, is
+/// `anchor_invalid`; objects that do not belong together, or numbers that are not the
+/// pool's, are `chain_mismatch`.
 pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
     let cov = cov_of(&i.covenant_id)?;
     let proof = unhex("anchorProof", &i.anchor_proof)?;
     let p = verify::anchor_proof(&proof)?;
     let mismatch = |what: &str| Error::new(Code::ChainMismatch, what.to_string());
     let (round, m, d, pool_win) = match &i.from {
-        RoundObjs::Closed { marker, controller } => {
+        RoundObjs::Closed { marker, controller, anchor_block } => {
+            verify::check_anchor_block(&p, &convert::header(&anchor_block.header)?, anchor_block.is_chain_block)?;
             let mo = obj("marker", marker)?;
             let mk = cases::marker(&mo, &cov)?;
             verify::check_marker(&mk)?;
@@ -147,6 +161,7 @@ pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
     }
     Ok(WinningOut {
         winning: Combination { main: [w[0], w[1], w[2], w[3], w[4]], bonus: w[5] },
+        status: if pool_win.is_some() { NumbersStatus::Final } else { NumbersStatus::Provisional },
         round: round.to_string(),
         m: m as u32,
         d: d.to_string(),
@@ -162,7 +177,7 @@ pub fn fee_for(i: &FeeInput) -> Result<String> {
     Ok(build::fee_of(&m, i.fee_rate as u64)?.to_string())
 }
 
-/// The withdrawal minimum of a live vault (spec S5, D86).
+/// The withdrawal minimum of a vault (spec S5, D86; checked against its UTXO entry).
 pub fn w_min(covenant_id: &str, vault: &CovUtxo) -> Result<String> {
     let cov = cov_of(covenant_id)?;
     let v = cases::vault(&obj("vault", vault)?, &cov)?;
@@ -219,7 +234,17 @@ fn masses_out(m: &harness::Masses) -> MassesOut {
 /// transaction, its entries and the inputs to sign (F1 review), so `unsigned_of` can
 /// recompute it: the wallet's coins are the inputs it signs, and an output comes back to the
 /// wallet when it is a plain output paying the script of one of them.
+///
+/// F1 re-review N2: a page build has one payer. Every input to sign must be of one key (one
+/// owner, so one wallet address), or the build is refused (`mixed_signers`): otherwise an
+/// output paying a second key would be shown as coming back to the wallet. A withdrawal's
+/// owner coin and its funding coins are then the same wallet's, as on the page.
 pub fn built_tx(net: Net, u: &Unsigned) -> Result<BuiltTx> {
+    if let Some(first) = u.sign.first() {
+        if let Some(s) = u.sign.iter().find(|s| s.owner != first.owner) {
+            return Err(Error::new(Code::MixedSigners, format!("inputs {} and {} to sign are of two keys", first.index, s.index)));
+        }
+    }
     let idx = u.sign_indices();
     let mut wallet_in = 0u64;
     let mut wallet_scripts = vec![];

@@ -40,7 +40,7 @@ Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this f
 | Stage | Status | Notes |
 |---|---|---|
 | F0 wallet experiment | part A done, waiting for owner | Probe `tn10 wallet-probe` built and self-tested on testnet-10 (stand-in signer). Part B (the owner's clicks, KasWare only; Kaspire not available, untested) is scheduled for 2026-10-26: see "F0 part B: owner steps". |
-| F1 builder refactor for wasm | done (parts A, B, C; review fixed) | Review (`covenant-reviewer` on `b3b3520`): no must-fix; the six should-fix items and four notes are fixed, each test first, with negative controls: page values out of `checkRoots`/`winningNumbers` (round, m, D derived in Rust), every `BuiltTx` figure bound to its transaction (`built_mismatch`), Schnorr-only deposit owners (`owner_type`), W1 runs signing, verification, decode and verify in wasm (97 + 18 + 290 lines, 7 signed), 20 golden lines appended (77 untouched), W4 checks the release artifact for the simnet and the fixtures; `change_dust`, the draw's `funding_short`, redacted keys, the `fixtures` feature. One owner decision (small change: refuse or pay as fee). See "F1 review and fixes". Before the review: A: the templates embedded (W2), the compiler behind `compiler`, one rusty-kaspa version, the wasm links. B: `lottery::web` (decode, verify, the 8 unsigned builders, the signing split, the post-sign check, typed errors, W3). C: the builders from chain objects (`lottery::web::cases`), the wasm-bindgen API in `crates/web` with a generated, typed `.d.ts`, one Safe JSON serialiser (tn10 calls it), W1 in wasm under Node (77 + 18 digests equal), W4 (the mainnet build has no quick-wallet symbol and refuses to load), the quick-wallet key hook, the wRPC client running in wasm against testnet-10, sizes (1.69 MB brotli at its smallest). Owner questions: simnet addresses; an npm accident in the home folder. See "F1 part A", "F1 part B" and "F1 part C". |
+| F1 builder refactor for wasm | done (parts A, B, C; review and re-review fixed) | Re-review (`covenant-reviewer` on `f7f8102`): one should-fix, fixed test first with negative controls: before the draw the anchor proof's X.hash was free, so whoever served the proof chose the winning numbers; now the anchor block's header from a public node binds X (`anchor_invalid`) and `winningNumbers` says `final` (drawn) or `provisional` (closed). Hardening: one signing key per build (34 `mixed_signers`); liveness docs fixed; W1 signs 14 of 18 shapes in wasm. Requirements for F3, F5 and F6 recorded (node-only entries and headers, the deployed artifact in W4, no beta launch through `cases.rs`/`wallet_probe.rs`). One owner decision (show provisional numbers before the draw). See "F1 re-review and fixes". Review (`covenant-reviewer` on `b3b3520`): no must-fix; the six should-fix items and four notes are fixed, each test first, with negative controls: page values out of `checkRoots`/`winningNumbers` (round, m, D derived in Rust), every `BuiltTx` figure bound to its transaction (`built_mismatch`), Schnorr-only deposit owners (`owner_type`), W1 runs signing, verification, decode and verify in wasm (97 + 18 + 290 lines, 7 signed), 20 golden lines appended (77 untouched), W4 checks the release artifact for the simnet and the fixtures; `change_dust`, the draw's `funding_short`, redacted keys, the `fixtures` feature. One owner decision (small change: refuse or pay as fee). See "F1 review and fixes". Before the review: A: the templates embedded (W2), the compiler behind `compiler`, one rusty-kaspa version, the wasm links. B: `lottery::web` (decode, verify, the 8 unsigned builders, the signing split, the post-sign check, typed errors, W3). C: the builders from chain objects (`lottery::web::cases`), the wasm-bindgen API in `crates/web` with a generated, typed `.d.ts`, one Safe JSON serialiser (tn10 calls it), W1 in wasm under Node (77 + 18 digests equal), W4 (the mainnet build has no quick-wallet symbol and refuses to load), the quick-wallet key hook, the wRPC client running in wasm against testnet-10, sizes (1.69 MB brotli at its smallest). Owner questions: simnet addresses; an npm accident in the home folder. See "F1 part A", "F1 part B" and "F1 part C". |
 | F2 indexer API | not started | |
 | F3 web shell and Play | not started | |
 | F4 My tickets, claims, backup | not started | |
@@ -1273,3 +1273,152 @@ test w4_mainnet_build_has_no_quick_wallet_and_refuses_to_start ... ok
 - `cargo test -j 1 --release -p tn10`: 25 passed, 0 failed.
 - `crates/web` (the web test command): `api` 13 passed, 1 ignored (`write_golden`); W1 1/1 in wasm (18 + 97 + 290 lines, 7 signed and assembled); W4 1/1 (release artifact, dev control, mainnet).
 - Native transactions byte-identical: the 77 original lines of `f1_digests.txt` are unchanged and green, plus the 20 appended. No covenant or template change. `Cargo.lock` unchanged.
+
+## F1 re-review and fixes (fix agent, 2026-10-25)
+
+### The re-review
+
+- **Who and what:** `covenant-reviewer` re-reviewed the fix commit `f7f8102` ("F1 review and fixes"). It left one untracked probe file, `crates/web/tests/review_f1fix_probes.rs` (P1, P1b, P2, P3, P5); its report is not in the repo, so the verdicts below are as the orchestrator passed them on, plus what the probes showed when rerun here on the unchanged tree.
+- **Verdicts, per item:**
+
+  | Item | Finding | Verdict | Now |
+  |---|---|---|---|
+  | S1 (P1) | Before the draw, whoever serves the anchor proof chooses the winning numbers: on the closed path nothing checkable off-chain bound X.hash (`anchor.rs` checked only P's commitment and the DAA window). Rerun here: X.hash ground in 1,751,388 tries gave the target `[4, 5, 7, 27, 29] + 1` as Ok; the drawn path gave the real `[3, 5, 7, 27, 29] + 7` for the same round | should-fix | fixed (below) |
+  | N1 (P1b) | The calls check state, script and covenant ID agreement, not that an outpoint is live; the doc comments said "a live marker or pool (checked against its UTXO)". Rerun: another instance's covenant ID is `chain_mismatch`; a pool at an outpoint that does not exist is Ok | note | docs fixed; F3 requirement below |
+  | N2 (P2) | One payer: `toWallet` = a plain output paying the script of any signed input, and the builder takes Schnorr coins of several keys, so a second key's change showed as "back to the wallet". Rerun: sign items `[1, 2]`, walletBack 9,944,832,000 to the second key's address; the quick wallet then signs its own input only and `assemble` is `signed_missing` | hardening | fixed (below) |
+  | P3 | `request_deposit` owners in upper case or without the prefix | holds (`address_network` both) | kept as a test |
+  | P5 | The pre-review `toWallet` rule applied to today's builds reproduces the pre-review golden file (`b3b3520`'s `w1_api.txt`) | holds | kept as an ignored test; rerun here: 18 of 18 lines equal (`REVIEW_OLD_W1` = `git show b3b3520:crates/web/tests/fixtures/w1_api.txt`) |
+  | N4 | W1's signing half covered 7 of 18 shapes in wasm; F6's W4 must check the actual deploy artifact | note | 14 of 18 now; the rest recorded for F6 |
+  | N5 | tn10 instances made through `tn10/src/cases.rs` or `wallet_probe.rs` keep the public default admin key | note | recorded for F6 (no code) |
+
+### S1: what is bound before the draw, and what cannot be
+
+What `draw()` does on chain: `OpChainblockSeqCommit(X.hash)` returns a commitment only if X is a selected-chain ancestor from the point of view of the block that includes the draw (else `BlockNotSelected`), and that commitment is the stored header's `accepted_id_merkle_root` (rusty-kaspa v2.1.0 `crypto/txscript/src/opcodes/mod.rs:1389-1404`, `consensus/src/model/services/seq_commit_accessor.rs:31-43`). The drawer then checks the proof's X fields against it and P's fields against X's parent commitment.
+
+What the page can check off-chain, all verified in the v2.1.0 sources (the cargo checkout of `01b532e`; `refs/` is empty on this machine):
+- **The header hash** covers version, parents by level, `hash_merkle_root`, `accepted_id_merkle_root`, `utxo_commitment`, timestamp, bits, nonce, DAA score, blue score, blue work and pruning point (`consensus/core/src/hashing/header.rs:6-35`). So a header that hashes to X.hash fixes X's commitment field.
+- **`accepted_id_merkle_root` is the KIP-21 commitment** post-Toccata: consensus recomputes it and refuses a block whose header differs (`consensus/src/pipeline/virtual_processor/utxo_validation.rs:202-207`), and the opcode returns it. The mergeset context in that commitment takes the header's DAA score and the block's blue score (`utxo_validation.rs:614-618`), so both must equal the proof's.
+- **But consensus checks that field for chain blocks only.** UTXO validation, which includes the commitment check, runs while the virtual's chain is walked (`consensus/src/pipeline/virtual_processor/processor.rs:424-470`); a block off the chain is never checked. So "a real block whose header matches" is not enough: the node must also say X is on its selected chain (`getBlock` verbose data `is_chain_block`, `rpc/core/src/model/block.rs:67-77`).
+
+The fix (`lottery::anchor::BlockFields::check_header`, `lottery::web::verify::check_anchor_block`, `web::api::winning_numbers`):
+- **`winningNumbers` closed path** now takes `{closed: {marker, controller, anchorBlock: {header, isChainBlock}}}`: the anchor block as a public node reports it (`getBlock(X.hash)`: the header and the verbose `isChainBlock`). Rust checks that the header's stated hash is its hash, that it hashes to the proof's X.hash, that its `acceptedIdMerkleRoot` is the KIP-21 commitment of the proof's X fields, that its DAA and blue score are the proof's, and that the node reports X on its selected chain; any failure is `anchor_invalid`. With the existing checks (P's fields hash to X's parent commitment, dP < D ≤ dX), X is then exactly the node's first chain block with DAA ≥ D: the proof server has no choice left.
+- **`WinningOut.status`**: `final` on the drawn path (equal to the pool's `win`, which `draw()` wrote after the on-chain check), `provisional` on the closed path. The page shows "provisional" before the draw and never "verified".
+- **The header type** `BlockHeader` mirrors rusty-kaspa's `RpcHeader` (`rpc/core/src/model/header.rs:35-51`) with the boundary conventions (64-bit integers as decimal strings, hashes as hex, `blueWork` big-endian hex of up to 24 bytes, leading zeros optional). Parents are capped at 255 levels and 16,320 hashes (`input_range`).
+
+What is left, in plain words:
+- **Trust in the public node.** Before the draw, the numbers are as good as the node's word, the same trust the page already places in it for balances and live UTXOs (spec 6.3). The indexer can no longer pick them.
+- **The page must fetch the header itself.** A wasm call cannot tell a node's header from a made-up one: anyone can write a header with the right commitment and grind its nonce until its hash gives chosen numbers (the test does it: about 390,000 nonces). So F3 must fetch `getBlock(X.hash)` from a public node, never take the header from the indexer. Even a made-up header gives only a `provisional` result; on the drawn path the same proof is `chain_mismatch`. No ground proof gives an Ok `final` result.
+- **Not added:** a proof-of-work check on the header (`bits`, nonce). It would make each grind try cost real mining work, but the header's own `bits` can be set to the easiest target, and a floor needs the network's current difficulty, which is again the node's word. Not worth it while the header comes from the node.
+- **Reorgs.** Until `draw()`, the node's chain can still change at the anchor (DECISIONS S4-4: drawers wait 50 blue score). "Provisional" covers it.
+- **The drawn path's `anchorHash`.** After the draw the numbers are bound (to the pool), but `anchorHash` is the proof's: a proof whose X.hash was ground to give the same numbers would show a wrong hash next to the right numbers. F5 should show the anchor hash on a drawn round only after the same anchor-block check (cheap: an optional `anchorBlock` on the drawn path), or not show it as verified.
+
+### What changed
+
+1. **S1** (above).
+   - `crates/lottery/src/anchor.rs`: `BlockFields::check_header` (the four header checks, with sources); `header_committing_to` (fixtures and tests only: a header committing to given fields); unit test `header_binds_x_hash_to_its_fields`.
+   - `crates/lottery/src/web/verify.rs`: `check_anchor_block` (`anchor_invalid`).
+   - `crates/web/src/dto.rs`: `BlockHeader`, `AnchorBlock`, `RoundObjs::Closed.anchorBlock`, `NumbersStatus`, `WinningOut.status`; doc comments.
+   - `crates/web/src/convert.rs`: `header` (DTO to consensus `Header`, no panic on any input) and `header_dto`.
+   - `crates/web/src/api.rs`: `winning_numbers` (the closed path checks the anchor block; the status).
+   - `crates/tn10/src/anchor.rs`: `anchor_from_rpc` self-check (5): the node's real header passes `check_header` (real-data evidence below).
+2. **N2.** `api::built_tx` refuses sign items of more than one key with the new code 34 `mixed_signers` ("All the coins to sign must come from one wallet address."). Every builder and `unsigned_of` (so `assemble` and `quickWalletSign`) run it. No fixture build changes: every one of the 18 has one key (a withdrawal's owner coin is its funder's).
+3. **N1.** Doc comments (`api.rs`, `bindings.rs`, `dto.rs`, `lib.rs`, `verify.rs`) now say what is checked: the state against its UTXO entry (script) and the instance (covenant ID); that the entry is unspent is the page's to ensure.
+4. **N4.** W1's signing half signs and assembles 14 of the 18 fixture shapes in wasm (added: both returns, `close k=4`, `request_deposit`, the whole Schnorr withdrawal, both settlements). The other 4 are the ECDSA and P2SH owners' withdrawals, which the quick wallet cannot sign (`signed_missing`, asserted natively).
+5. **The probe file** is folded into `crates/web/tests/api.rs` and removed: P1 into `closed_numbers_are_provisional_and_bound_to_the_nodes_block`, P1b into `calls_check_entries_not_liveness`, P2 into `one_key_signs_a_page_build`, P3 into `deposit_owner_encodings_are_refused`, P5 into the ignored `old_to_wallet_rule_reproduces_the_pre_review_golden_file` (needs `REVIEW_OLD_W1`).
+
+### Tests (written first; P1 and P2 reproduced the fault on the unchanged tree before any change)
+
+- `closed_numbers_are_provisional_and_bound_to_the_nodes_block` (web, S1): honest closed path `provisional`, drawn path `final`, same numbers, D and anchor hash; the reviewer's grind (X.hash only; 370,470 tries in the new fixture) refused on the closed path (`anchor_invalid`, "hashes to") and on the drawn path (`chain_mismatch`); negative control: off-chain the ground proof still anchors D and maps to the target; the residual: a made-up header (389,292 nonces) passes as `provisional` only and the drawn path refuses it; each anchor-block check alone (not a chain block, a wrong stated hash, another block's header, a changed commitment, DAA or blue score with the hash re-pointed); malformed headers (`input_format`, `input_range`); the header DTO round trip, `blueWork` without leading zeros.
+- `roots_and_numbers_come_from_chain_objects` (updated): another X.hash is now refused on the closed path too; status checked on both paths; the closed numbers equal the pools'; the JSON without `anchorBlock` is refused.
+- `one_key_signs_a_page_build` (web, N2): a second key's coin is `mixed_signers` (with the second key's or the wallet's change address); control: two coins of the wallet's key build and the change is `toWallet`; `built_tx` refuses an `Unsigned` whose second sign item is another key's; every fixture build has one key.
+- `calls_check_entries_not_liveness` (N1), `deposit_owner_encodings_are_refused` (P3).
+- `lottery`: `anchor::tests::header_binds_x_hash_to_its_fields`; `f1_web::error_codes_are_stable` (34 codes).
+- **The fixture:** `web/tests/common::drawn()` now uses an X whose hash is a header's (the sim's X fields do not depend on X.hash), so the closed and drawn paths give the same numbers; `Drawn.anchor_block` is that header.
+
+### Negative controls (each fix disabled by a temporary edit, then restored from a copy; `cmp` equal)
+
+| Disabled | Test | Result |
+|---|---|---|
+| the anchor-block check on the closed path | `closed_numbers_…` | FAILED at the reviewer's ground proof (accepted) |
+| the chain-block check | `closed_numbers_…` | FAILED at "not a chain block" (accepted) |
+| the header-hash comparison in `check_header` | `header_binds_x_hash_to_its_fields`; `closed_numbers_…` | both FAILED (the ground proof accepted) |
+| the status (always `final`) | `closed_numbers_…` | FAILED at the honest closed path |
+| the one-key check | `one_key_signs_a_page_build` | FAILED (the two-key buy built) |
+
+### Golden files
+
+- `crates/lottery/tests/fixtures/f1_digests.txt` and `crates/web/tests/fixtures/w1_api.txt`: unchanged (`git diff` empty; `write_golden` rewrote `w1_api.txt` byte-identical). Native transactions byte-identical.
+- `crates/web/tests/fixtures/w1_verify.txt`: 290 → 291 lines; only the drawn fixture's lines moved (results of verify calls, no transaction):
+  - `checkRoots marker`, `checkRoots pool`: the fixture's winning purchases follow the new X (same length, other roots);
+  - `winningNumbers closed` (191 → 214 bytes), `winningNumbers drawn pool 0/1` (191 → 208 bytes): the new `status` field and the new X's numbers;
+  - new `winningNumbers closed, another X` (refused, `anchor_invalid`);
+  - the 286 other lines are unchanged.
+
+### Real-data evidence (testnet-10)
+
+- `cargo run -j 2 -q --release -p tn10 -- anchor-check 20` (public resolver; reads `TN10_PRIVATE_KEY` only to build its context, submits nothing, prints no key): the anchor for D = 605,950,348, X `fa128009…bfa4` (DAA 605,950,348) and P `bec3b340…e5c9` (DAA 605,950,346), then 20 consecutive chain blocks after `e5bfe181…2c89`: `anchor-check OK … every self-check passed` and `20 consecutive chain blocks … rebuilt; every recomputation = header`. Self-check (5) is new: for all 22 real blocks the node's header (RPC `RpcHeader` to consensus `Header`) hashes to the block's hash, its `accepted_id_merkle_root` is the commitment of the rebuilt fields, and its DAA and blue score are theirs. So the header bind holds on real testnet-10 data; the boundary type `BlockHeader` is pinned by the round trip in the web test (the JS shape of kaspa-wasm's header is F3's to confirm).
+
+### Commands run (outputs)
+
+- Baseline, the reviewer's probes on the unchanged tree: `cargo test -j 2 -p web --release --test review_f1fix_probes -- --nocapture --test-threads=1`: 5 passed (probes print, they do not fail); P1 `after 1751388 tries the forged proof gives [4, 5, 7, 27, 29]+1 … Ok; real numbers [3, 5, 7, 27, 29, 7]`; P1b `a pool at an outpoint that does not exist: ok = true`; P2 `sign items [1, 2] … toWallet outputs [("9944832000", …)]`, `assemble … SignedMissing`; P3 `AddressNetwork` twice.
+- `cargo test -j 2 -p lottery --lib anchor`: 3 passed. `cargo test -j 2 -p lottery --test f1_web error_codes`: 1 passed.
+- `cargo test -j 2 -p web --release --test api -- --nocapture --test-threads=1`: 17 passed, 0 failed, 2 ignored (`write_golden`, the P5 test); "S1: X.hash ground in 370470 tries to [2, 4, 7, 10, 16, 1]: closed path anchor_invalid …, drawn path chain_mismatch"; "S1 residual: a made-up header (389292 nonces) gives the target as provisional only"; "291 verify lines equal the golden file"; "152 tampered BuiltTx refused"; "340 mutated calls parsed, 22 built, none panicked".
+- `cargo test -j 2 -p web --release --test api -- --ignored write_golden`: "wrote 18 + 291 lines"; `git diff --stat` on the fixtures: `w1_verify.txt` only.
+- `REVIEW_OLD_W1=… cargo test -j 2 -p web --release --test api -- --ignored old_to_wallet_rule`: 1 passed (18 of 18 lines).
+- W1: `cargo test -j 2 -p web --target wasm32-unknown-unknown --release --test w1_wasm -- --nocapture`:
+  ```
+  W1 API: 18 builds through the JS boundary equal the native golden file
+  W1 library: 97 digest lines equal the native golden file
+  W1 verify: 291 decode and verify calls through the JS boundary equal the native golden file
+  W1 sign: 14 transactions signed by the quick wallet and assembled in wasm; a flipped signature and a changed figure refused for each
+  test result: ok. 1 passed; 0 failed
+  ```
+- W4: `cargo test -j 2 -p web --release --test w4_mainnet -- --nocapture`: 1 passed (79 s); release 6,372,732 B, dev 6,458,629 B, mainnet 1,373,625 B; quick-wallet symbols release 4/4/5/8/1, mainnet 0; fixtures release 0, dev 2/5/1; `start(simnet)`, `start(mainnet)` and `kaspasim:` refused on the release build; the mainnet build refuses to load (`mainnet_refused`).
+- `cargo check -j 2` with `-p lottery --no-default-features`, `… --features mainnet`, `… --features fixtures`, `… --target wasm32-unknown-unknown`; `-p web`, `--features simnet`, `mainnet`, `simnet,mainnet`, `fixtures`, `--tests --features simnet`; `-p tn10`; `-p simnet`: all clean, no warnings.
+
+### Files changed
+
+- `crates/lottery/src/anchor.rs`, `src/web/verify.rs`, `src/web/mod.rs` (code 34), `tests/f1_web.rs` (the code table).
+- `crates/web/src/api.rs`, `convert.rs`, `dto.rs`, `bindings.rs` and `lib.rs` (docs); `tests/api.rs`, `tests/common/mod.rs`, `tests/w1_wasm.rs`, `tests/fixtures/w1_verify.txt`; `tests/review_f1fix_probes.rs` folded in and removed.
+- `crates/tn10/src/anchor.rs` (self-check 5).
+- `CLAUDE.md` (the web test description), this file.
+- Not touched: `covenants/`, `crates/lottery/templates/`, `f1_digests.txt`, `w1_api.txt`, `Cargo.toml`/`Cargo.lock`, and the unrelated uncommitted files.
+
+### Proposed DECISIONS rows (for the orchestrator)
+
+- (h) **Winning numbers say whether they are final.** `winningNumbers` returns `status`: `final` on the drawn path (the pool's `win`, written by `draw()` after its on-chain anchor check), `provisional` on the closed path. The page never shows provisional numbers as verified.
+- (i) **Before the draw, X is bound to the node's anchor block.** The closed path takes `anchorBlock: {header, isChainBlock}` from a public node's `getBlock(X.hash)`: the header must hash to X.hash, commit to X's fields (`acceptedIdMerkleRoot` = SeqCommit) with the same DAA and blue score, and the node must report X on its selected chain (`anchor_invalid` otherwise). The page fetches it from a node by X.hash, never from the indexer. No proof-of-work check (the header comes from the node).
+- (j) **One payer per page build:** code 34 `mixed_signers`; every input to sign is of one key.
+- (k) **Liveness is the page's:** no call checks that a UTXO entry is unspent; the page reads every entry it passes to the wasm from a public node by outpoint, never from the indexer.
+- (l) **W1 signs 14 of 18 shapes in wasm** (all the quick wallet can sign); `w1_verify.txt` is 291 lines and its drawn fixture's X hash is a header's.
+- (m) **tn10 `anchor_from_rpc` self-check (5):** the node's header passes `BlockFields::check_header` before anything is built from a proof.
+
+### Requirements recorded for later stages (no code here)
+
+- **F3 (web shell):**
+  - Every UTXO entry passed to the wasm (`CovUtxo.utxo`, wallet coins) comes from a public node by outpoint (`getUtxosByAddresses` or the covenant's entry by outpoint), never from the indexer. The calls check state, script and covenant ID, not liveness; a builder given a spent entry builds a transaction the node rejects (no money moves), but a verify call given one shows stale state as current.
+  - `winningNumbers` before the draw: take X.hash from the proof, call `getBlock(X.hash, false)` on a public node, and pass its header and `verboseData.isChainBlock` as `anchorBlock`. Never take the header from the indexer. Convert the RPC header's 64-bit integers to decimal strings and `blueWork` to hex; check the JS shape of kaspa-wasm's `getBlock` header on the first browser run (not verified in this stage).
+  - Show `provisional` results as provisional (never "verified"); only `final` may be shown as verified.
+- **F5 (rounds, verify):** the drawn path's `anchorHash` is the proof's only (see S1 "what is left"); bind it with an optional `anchorBlock` on the drawn path, or do not label it verified. Once a round's pools are gone the drawn path is unavailable (F1 review "Left and open").
+- **F6 (beta, deploy):**
+  - W4 must check the artifact that is actually deployed (the file Vercel serves, after wasm-bindgen and any optimiser), not only `target/wasm32-unknown-unknown/release/web.wasm` (re-review N4).
+  - W1's signing half covers the 14 shapes the quick wallet can sign; the 4 ECDSA and P2SH owner withdrawals are signed in wasm by no test (the page never creates such positions, F1 review item 3).
+  - **The beta instance must not be launched through `tn10/src/cases.rs` or `tn10/src/wallet_probe.rs`** (re-review N5). Their instances keep the default admin hash `admin_hash(ADMIN_SK)` (`lottery/src/params.rs:128`, `close.rs:188`; `ADMIN_SK` = 32 × 0x0a, in the repo), so anyone can call `set_params()` on them (fees, the fee address). Only the campaign path sets the operator's own admin key (`tn10/src/campaign.rs:1746`). Launch the beta through the campaign path or another path that sets a fresh admin key, and check the bundle's admin hash before announcing it.
+
+### Owner decision (needs the owner; nothing was decided)
+
+**Show the winning numbers before the draw?**
+- What happens now: between `close()` and `draw()` the numbers already exist (they come from a block of the chain), and the page can show them early. After this fix they come from the public node's view of the chain, checked by the page, and are marked "provisional". Once `draw()` is on chain they are marked final.
+- Trust: before the draw you trust the public node (the same node the page trusts for balances); the indexer can no longer pick them. If the chain reorganises around the anchor block before the draw, the provisional numbers can change.
+- Money: none; showing numbers early moves no money and the draw still checks everything on chain.
+- Work: none to keep it; small to hide it (F5 shows nothing until the draw).
+- Recommendation: keep it, labelled "provisional".
+
+### Suite at the end of the F1 re-review
+
+- `cargo test -j 2 --no-fail-fast` (from `crates/`, debug; default members `harness` and `lottery`): 55 test binaries, 1,109 passed, 0 failed, 2 ignored (one more than before: `anchor::tests::header_binds_x_hash_to_its_fields`). As before (D113), `spike_vdf` overflows its stack in debug and is the one failed target. Includes `f1_bytes` (97 lines unchanged), `f1_web` 7/7 (34 codes) and `m7_seed` 15/15 (the SP12 seed gate holds).
+- `cargo test -j 2 -p lottery --release --test spike_vdf`: 14 passed, 0 failed (359 s).
+- `cargo test -j 1 --release -p tn10`: 25 passed, 0 failed.
+- `crates/web`: `api` 17 passed, 2 ignored; W1 1/1 in wasm (18 + 97 + 291 lines, 14 signed and assembled); W4 1/1.
+- Native transactions byte-identical: `f1_digests.txt` and `w1_api.txt` unchanged. No covenant or template change. `Cargo.toml` and `Cargo.lock` unchanged.
+- Not committed (as asked).

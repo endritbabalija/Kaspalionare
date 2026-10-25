@@ -90,6 +90,40 @@ impl BlockFields {
         seq_commit(self)
     }
 
+    /// F1 re-review S1: `h` is the header of this block, i.e. the header binds the proof's
+    /// hash to its commitment fields the way `draw()`'s `OpChainblockSeqCommit(hash)` does on
+    /// chain (the opcode returns the stored header's `accepted_id_merkle_root`, rusty-kaspa
+    /// v2.1.0 `consensus/src/model/services/seq_commit_accessor.rs:36-43`):
+    /// - the header hashes to `hash` (`consensus/core/src/hashing/header.rs:6-35`: version,
+    ///   parents, hash_merkle_root, accepted_id_merkle_root, utxo_commitment, timestamp, bits,
+    ///   nonce, daa_score, blue_score, blue_work, pruning_point), and its stated hash is that one;
+    /// - its `accepted_id_merkle_root` is the KIP-21 commitment of these fields (the field
+    ///   carries SeqCommit: `consensus/src/pipeline/virtual_processor/utxo_validation.rs:202-207`);
+    /// - its DAA score and blue score are these fields' (the commitment's mergeset context
+    ///   takes `header.daa_score` and the block's blue score, `utxo_validation.rs:614-618`).
+    ///
+    /// What this cannot show: that the header is a real block on the selected chain. A
+    /// header with another nonce hashes to another value, so anyone can make a header for a
+    /// chosen hash's fields; only a node that holds the block (and has validated its
+    /// commitment, which consensus does for chain blocks only, `processor.rs:424-456`) can
+    /// vouch for it.
+    pub fn check_header(&self, h: &kaspa_consensus_core::header::Header) -> Result<(), String> {
+        let hash = kaspa_consensus_core::hashing::header::hash(h);
+        if hash.as_bytes() != self.hash {
+            return Err(format!("the header hashes to {hash}, not to the proof's X.hash {}", harness::Hash::from_bytes(self.hash)));
+        }
+        if h.hash != hash {
+            return Err(format!("the header states hash {} but hashes to {hash}", h.hash));
+        }
+        if h.accepted_id_merkle_root.as_bytes() != self.seq_commit() {
+            return Err(format!("the header's commitment {} is not the KIP-21 commitment of the proof's X fields", h.accepted_id_merkle_root));
+        }
+        if (h.daa_score, h.blue_score) != (self.daa_score, self.blue_score) {
+            return Err(format!("the header's DAA and blue scores ({}, {}) are not the proof's ({}, {})", h.daa_score, h.blue_score, self.daa_score, self.blue_score));
+        }
+        Ok(())
+    }
+
     /// The commitment preimage fields (everything but the hash): P's part of the proof.
     pub fn preimage(&self) -> PreimageFields {
         PreimageFields {
@@ -222,11 +256,70 @@ impl AnchorProof {
     }
 }
 
+/// Fixtures (F1 re-review S1): a header that commits to `x`'s fields (its
+/// `accepted_id_merkle_root` is `x`'s commitment; DAA and blue score are `x`'s), with
+/// `nonce` and fixed other fields. Its hash is not `x.hash`: a caller sets `x.hash =
+/// header.hash` (the commitment does not depend on the hash) to get a proof the header binds.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn header_committing_to(x: &BlockFields, nonce: u64) -> kaspa_consensus_core::header::Header {
+    use harness::Hash;
+    let parents: kaspa_consensus_core::header::CompressedParents =
+        vec![vec![Hash::from_bytes([0x51; 32]), Hash::from_bytes([0x52; 32])], vec![Hash::from_bytes([0x53; 32])]].try_into().expect("two levels");
+    kaspa_consensus_core::header::Header::new_finalized(
+        1,
+        parents,
+        Hash::from_bytes([0x61; 32]),
+        Hash::from_bytes(x.seq_commit()),
+        Hash::from_bytes([0x62; 32]),
+        x.sp_timestamp + 100,
+        0x1e7f_ffff,
+        nonce,
+        x.daa_score,
+        kaspa_consensus_core::BlueWorkType::from_u64(0x1234_5678_9abc),
+        x.blue_score,
+        Hash::from_bytes([0x63; 32]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use harness::Hash;
     use harness::chain::{block_fields_bytes, seq_commit_with_parent};
+
+    /// F1 re-review S1: a header binds a proof's X.hash to its fields: the header that hashes
+    /// to X.hash and commits to X's fields passes; another nonce (another hash), another
+    /// commitment, DAA or blue score, or a wrong stated hash fails.
+    #[test]
+    fn header_binds_x_hash_to_its_fields() {
+        let sim = ChainSim::anchored(1_000_600, Hash::from_bytes([0x42; 32]));
+        let mut a = AnchorProof::from_sim(&sim, 1_000_600);
+        let h = header_committing_to(&a.x, 7);
+        assert!(a.x.check_header(&h).unwrap_err().contains("hashes to"), "the sim's X.hash is not this header's");
+        a.x.hash = h.hash.as_bytes();
+        a.x.check_header(&h).unwrap();
+        assert!(a.consistent_with(1_000_600), "the commitment does not depend on the hash");
+        let other = header_committing_to(&a.x, 8);
+        assert!(a.x.check_header(&other).unwrap_err().contains("hashes to"));
+        let mut stated = h.clone();
+        stated.hash = Hash::from_bytes([1; 32]);
+        assert!(a.x.check_header(&stated).unwrap_err().contains("states hash"));
+        // A changed commitment, DAA or blue score: re-finalized so the hash matches, and the
+        // proof's X.hash moved to it, so only the named field is wrong.
+        for (what, f) in [
+            ("commitment", (|h: &mut kaspa_consensus_core::header::Header| h.accepted_id_merkle_root = Hash::from_bytes([9; 32])) as fn(&mut _)),
+            ("DAA", |h| h.daa_score += 1),
+            ("blue", |h| h.blue_score += 1),
+        ] {
+            let mut m = h.clone();
+            f(&mut m);
+            m.finalize();
+            let mut b = a;
+            b.x.hash = m.hash.as_bytes();
+            let e = b.x.check_header(&m).unwrap_err();
+            assert!(e.contains(if what == "commitment" { "commitment" } else { "scores" }), "{what}: {e}");
+        }
+    }
 
     fn sim_block(n: u8, daa: u64, bs: u64) -> SimBlock {
         SimBlock {
