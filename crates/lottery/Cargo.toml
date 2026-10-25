@@ -12,12 +12,21 @@ license.workspace = true
 # has one entry, `draw()`, with the anchor proof). `mainnet` keeps the genesis network
 # refusal (the drawer is deployed on testnet, devnet or the private simnet only until the
 # release gate; mainnet is refused).
+# Front-end F1 (spec frontend 6.1): `compiler` (default on) keeps the SilverScript compiler and
+# the `.sil` source paths (template variants for the attack and mutant tests, the TEST-ONLY
+# short-void drawer, `regen-templates`). Without it (the web build) the library uses the
+# templates embedded from `templates/` and reads no file.
 [features]
-default = []
+default = ["compiler"]
+compiler = ["harness/compiler"]
 mainnet = []
 
+[[bin]]
+name = "regen-templates"
+required-features = ["compiler"]
+
 [dependencies]
-harness = { path = "../harness" }
+harness = { path = "../harness", default-features = false }
 kaspa-consensus-core.workspace = true
 kaspa-txscript.workspace = true
 silverscript-abi.workspace = true
@@ -32,6 +41,12 @@ serde_json = "=1.0.151"
 # M8 S2c (review MF-C): the index log stores each transaction as the hex of its Borsh
 # serialization (the version already in Cargo.lock, the one rusty-kaspa's derives use).
 borsh = "=1.8.1"
+
+# Front-end F1: the wasm build. getrandom 0.3 (ahash, from kaspa-txscript's arkworks crates) has
+# no wasm32-unknown-unknown backend unless `wasm_js` is on and `crates/.cargo/config.toml` sets
+# its cfg; the version is the one already in Cargo.lock.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "=0.3.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 # Spike VDF+ZK (docs/specs/spike-vdf.md): a local Groth16 prover over BN254 at the arkworks

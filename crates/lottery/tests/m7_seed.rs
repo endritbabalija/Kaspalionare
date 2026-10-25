@@ -643,8 +643,9 @@ const SHORT_VOID_SYMBOLS: [&str; 7] = [
 /// SP12 (M7 Stage 6, re-review note 2): the TEST-ONLY short-void drawer variant is compiled
 /// out of a `mainnet` build, as the old `test-seed` path was (DP22). A probe crate (written
 /// under `crates/target/sp12-probe`, its own workspace, sharing `crates/target/sp12`) names
-/// every variant symbol: with `lottery`'s default features it builds (positive control), with
-/// `--no-default-features --features mainnet` each symbol fails to resolve.
+/// every variant symbol: with `lottery`'s `compiler` feature it builds (positive control), with
+/// `--features mainnet` added each symbol fails to resolve. (Front-end F1: the variant needs the
+/// compiler, so a build without `compiler`, such as the web build, has none of them either.)
 #[test]
 fn sp12_short_void_variant_absent_from_mainnet() {
     let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
@@ -654,7 +655,7 @@ fn sp12_short_void_variant_absent_from_mainnet() {
     let manifest = format!(
         "[package]\nname = \"sp12-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[workspace]\n\n\
          [features]\nmainnet = [\"lottery/mainnet\"]\n\n\
-         [dependencies]\nlottery = {{ path = \"{lottery}\", default-features = false }}\n"
+         [dependencies]\nlottery = {{ path = \"{lottery}\", default-features = false, features = [\"compiler\"] }}\n"
     );
     std::fs::write(probe.join("Cargo.toml"), manifest).unwrap();
     // The same pinned versions as the workspace (rusty-kaspa v2.1.0 by git rev).

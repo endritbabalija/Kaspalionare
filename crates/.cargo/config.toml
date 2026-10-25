@@ -1,0 +1,6 @@
+# Front-end F1 (spec frontend 6.1): the wasm build (`--target wasm32-unknown-unknown`).
+# getrandom 0.3 (through ahash, from the arkworks crates kaspa-txscript links) needs this cfg to
+# pick its browser backend, besides its `wasm_js` feature (lottery/Cargo.toml). Native builds
+# are unaffected. https://docs.rs/getrandom/0.3.4/#webassembly-support
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

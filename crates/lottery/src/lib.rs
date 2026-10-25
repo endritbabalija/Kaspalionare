@@ -5,6 +5,10 @@
 //! Spec M7 D101: the TEST-ONLY seed path, the `test-seed` feature and its `compile_error!`
 //! gate are deleted; `draw` compiles unconditionally. The `mainnet` feature stays for the
 //! genesis network refusal.
+//!
+//! Front-end F1: the templates are embedded (`embedded`); the compiler and the `.sil` source
+//! paths are behind the default `compiler` feature. The TEST-ONLY short-void drawer variant
+//! exists only with `compiler` and without `mainnet` (SP12).
 
 pub mod anchor;
 pub mod buy;
@@ -13,7 +17,9 @@ pub mod claim;
 pub mod close;
 pub mod combo;
 pub(crate) mod decode;
+pub mod digest;
 pub mod draw;
+pub mod embedded;
 pub mod game;
 pub mod genesis;
 pub mod index;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["harness", "lottery", "tn10", "simnet"]
+members = ["harness", "lottery", "tn10", "simnet", "web", "vendor/silverscript-abi"]
 default-members = ["harness", "lottery"]
 resolver = "2"
 
@@ -26,3 +26,11 @@ blake2b_simd = "1.0.2"
 blake3 = "1.8.5"
 # Test and probe keys (same version kaspa-consensus-core uses).
 secp256k1 = { version = "0.29.0", features = ["global-context", "rand-std"] }
+
+# Front-end F1 (spec frontend 6.1): one rusty-kaspa version. `silverscript-abi` (the ABI codec the
+# builders use at run time) is a vendored copy of SilverScript v1.0.0's, built against v2.1.0 instead
+# of SilverScript's rev a41a333 (two API changes; see vendor/silverscript-abi/Cargo.toml). It replaces
+# the git crate everywhere, inside silverscript-lang included; the compiler itself still links a41a333
+# and is native-only (`harness/compiler`). Byte identity: lottery/tests/f1_bytes.rs.
+[patch."https://github.com/kaspanet/silverscript"]
+silverscript-abi = { path = "vendor/silverscript-abi" }

@@ -1984,9 +1984,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4092,6 +4094,7 @@ dependencies = [
  "blake2b_simd",
  "blake3",
  "borsh",
+ "getrandom 0.3.4",
  "harness",
  "kaspa-consensus-core 2.1.0",
  "kaspa-txscript 2.1.0",
@@ -5862,14 +5865,15 @@ dependencies = [
 [[package]]
 name = "silverscript-abi"
 version = "0.1.0"
-source = "git+https://github.com/kaspanet/silverscript?rev=3ed973335b59269293564805cc2c58a14595ec03#3ed973335b59269293564805cc2c58a14595ec03"
 dependencies = [
  "blake3",
  "faster-hex 0.10.1",
- "kaspa-txscript 2.0.1",
+ "kaspa-consensus-core 2.1.0",
+ "kaspa-txscript 2.1.0",
  "serde",
  "serde_bytes",
  "serde_json",
+ "silverscript-lang",
  "thiserror 1.0.69",
 ]
 
@@ -6990,6 +6994,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web"
+version = "0.1.0"
+dependencies = [
+ "lottery",
 ]
 
 [[package]]

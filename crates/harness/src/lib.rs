@@ -3,6 +3,10 @@
 //!
 //! Only bytecode crosses from the SilverScript compiler (which links its own
 //! rusty-kaspa revision) into the pinned engine.
+//!
+//! Front-end F1: the compiler (`compile_file`, `compile_source`) is behind the `compiler`
+//! feature (default on). Without it the crate has the engine, the mass calculator,
+//! `ChainSim` and the ABI types only, for the wasm build.
 
 use std::path::PathBuf;
 
@@ -26,6 +30,7 @@ pub use kaspa_txscript::{
 };
 pub use kaspa_txscript_errors::TxScriptError;
 pub use silverscript_abi::{ArtifactValue, SilAbiArtifact};
+#[cfg(feature = "compiler")]
 use silverscript_lang::compiler::compile_to_sil_abi_artifact;
 
 /// Path of a covenant source under the repo's `covenants/` directory.
@@ -34,12 +39,14 @@ pub fn covenant_path(rel: &str) -> PathBuf {
 }
 
 /// Compile a covenant source file (relative to `covenants/`) with constructor args.
+#[cfg(feature = "compiler")]
 pub fn compile_file(rel: &str, ctor: &[ArtifactValue]) -> SilAbiArtifact {
     let path = covenant_path(rel);
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     compile_source(&src, ctor)
 }
 
+#[cfg(feature = "compiler")]
 pub fn compile_source(src: &str, ctor: &[ArtifactValue]) -> SilAbiArtifact {
     compile_to_sil_abi_artifact(src, ctor).unwrap_or_else(|e| panic!("compile failed: {e}"))
 }

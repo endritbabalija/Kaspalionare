@@ -10,9 +10,11 @@ use std::collections::HashMap;
 
 use harness::{
     ArtifactValue, CovenantBinding, Hash, PopulatedTransaction, ScriptBuilder, ScriptPublicKey, SilAbiArtifact, Transaction,
-    ChainSim, TransactionInput, TransactionOutpoint, TransactionOutput, TxScriptError, UtxoEntry, budget_for, compile_source, covenant_path, execute,
+    ChainSim, TransactionInput, TransactionOutpoint, TransactionOutput, TxScriptError, UtxoEntry, budget_for, execute,
     execute_on_chain, outpoint, pay_to_script_hash_script,
 };
+#[cfg(feature = "compiler")]
+use harness::{compile_source, covenant_path};
 use kaspa_consensus_core::{hashing::sighash_type::SIG_HASH_ALL, sign::sign_input, tx::GenesisCovenantGroup};
 use secp256k1::{Keypair, SECP256K1};
 use silverscript_abi::{encode_contract_entry_sig_script, encode_runtime_state_script};
@@ -77,18 +79,27 @@ impl Template {
     }
 }
 
-/// The committed B_MAX: the `int constant B_MAX = n;` line of shard.sil.
+/// The committed B_MAX: the `int constant B_MAX = n;` line of shard.sil, as recorded with the
+/// embedded templates (front-end F1; `tests/f1_templates.rs` checks it against shard.sil).
 pub fn b_max() -> usize {
-    static B: OnceLock<usize> = OnceLock::new();
-    *B.get_or_init(|| file_b_max(&std::fs::read_to_string(covenant_path("shard.sil")).expect("read shard.sil")))
+    crate::embedded::B_MAX
 }
 
+/// The B_MAX of shard.sil on disk (the source of `b_max()`; the generator and the W2 test).
+#[cfg(feature = "compiler")]
+pub fn source_b_max() -> usize {
+    static B: OnceLock<usize> = OnceLock::new();
+    *B.get_or_init(|| file_b_max(&read_covenant("shard.sil")))
+}
+
+#[cfg(feature = "compiler")]
 fn file_b_max(shard_src: &str) -> usize {
     let line = shard_src.lines().find(|l| l.trim_start().starts_with("int constant B_MAX = ")).expect("B_MAX line");
     line.trim().trim_start_matches("int constant B_MAX = ").trim_end_matches(';').parse().expect("B_MAX value")
 }
 
 /// Ticket source with `b_max` bundle slots (spec M1 4.2).
+#[cfg(feature = "compiler")]
 pub fn ticket_source(b_max: usize) -> String {
     let src = std::fs::read_to_string(covenant_path("ticket.sil")).expect("read ticket.sil");
     resize_ticket_arrays(&src, b_max)
@@ -98,20 +109,23 @@ pub fn ticket_source(b_max: usize) -> String {
 /// `byte[ceil(n/8)] ` (with a trailing space) in ticket.sil and in the TicketState structs of
 /// shard.sil and pool.sil, and
 /// nowhere else.
+#[cfg(feature = "compiler")]
 fn resize_ticket_arrays(src: &str, to: usize) -> String {
-    let from = b_max();
+    let from = source_b_max();
     src.replace(&format!("byte[{}]", 6 * from), &format!("byte[{}]", 6 * to))
         .replace(&format!("byte[{}] ", from.div_ceil(8)), &format!("byte[{}] ", to.div_ceil(8)))
 }
 
 /// Shard source with `b_max` bundle slots.
+#[cfg(feature = "compiler")]
 pub fn shard_source(b_max_to: usize) -> String {
     let src = std::fs::read_to_string(covenant_path("shard.sil")).expect("read shard.sil");
-    let from = format!("int constant B_MAX = {};", b_max());
+    let from = format!("int constant B_MAX = {};", source_b_max());
     resize_ticket_arrays(&src.replace(&from, &format!("int constant B_MAX = {b_max_to};")), b_max_to)
 }
 
 /// Covenant sources for one compile (attack and mutant tests swap one of them).
+#[cfg(feature = "compiler")]
 #[derive(Clone)]
 pub struct Sources {
     pub ticket: String,
@@ -139,12 +153,12 @@ pub fn void_min_line() -> String {
 /// short-void drawer variant, so a void can be shown on testnet without waiting 24 h. Only
 /// `GenesisCase::templates()` with `allow_short_void_window` (refused off testnet/devnet by
 /// `validate`) selects it; never deploy it. Compiled out of a `mainnet` build (SP12).
-#[cfg(not(feature = "mainnet"))]
+#[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
 pub const SHORT_VOID_LINE: &str = "int constant VOID_MIN = 0; // TEST-ONLY short void window (probe void-m7, D103): never deploy";
 
 /// TEST-ONLY: the drawer source with the void floor removed (`void_min_line()` replaced by
 /// `SHORT_VOID_LINE`). Panics unless the line occurs exactly once, as a whole line.
-#[cfg(not(feature = "mainnet"))]
+#[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
 pub fn short_void_drawer_source(src: &str) -> String {
     let line = void_min_line();
     assert_eq!(src.matches(line.as_str()).count(), 1, "drawer source: `{line}` must occur exactly once");
@@ -152,10 +166,12 @@ pub fn short_void_drawer_source(src: &str) -> String {
     src.replacen(line.as_str(), SHORT_VOID_LINE, 1)
 }
 
+#[cfg(feature = "compiler")]
 pub(crate) fn read_covenant(name: &str) -> String {
     std::fs::read_to_string(covenant_path(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
 }
 
+#[cfg(feature = "compiler")]
 impl Sources {
     /// The committed sources, with the ticket, shard and pool resized to `b_max`.
     pub fn committed(b_max: usize) -> Self {
@@ -177,7 +193,7 @@ impl Sources {
 
     /// TEST-ONLY (spec M7 D103): the committed sources with the short-void drawer variant
     /// (`short_void_drawer_source`). Reached through `Templates::test_only_short_void`.
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     pub fn test_only_short_void(b_max: usize) -> Self {
         let c = Self::committed(b_max);
         Self { drawer: short_void_drawer_source(&c.drawer), ..c }
@@ -211,23 +227,26 @@ pub struct Templates {
     /// `SHORT_VOID_LINE`). `GenesisCase::validate_with` accepts such templates only with
     /// `allow_short_void_window`, and that flag only on testnet or devnet. Absent from a
     /// `mainnet` build (SP12).
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     pub short_void_window: bool,
 }
 
 impl Templates {
+    #[cfg(feature = "compiler")]
     pub fn compile(b_max: usize) -> Self {
         Self::compile_sources(b_max, &Sources::committed(b_max))
     }
 
     /// Compile with a given ticket and shard source, the rest committed (M1 attack tests
     /// use look-alike templates).
+    #[cfg(feature = "compiler")]
     pub fn compile_with(b_max: usize, ticket_src: &str, shard_src: &str) -> Self {
         let src = Sources { ticket: ticket_src.to_string(), shard: shard_src.to_string(), ..Sources::committed(b_max) };
         Self::compile_sources(b_max, &src)
     }
 
     /// Compile from given sources.
+    #[cfg(feature = "compiler")]
     pub fn compile_sources(b_max: usize, src: &Sources) -> Self {
         let dummy_shard = ShardState {
             round: 1,
@@ -270,7 +289,7 @@ impl Templates {
             position: Arc::new(position),
             request: Arc::new(request),
             drawer: Arc::new(drawer),
-            #[cfg(not(feature = "mainnet"))]
+            #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
             short_void_window: src.drawer.contains(SHORT_VOID_LINE),
         }
     }
@@ -280,22 +299,64 @@ impl Templates {
         self.drawer.hash
     }
 
-    /// Shared compiled templates per B_MAX (compiling is slow).
+    /// Shared templates per B_MAX. The committed B_MAX (`b_max()`) uses the templates embedded
+    /// at build time (front-end F1, `crate::embedded`); any other B_MAX is compiled from the
+    /// sources, which needs the `compiler` feature. Panics where `try_get` returns an error.
     pub fn get(b_max: usize) -> Arc<Templates> {
+        Self::try_get(b_max).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `get`, with an error instead of a panic for a B_MAX that has no templates in this build.
+    pub fn try_get(b_max: usize) -> Result<Arc<Templates>, String> {
         static CACHE: OnceLock<Mutex<HashMap<usize, Arc<Templates>>>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         if let Some(t) = cache.lock().unwrap().get(&b_max) {
-            return t.clone();
+            return Ok(t.clone());
         }
-        let t = Arc::new(Templates::compile(b_max));
-        cache.lock().unwrap().entry(b_max).or_insert(t).clone()
+        let t = Arc::new(if b_max == crate::embedded::B_MAX { Templates::embedded()? } else { Self::compile_other(b_max)? });
+        Ok(cache.lock().unwrap().entry(b_max).or_insert(t).clone())
+    }
+
+    #[cfg(feature = "compiler")]
+    fn compile_other(b_max: usize) -> Result<Templates, String> {
+        Ok(Templates::compile(b_max))
+    }
+
+    #[cfg(not(feature = "compiler"))]
+    fn compile_other(b_max: usize) -> Result<Templates, String> {
+        Err(format!("b_max {b_max}: only the committed B_MAX = {} is embedded; other values need the `compiler` feature", crate::embedded::B_MAX))
+    }
+
+    /// The templates embedded at build time (`crates/lottery/templates/`, committed B_MAX).
+    pub fn embedded() -> Result<Templates, String> {
+        let e = crate::embedded::artifacts()?;
+        let tpl = |name: &str| -> Result<Arc<Template>, String> {
+            let art = e.get(name).ok_or_else(|| format!("embedded template `{name}` missing"))?.clone();
+            Ok(Arc::new(Template::from(art)))
+        };
+        Ok(Self {
+            b_max: crate::embedded::B_MAX,
+            ticket: tpl("ticket")?,
+            controller: tpl("controller")?,
+            shard: tpl("shard")?,
+            params: tpl("params")?,
+            marker: tpl("marker")?,
+            vault: tpl("vault")?,
+            pool: tpl("pool")?,
+            record: tpl("record")?,
+            position: tpl("position")?,
+            request: tpl("request")?,
+            drawer: tpl("drawer")?,
+            #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
+            short_void_window: false,
+        })
     }
 
     /// TEST-ONLY (spec M7 D103, `probe void-m7`): the template set with the short-void drawer
     /// variant (every template that commits to the drawer hash differs from `get`'s). Use it
     /// only through `GenesisCase::templates()` with `allow_short_void_window`. Compiled out
     /// of a `mainnet` build (SP12).
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     pub fn test_only_short_void(b_max: usize) -> Arc<Templates> {
         static CACHE: OnceLock<Mutex<HashMap<usize, Arc<Templates>>>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -429,6 +490,7 @@ pub fn fee_for(mass: u64, rate: u64) -> Result<u64, String> {
 }
 
 /// Placeholder states for compiling (the template hash does not depend on state values).
+#[cfg(feature = "compiler")]
 fn dummy_controller() -> ControllerState {
     ControllerState {
         round: 1,
@@ -468,10 +530,12 @@ fn dummy_controller() -> ControllerState {
     }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_params() -> ParamsState {
     ParamsState { round: 1, admin_hash: [0; 32], nonce: 0, used: 0, next_s_f: 500, next_s_r: 1_000, next_fee_class: 0, next_fee_key: [0; 33] }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_marker(k_max: usize) -> MarkerState {
     MarkerState {
         round: 1,
@@ -493,6 +557,7 @@ fn dummy_marker(k_max: usize) -> MarkerState {
     }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_vault() -> VaultState {
     VaultState {
         round: 0,
@@ -507,6 +572,7 @@ fn dummy_vault() -> VaultState {
     }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_record() -> RecordState {
     RecordState {
         round: 1,
@@ -522,14 +588,17 @@ fn dummy_record() -> RecordState {
     }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_position() -> PositionState {
     PositionState { round: 0, shares: 1, owner_class: 0, owner_key: [0; 33] }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_request() -> RequestState {
     RequestState { round: 1, kind: 0, amount: 0, owner_class: 0, owner_key: [0; 33] }
 }
 
+#[cfg(feature = "compiler")]
 fn dummy_pool(k_max: usize) -> PoolState {
     PoolState {
         round: 1,

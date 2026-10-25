@@ -40,7 +40,7 @@ Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this f
 | Stage | Status | Notes |
 |---|---|---|
 | F0 wallet experiment | part A done, waiting for owner | Probe `tn10 wallet-probe` built and self-tested on testnet-10 (stand-in signer). Part B (the owner's clicks, KasWare only; Kaspire not available, untested) is scheduled for 2026-10-26: see "F0 part B: owner steps". |
-| F1 builder refactor for wasm | not started | |
+| F1 builder refactor for wasm | part A done | Templates embedded (W2), compiler behind `compiler`, one rusty-kaspa version (vendored `silverscript-abi` on v2.1.0, no encoding change, proven by golden digests), wasm cdylib links with no extra flag (5.43 MB at O3, 5.01 MB at Os). Part B: the `crates/web` API, `Result` everywhere and W3, the signing split per case, W1, W4. See "F1 part A". |
 | F2 indexer API | not started | |
 | F3 web shell and Play | not started | |
 | F4 My tickets, claims, backup | not started | |
@@ -334,3 +334,171 @@ This part needs no coding and takes about 20-30 minutes. Everything uses testnet
 - `cargo build --tests -j 2`: `Finished `dev` profile [unoptimized + debuginfo] target(s)`.
 - `cargo test -p lottery --release -j 2`: exit 0, 40 test binaries, 1,062 passed, 0 failed, 1 ignored (the pre-existing `m4_mutants` ignore). This includes `f0_unsigned`: `test result: ok. 2 passed`.
 - `cargo test -p tn10 --release -j 2`: `test result: ok. 25 passed; 0 failed`, including the 3 `pskt` tests.
+
+## F1 part A (stage agent, 2026-10-25)
+
+### What was done
+
+1. **Templates embedded at build time** (spec 6.1, W2).
+   - `crates/lottery/templates/`: the 11 compiled templates as SilverScript ABI artifacts in the `silverc` JSON format (`silverscript_abi::to_pretty_json`), plus `b_max.in` (the committed B_MAX, 4). 795,518 B of JSON; 157,113 B of it is script. The artifacts contain no machine paths (`source_path` is `sil/<Name>.sil`).
+   - `lottery::embedded` includes them with `include_str!`, parses them once and runs `SilAbiArtifact::check_consistency` on each.
+   - `Templates::get(b_max())` now uses the embedded set in every build, native too. Any other B_MAX is compiled, which needs the `compiler` feature. The new `Templates::try_get` returns an error instead of panicking. `b_max()` is the embedded constant, and `source_b_max()` (compiler only) reads shard.sil.
+   - Generator: `cargo run -p lottery --bin regen-templates` (from `crates/`; the bin needs `compiler`). It writes only the files that changed.
+   - W2: `crates/lottery/tests/f1_templates.rs`, 4 tests:
+     - every generated file equals the embedded file;
+     - the embedded B_MAX equals shard.sil's;
+     - the runtime templates equal a fresh compile (artifact, prefix, suffix and hash);
+     - another B_MAX still compiles.
+
+     Each failure message gives the regenerate command. Checked by hand: with one embedded file altered (`compiler_version` in `marker.json`), 2 W2 tests failed with "regenerate them from crates/ with: cargo run -p lottery --bin regen-templates". Running the generator restored the file byte for byte.
+2. **Compiler behind a feature.**
+   - `harness` and `lottery` have a `compiler` feature, on by default. `harness/compiler` makes `silverscript-lang` optional and gates `compile_file` and `compile_source`.
+   - In `lottery`, `compiler` gates the `.sil` source paths: `Sources`, `ticket_source`, `shard_source`, `read_covenant`, `Templates::compile*`, `compile_drawer` and the `dummy_*` placeholder states.
+   - `lottery` depends on `harness` with `default-features = false`.
+   - `cargo test` from `crates/` is unchanged.
+   - The TEST-ONLY short-void drawer variant (all seven SP12 symbols) is now gated on `all(not(feature = "mainnet"), feature = "compiler")`, where it was `not(mainnet)`. A build without the compiler, such as the web build, has none of them.
+   - SP12's probe crate (`m7_seed.rs`) now enables `lottery/compiler` in its positive control. Its mainnet check still fails on every symbol.
+3. **One rusty-kaspa version.**
+   - `crates/vendor/silverscript-abi/` is a copy of SilverScript v1.0.0's `silverscript-abi` (`3ed97333`, ISC, LICENSE copied) built against v2.1.0. `[patch."https://github.com/kaspanet/silverscript"]` in `crates/Cargo.toml` puts it in place of the git crate everywhere, including inside `silverscript-lang`.
+   - The compiler still links `a41a333`, natively only.
+   - It is a non-default workspace member, so its upstream unit tests run with `cargo test -p silverscript-abi`.
+   - The diff from upstream is 10 lines added and 4 removed, each marked `Kaspalionare F1 vendor patch`:
+     - `script_builder()`: `ScriptBuilder::with_flags(EngineFlags { covenants_enabled: true, .. })` becomes `ScriptBuilder::new()`. v2.1.0 deleted the flag. Its builder always applies the limits the flag selected (1,000,000-byte scripts and elements, explicit push opcodes allowed), and it stores its flags without reading them.
+     - `deserialize_fixed_i64`: `deserialize_i64(bytes, false)` becomes `deserialize_i64(bytes)`. v2.1.0 dropped `enforce_minimal`, and its function is the `false` branch.
+     - one unit test reads `max_signature_script_len` (renamed in v2.1.0; the value is still 250,000).
+   - Cargo.lock: `silverscript-abi` now comes from the path and depends on `kaspa-txscript 2.1.0` and `kaspa-consensus-core 2.1.0`. Apart from that, only `web` is added.
+   - `cargo tree -p web --target wasm32-unknown-unknown -e normal`: 0 crates at `a41a333`, 0 `silverscript-lang`, one `kaspa-consensus-core` (v2.1.0).
+4. **wasm toolchain.**
+   - `wasm32-unknown-unknown` was already installed for 1.94.0.
+   - getrandom 0.2.17 needed nothing.
+   - getrandom 0.3.4 (through ahash, from kaspa-txscript's arkworks crates) needs two things:
+     - its `wasm_js` feature: `lottery/Cargo.toml` has a wasm32-only target dependency `getrandom = "=0.3.4"` with `wasm_js`;
+     - its cfg: `crates/.cargo/config.toml` sets `--cfg getrandom_backend="wasm_js"` for that target only.
+   - `secp256k1-sys` needs a wasm-capable clang and ar. The pinned LLVM 23.1.3 at `C:\Program Files\LLVM\bin` has `clang.exe` (wasm32 target), `llvm-ar.exe` and `wasm-ld.exe`. They are given by environment variables, not in the config, because the path is machine-specific. The exact commands for both shells are in CLAUDE.md, under "wasm build".
+   - `crates/web` (new) is a cdylib with one export, `f1_link_probe`. It runs `lottery::digest::all_lines()`, which keeps every builder, the engine, the mass calculator and the ABI codec in the binary. Its dependency is `lottery = { default-features = false }`, and it has a `mainnet` feature.
+5. **Size measured** (`crates/web`, release, no compiler):
+
+| opt-level | raw | gzip -9 | code | data | `name` section | `__wasm_bindgen_unstable` section |
+|---|---|---|---|---|---|---|
+| 3 (default release) | 5,432,679 B | 2,095,987 B | 2,221,598 | 2,339,744 | 471,181 | 259,359 |
+| "s" (as the probe) | 5,010,233 B | 1,955,816 B | 1,604,814 | 2,327,329 | 676,202 | 259,359 |
+
+   - The probe had 6.97 MB at "s" with the compiler. Without the compiler it is 5.01 MB, and about 4.07 MB once the `name` and wasm-bindgen sections are removed (wasm-bindgen and wasm-opt remove them).
+   - The data section carries the 795 KB of pretty JSON. A compact encoding would save about 230 KB raw (compact JSON is 568,526 B), more with a binary form.
+   - 128 KB of exports are rusty-kaspa's own `#[wasm_bindgen]` items (`networkid_*` and others), which kaspa-consensus-core compiles in on wasm32.
+
+### Encoding identity: the evidence (no stop-and-ask needed)
+
+- **Golden digests written before any F1 change** (`crates/lottery/tests/fixtures/f1_digests.txt`, 77 lines, by `lottery::digest`). At that point only `digest.rs` itself had been added; templates were still compiled from disk and the ABI was on `a41a333`.
+  - **ABI part.** For each of the 11 templates:
+    - the template hash and the artifact JSON;
+    - every entry's signature script on 12 argument sets plus 2 error cases;
+    - the runtime state on 12 value sets: encode, decode round trip, and the decode of 3 altered byte strings (one flipped bit, truncated, trailing push).
+
+    The values cover the script-number boundaries (0, ±1, 16/17, ±127/128/129, 255/256, 32,767/32,768, 2^31, 2^40, ±i64::MAX, i64::MIN), push lengths 0/1/75/76/255/256/520/521/1,000, and single bytes 0x00/0x01/0x05/0x10/0x11/0x80/0x81. A sample run (`F1_DIGEST_VERBOSE=1`) had 380 successful encodings, 107 decodes and 96 altered-byte outcomes, plus errors.
+  - **Transaction part.** 21 fixture transactions:
+
+    | Builder | Cases |
+    |---|---|
+    | buy | b = 1, b = 1 with referral, b = 4 with referral and two funding inputs |
+    | close | K = 16, K = 4 |
+    | draw | K = 16, K = 4, and a void at K = 16 |
+    | claim | k = 1, k = 16 |
+    | return and refresh | `return_deposit` after the window, refresh of a ticket, refresh of a pool |
+    | params | `set_params` |
+    | vault | `request_deposit`, `request_withdraw`, both settlements |
+    | genesis | K = 4, K = 16 |
+
+    Each digest covers the whole transaction (`Debug`), the entries, the script units, the masses and the storage-mass commit. Random-nonce signatures are replaced by their length; they are detected as the signature scripts that differ between two `finish()` runs.
+- **After the embedded templates and after the `[patch]`:** `cargo test -p lottery --release --test f1_bytes` gave `f1_encoding_and_transactions_unchanged ... ok`. All 77 lines are identical.
+- **W2 after the patch:** a fresh compile through the patched ABI types equals the files generated before the patch, byte for byte.
+- **Upstream ABI unit tests on v2.1.0:** `cargo test -p silverscript-abi --release` gave `test result: ok. 21 passed; 0 failed`.
+- **Source check** of every txscript item the ABI calls (`git` in `~/.cargo/git/db/rusty-kaspa-*`):
+  - `a41a333` is an ancestor of v2.1.0 (`git merge-base --is-ancestor`: yes, 13 commits);
+  - these bodies are identical in both revisions: `serialize_i64`, `ScriptBuilder::canonical_data_size`, `add_data`, `add_raw_data*` and `explicit_push_encoded_size`;
+  - `add_i64` changed only in its size limit, which is 1,000,000 in both revisions when covenants are on;
+  - the opcode values `Op0`, `Op1`, `Op1Negate`, `Op16`, `OpData1`, `OpData75` and `OpPushData1/2/4` are identical (md5 of their definition lines);
+  - `deserialize_i64(v, false)` at `a41a333` is the v2.1.0 function line for line.
+- **The full suite** (below) runs every M1–M8 transaction through the v2.1.0 engine with the patched ABI.
+
+### Commands run (outputs)
+
+- `cargo test -j 2 -p lottery --release --test f1_bytes -- --ignored write_golden` (before the changes): `wrote 77 lines`.
+- `cargo test -j 2 -p lottery --release --test f1_templates --test f1_bytes` (after the patch): `w2_* ... ok` ×4, `f1_encoding_and_transactions_unchanged ... ok`.
+- `cargo test -j 2 -p silverscript-abi --release`: `21 passed; 0 failed`.
+- `cargo check -j 2 -p lottery --no-default-features` and `cargo check -p lottery --no-default-features --features mainnet`: both `Finished`, with no warnings.
+- `cargo check -j 2 -p lottery --no-default-features --target wasm32-unknown-unknown` (with the CC and AR variables): `Finished`. Without them it fails at `secp256k1-sys` with `failed to find tool "clang"`. Without the getrandom settings it fails at `getrandom 0.3.4`, "wasm32-unknown-unknown targets are not supported by default".
+- `cargo build -j 2 -p web --target wasm32-unknown-unknown --release`: `Finished release profile [optimized] target(s) in 2m 06s`. No linker flag, no duplicate symbols. `web.wasm` is 5,432,679 B.
+- The same build with `--config 'profile.release.opt-level="s"'`: 5,010,233 B.
+- Suite: see "Suite at the end of F1 part A".
+
+### Files changed (F1 part A)
+
+- `crates/Cargo.toml`: members `web` and `vendor/silverscript-abi` (not default); the `[patch]`.
+- `crates/Cargo.lock`: the abi entry (path source, v2.1.0 dependencies), plus `web`.
+- `crates/.cargo/config.toml` (new): the getrandom cfg for wasm32.
+- `crates/harness/Cargo.toml` and `src/lib.rs`: the `compiler` feature.
+- `crates/lottery/Cargo.toml`: features `default = ["compiler"]` and `compiler`; the `regen-templates` bin; `harness` with `default-features = false`; the wasm32 getrandom dependency.
+- `crates/lottery/src/buy.rs`: compile paths gated; embedded `b_max()`; `source_b_max()`; `Templates::{get, try_get, embedded}`; short-void cfg.
+- `crates/lottery/src/draw.rs`: `compile_drawer` and `dummy_drawer` gated.
+- `crates/lottery/src/genesis.rs`: short-void cfg.
+- `crates/lottery/src/lib.rs`: modules `digest` and `embedded`, plus docs.
+- New in `crates/lottery`:
+  - `src/embedded.rs`;
+  - `src/digest.rs`;
+  - `src/bin/regen-templates.rs`;
+  - `templates/` (12 files);
+  - `tests/f1_templates.rs`;
+  - `tests/f1_bytes.rs`;
+  - `tests/fixtures/f1_digests.txt`.
+- `crates/lottery/tests/m7_seed.rs`: the SP12 probe's positive control enables `compiler` (1 manifest line and a doc comment).
+- `crates/vendor/silverscript-abi/` (new): Cargo.toml, LICENSE, src.
+- `crates/web/` (new): Cargo.toml, src/lib.rs.
+- `CLAUDE.md`: the layout line, the templates rule (it replaces "compiled at test time") and the wasm build command.
+- No `covenants/*.sil` change; nothing in `refs/` (it is empty on this machine; the sources were read from `~/.cargo/git`).
+
+### Proposed DECISIONS rows (for the orchestrator)
+
+- (a) **The templates are embedded** as `silverc` JSON in `crates/lottery/templates/` and used by `Templates::get` in every build, native included. `regen-templates` writes them, and W2 (`f1_templates`) fails on any difference from a fresh compile of `covenants/`. A `.sil` change now needs one regenerate command; CLAUDE.md says so.
+- (b) **`compiler` feature** (default on) in `harness` and `lottery`; the web build leaves it off. The TEST-ONLY short-void variant now also needs `compiler`. The SP12 probe's positive control enables `compiler`; the mainnet absence check is unchanged.
+- (c) **The ABI on v2.1.0 by a vendored copy plus `[patch]`** (3 marked edits), not a fork or a re-implementation. It applies to native builds too, so there is one ABI everywhere.
+  - Proof of no encoding change: the golden digests (written before the change, equal after), W2 after the patch, the upstream ABI tests 21/21, and the source check.
+  - The vendored copy must be updated by hand on any SilverScript bump. This adds to the existing standing task in DECISIONS row 63.
+- (d) **Finding for DECISIONS row 63 / research N2:** SilverScript's rusty-kaspa rev `a41a333` is an ancestor of v2.1.0, 13 commits before it. `crypto/txscript` still differs (19 files, including engine changes such as the removed minimal-push checks). The compiler and sil-debug still run on `a41a333`; only bytecode crosses, as D-row 18 says.
+- (e) **The wasm toolchain:**
+  - getrandom 0.3 gets `wasm_js` from a lottery target dependency and its cfg from `crates/.cargo/config.toml`;
+  - clang and ar for `secp256k1-sys` come from the environment variables `CC_wasm32_unknown_unknown` and `AR_wasm32_unknown_unknown` (LLVM at `C:\Program Files\LLVM\bin`), documented in CLAUDE.md.
+- (f) **`crates/web` exists as a cdylib** with only a link-probe export. Part B replaces it with the wasm-bindgen API.
+- (g) **`lottery::digest` is a public library module** (the fixture digests), so part B's W1 can run the same function in wasm and compare it with `tests/fixtures/f1_digests.txt`.
+
+### What part B must do
+
+- **The `crates/web` API** (spec 6.1): wasm-bindgen, decode, build, verify and estimate, grouped by entry point. Replace `f1_link_probe`. Add `wasm-bindgen` at the version rusty-kaspa v2.1.0 already links (in Cargo.lock), so there is a single copy.
+- **`Result` everywhere and W3:**
+  - `Template::from` asserts (`expect("state span")`, the template-hash `assert_eq!`), and `Template::state_bytes` panics on encode errors;
+  - the builders panic in many places (`unwrap_or_else(panic)` in `harness::entry_sigscript` and others).
+
+  Every function reachable from the page must return `Result` (wasm uses `panic = "abort"`).
+- **The signing split for every case:** `Built::finish_unsigned` exists (F0) but refuses owner inputs (M5 D67).
+- **W1:** run `lottery::digest::all_lines()` in wasm (under node or wasm-bindgen-test) and compare with `tests/fixtures/f1_digests.txt`. Note:
+  - `finish()` signs with random nonces through getrandom, so the JS host needs `crypto`;
+  - the digest masks those signatures, so the lines are host-independent.
+- **W4:** a `mainnet` build of `crates/web` refuses to start and has no quick-wallet symbol. `web` already has a `mainnet` feature that passes through to `lottery/mainnet`.
+- **Size:** optionally store the embedded templates compactly (compact JSON or a binary form), and strip the `name` section with wasm-opt. Record the compressed size again.
+
+### Open questions
+
+- None that need the owner. Nothing changed encoding, so the stop-and-ask rule was not triggered.
+- The wasm binary has been linked but not yet run in a JS host; part B's W1 runs it.
+
+### Suite at the end of F1 part A
+
+- `cargo build --tests -j 2`: `Finished dev profile [unoptimized + debuginfo] target(s) in 1m 51s`.
+- `cargo test -j 2` (from `crates/`, debug; default members `harness` and `lottery`): 48 binaries ran, 1,088 passed, 0 failed, 2 ignored (`f1_bytes::write_golden` and the old `m4_mutants` one).
+  - This includes `f1_bytes` 1/1, `f1_templates` 4/4, `f0_unsigned` 2/2 and `m7_seed` 15/15 (SP12: `mainnet,test-seed` fails, `mainnet` builds, and the probe has every short-void symbol and loses them under `mainnet`).
+  - The last binary, `spike_vdf`, overflowed its stack in debug (`sv_measure_masses_and_stack`, STATUS_STACK_OVERFLOW). This was already true before F1 (DECISIONS D113: "`spike_vdf` overflows its stack in debug as before S1; 14/14 in `--release`").
+- `cargo test -j 2 -p lottery --release --test spike_vdf`: `14 passed; 0 failed` (358 s).
+- `cargo test -p lottery -p harness --doc`: 0 doc tests, ok.
+- `cargo test -j 1 --release -p tn10`: `25 passed; 0 failed`.
+- `cargo check -p web --features mainnet --target wasm32-unknown-unknown`: `Finished`.
+- Not built: `simnet` (RocksDB, about 14 min). It uses `lottery` with default features, whose API is unchanged except the additions.

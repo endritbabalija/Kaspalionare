@@ -1,0 +1,31 @@
+# Vendored copy of `silverscript-abi` from SilverScript v1.0.0 (git rev 3ed973335b59269293564805cc2c58a14595ec03,
+# github.com/kaspanet/silverscript, `silverscript-abi/`), ISC licence (LICENSE), built against the pinned
+# rusty-kaspa v2.1.0 instead of SilverScript's rev a41a333 (front-end F1, spec frontend 6.1: one
+# rusty-kaspa version, so the wasm build links without duplicate symbols). `crates/Cargo.toml` puts it
+# in place of the git crate with `[patch]`, for every user, the compiler included.
+#
+# Changes from upstream (each marked "Kaspalionare F1 vendor patch" in src/lib.rs): `script_builder()`
+# and `deserialize_fixed_i64` follow the two v2.1.0 API changes, and one unit test reads the renamed
+# consensus field. The workspace dependency versions are written out. Nothing else differs.
+# Byte identity: `crates/lottery/tests/f1_bytes.rs` (golden digests written before the change).
+[package]
+name = "silverscript-abi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "ISC"
+publish = false
+
+[dependencies]
+blake3 = "1.8.5"
+faster-hex = "0.10"
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1.0"
+thiserror = "1.0.61"
+
+[dev-dependencies]
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+# Keep the Sil compiler test-only; production ABI code must not depend on it.
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript", rev = "3ed973335b59269293564805cc2c58a14595ec03" }

@@ -1,0 +1,22 @@
+[package]
+name = "web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Front-end `crates/web` (spec frontend 6.1): the `lottery` builders for the browser (wasm32,
+# a Web Worker). F1 part A: only the link probe below, so the wasm build links and can be
+# measured; part B adds the wasm-bindgen API (decode, build, verify, estimate). Not a default
+# workspace member. Build command and environment: CLAUDE.md, "wasm build".
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+mainnet = ["lottery/mainnet"]
+
+[dependencies]
+# No `compiler`: the embedded templates only, no SilverScript compiler, no file reads.
+lottery = { path = "../lottery", default-features = false }

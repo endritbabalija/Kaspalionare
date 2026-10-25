@@ -90,7 +90,7 @@ pub struct GenesisCase {
     /// variant (`templates()`): the production drawer rejects draw_window < VOID_MIN in
     /// check 1, so such an instance could neither draw nor void under it. Absent from a
     /// `mainnet` build, with the variant itself (SP12).
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     pub allow_short_void_window: bool,
     /// Funding inputs: outpoint (e.g. from a `Ledger`) and entry.
     pub funding: Vec<(TransactionOutpoint, UtxoEntry)>,
@@ -144,7 +144,7 @@ impl GenesisCase {
             drawer,
             position,
             network: NetworkType::Testnet,
-            #[cfg(not(feature = "mainnet"))]
+            #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
             allow_short_void_window: false,
             funding,
             change: true,
@@ -264,7 +264,7 @@ impl GenesisCase {
     /// ticket (pool) and shard (ticket) differ from the production set; controller, params
     /// and record do not. `validate` checks all nine against that set (S2c MF-A) and still
     /// refuses the flag off testnet/devnet. Not in a `mainnet` build (SP12).
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     pub fn set_test_only_short_void_window(&mut self, draw_window: i64) {
         self.allow_short_void_window = true;
         self.drawer.draw_window = draw_window;
@@ -284,7 +284,7 @@ impl GenesisCase {
     /// `allow_short_void_window` the TEST-ONLY short-void drawer variant (spec M7 D103; the
     /// only route to it, and `validate` refuses the flag off testnet/devnet).
     pub fn templates(&self) -> Arc<Templates> {
-        #[cfg(not(feature = "mainnet"))]
+        #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
         if self.allow_short_void_window {
             return Templates::test_only_short_void(self.b_max);
         }
@@ -460,9 +460,9 @@ impl GenesisCase {
         // The drawer's check 1 enforces the same floor (Stage 5 fix A); the TEST-ONLY
         // short-void variant drops it and goes only with the TEST-ONLY flag (D103).
         // A `mainnet` build has neither the flag nor the variant (SP12): the floor always applies.
-        #[cfg(feature = "mainnet")]
+        #[cfg(any(feature = "mainnet", not(feature = "compiler")))]
         let short = false;
-        #[cfg(not(feature = "mainnet"))]
+        #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
         let short = {
             if t.short_void_window && !self.allow_short_void_window {
                 return Err("the TEST-ONLY short-void drawer variant requires allow_short_void_window (D103)".into());
@@ -933,7 +933,7 @@ mod tests {
     /// Spec M7 D97, D103: draw_window < VOID_MIN is refused unless the TEST-ONLY
     /// `allow_short_void_window` flag is set, and the flag is refused off testnet/devnet.
     #[test]
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     fn m7_void_window_floor_and_test_only_flag() {
         let good = case();
         assert_eq!(good.drawer.draw_window, VOID_MIN);
@@ -969,7 +969,7 @@ mod tests {
     /// line replaced) is reached only through `GenesisCase::templates()` with the TEST-ONLY
     /// flag, and `validate_with` refuses it without the flag.
     #[test]
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     fn m7_void_floor_in_production_drawer_and_variant_only_via_flag() {
         use crate::buy::{SHORT_VOID_LINE, Sources, short_void_drawer_source, void_min_line};
         assert_eq!(VOID_MIN, 864_000);
@@ -1021,7 +1021,7 @@ mod tests {
     /// does not), and validate() checks each against that set: one bit flipped in any field,
     /// or the production hash put back, is refused, by validate() and by the builder.
     #[test]
-    #[cfg(not(feature = "mainnet"))]
+    #[cfg(all(not(feature = "mainnet"), feature = "compiler"))]
     fn s2c_mfa_variant_genesis_route_checked_against_variant_templates() {
         let good = case();
         let prod = Templates::get(good.b_max);

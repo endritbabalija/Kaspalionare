@@ -5,12 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Front-end F1 (spec frontend 6.1): the SilverScript compiler is behind `compiler` (on by
+# default for native builds and tests); the web build (`crates/web`, wasm32) leaves it off and
+# uses the templates embedded in `lottery`.
+[features]
+default = ["compiler"]
+compiler = ["dep:silverscript-lang"]
+
 [dependencies]
 kaspa-consensus-core.workspace = true
 kaspa-txscript.workspace = true
 kaspa-txscript-errors.workspace = true
 kaspa-hashes.workspace = true
-silverscript-lang.workspace = true
+silverscript-lang = { workspace = true, optional = true }
 silverscript-abi.workspace = true
 blake2b_simd.workspace = true
 blake3.workspace = true

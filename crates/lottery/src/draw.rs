@@ -30,10 +30,14 @@
 
 use std::sync::Arc;
 
-use harness::{ArtifactValue, ChainSim, CovenantBinding, Hash, Transaction, TransactionId, TransactionOutpoint, TransactionOutput, UtxoEntry, compile_source, outpoint};
+use harness::{ArtifactValue, ChainSim, CovenantBinding, Hash, Transaction, TransactionId, TransactionOutpoint, TransactionOutput, UtxoEntry, outpoint};
+#[cfg(feature = "compiler")]
+use harness::compile_source;
 
 use crate::anchor::AnchorProof;
-use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, Template, Templates, b_max, spk_of};
+use crate::buy::{Built, COV, FUNDING_SK, In, InKind, KAS, Templates, b_max, spk_of};
+#[cfg(feature = "compiler")]
+use crate::buy::Template;
 use crate::close::{CloseCase, FundingIn, TEST_DEADLINE, TEST_ROUND_LEN};
 use crate::combo::unrank;
 use crate::decode::{pushes, script_num, state_values};
@@ -50,11 +54,13 @@ use crate::state::{ControllerState, DrawerState, K_MAX, MarkerState, Payout, Poo
 /// (D38). The template hash does not depend on the state values. Public for the tests'
 /// check-attribution instrument (`tests/common/m2.rs`, `M3_ATTRIB`), which compiles truncated
 /// drawer sources.
+#[cfg(feature = "compiler")]
 pub fn compile_drawer(src: &str, controller_hash: [u8; 32]) -> Template {
     Template::from(compile_source(src, &dummy_drawer().ctor(controller_hash)))
 }
 
 /// Placeholder drawer state for compiling.
+#[cfg(feature = "compiler")]
 fn dummy_drawer() -> DrawerState {
     DrawerState { round: 1, pool_tpl: [0; 32], vault_tpl: [0; 32], ticket_tpl: [0; 32], f_min: F_MIN, claim_window: CLAIM_WINDOW, draw_window: DRAW_WINDOW }
 }
