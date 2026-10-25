@@ -203,7 +203,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | bundle [--out <file>] | bundle-verify <file> | masses>
+const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--out <file>] | bundle-verify <file> | masses>
 probe cases: all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62 (conflict-m6 is not part of all)";
 
 /// The value after `--name` in `args`.
@@ -226,7 +226,7 @@ async fn live(env: &BTreeMap<String, String>) -> Result<(campaign::Node, Keypair
     net::check_testnet(&addr)?;
     let client = net::connect(env.get(URL_VAR).cloned()).await?;
     let url = client.url().unwrap_or_default();
-    Ok((campaign::Node { client, addr, url, to: anchor::Timeouts::default() }, kp))
+    Ok((campaign::Node { client, addr, url, to: anchor::Timeouts::default(), cfg_url: env.get(URL_VAR).cloned() }, kp))
 }
 
 fn soak_mode(args: &[String]) -> Result<campaign::SoakMode, String> {
@@ -326,6 +326,40 @@ async fn campaign_cmd(args: &[String]) -> Result<(), String> {
             let mut r = campaign::Runner::new(l, root, kp.secret_bytes(), opts(args)?);
             r.open(cov)?;
             r.run().await
+        }
+        Some("reanchor") => {
+            // M8 S4 (PENDING A4 amendment): move a pruned resume block to the node's sink after
+            // proving on the node that the live instance set is unchanged; `--check` only
+            // runs the proof and writes nothing.
+            let cov = match flag(args, "--cov") {
+                Some(c) => hash_arg(c)?,
+                None => hash_arg(std::fs::read_to_string(root.join("current")).map_err(|_| "no current campaign; use --cov".to_string())?.trim())?,
+            };
+            let write = !has(args, "--check");
+            let (l, kp) = live(&env).await?;
+            let mut r = campaign::Runner::new(l, root, kp.secret_bytes(), opts(args)?);
+            r.open(cov)?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+            let extra = vec![r.net.addr.clone()];
+            let x = r.x.as_mut().ok_or("no indexer")?;
+            let (line, u) = indexer::reanchor(&r.net.client, x, &r.net.url, &extra, now, write).await?;
+            println!(
+                "re-anchor proof on {}: {} live instance UTXOs unchanged ({} node entries at their addresses and ours, {} not instance-bound); old block {} (DAA {}) -> new block {} (DAA {}){}",
+                line.node,
+                u.live_checked,
+                u.node_entries,
+                u.foreign,
+                encode_hex(&line.old_block),
+                line.old_daa,
+                encode_hex(&line.new_block),
+                line.new_daa,
+                if write { "; recorded in index-log.jsonl and index.json" } else { "; --check: nothing written" }
+            );
+            if write {
+                r.record_reanchor(&line, &u).await?;
+                r.catch_up().await?;
+            }
+            Ok(())
         }
         _ => Err(USAGE.into()),
     }

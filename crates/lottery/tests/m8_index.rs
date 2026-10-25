@@ -863,7 +863,7 @@ fn ix6_store_formats_round_trip() {
     let n = lines.len() as u64;
     lines.push(IndexLogLine::remove(n, blk(n as usize - 1), 1_000 + n - 1, last));
     lines.push(IndexLogLine::add(n + 1, blk(200), 5_000, last));
-    let log = IndexLog { cov: ch.cov, lines };
+    let log = IndexLog { cov: ch.cov, lines, reanchors: vec![] };
     let text = log.to_jsonl().unwrap();
     assert!(text.starts_with("{\"format\":\"index/1\""), "{}", &text[..40]);
     let back = IndexLog::from_jsonl(&text).unwrap();
@@ -935,6 +935,55 @@ fn ix6_store_formats_round_trip() {
         cj.len(),
         bj.len()
     );
+}
+
+/// M8 S4 (PENDING A4 amendment): a re-anchor line in `index/1`. It round-trips in the log
+/// (in the middle and at the end), changes no index state (`rebuild` gives the index
+/// without it), round-trips in the snapshot (and a snapshot without the field still
+/// reads), and the log refuses one whose position or chaining is wrong.
+#[test]
+fn s4_reanchor_line_round_trips_and_changes_no_state() {
+    let (ch, _, gstates) = game();
+    let blk = |n: usize| Hash::from_bytes([n as u8; 32]);
+    let lines: Vec<IndexLogLine> = ch.log.iter().enumerate().map(|(n, a)| IndexLogLine::add(n as u64, blk(n), 1_000 + n as u64, a)).collect();
+    let n = lines.len() as u64;
+    let ra = |at: u64, old: usize, new: usize| store::ReanchorLine {
+        kind: store::REANCHOR.into(),
+        at,
+        old_block: blk(old).as_bytes(),
+        old_daa: 1_000 + old as u64,
+        new_block: blk(new).as_bytes(),
+        new_daa: 9_000 + new as u64,
+        node: "wss://example.invalid/testnet-10".into(),
+        live_checked: 42,
+        wall_time: 1_792_900_000,
+        argument: "KIP-20: every instance output is created by spending an instance UTXO".into(),
+    };
+    let plain = IndexLog { cov: ch.cov, lines: lines.clone(), reanchors: vec![] };
+    let with = IndexLog { cov: ch.cov, lines: lines.clone(), reanchors: vec![ra(2, 1, 250), ra(n, n as usize - 1, 251), ra(n, 251, 252)] };
+    let text = with.to_jsonl().unwrap();
+    assert_eq!(text.lines().count(), 1 + lines.len() + 3);
+    assert!(text.lines().nth(3).unwrap().starts_with("{\"kind\":\"reanchor\",\"at\":2,"), "{}", text.lines().nth(3).unwrap());
+    let back = IndexLog::from_jsonl(&text).unwrap();
+    assert_eq!(back, with);
+    let a = back.rebuild(ch.t.clone(), ch.cov, Some(gstates.clone())).unwrap();
+    let b = plain.rebuild(ch.t.clone(), ch.cov, Some(gstates.clone())).unwrap();
+    let mut snap = IndexSnapshot::of(&a, Some(blk(252)));
+    assert_eq!(snap, IndexSnapshot::of(&b, Some(blk(252))), "a re-anchor line changes no index state");
+    snap.reanchors = with.reanchors.clone();
+    let js = store::write(&snap, store::INDEX).unwrap();
+    assert_eq!(store::read::<IndexSnapshot>(&js, store::INDEX).unwrap(), snap);
+    let mut old: serde_json::Value = serde_json::from_str(&js).unwrap();
+    old.as_object_mut().unwrap().remove("reanchors");
+    assert!(store::read::<IndexSnapshot>(&old.to_string(), store::INDEX).unwrap().reanchors.is_empty(), "an older snapshot reads");
+    // Refusals: a wrong position, two lines at one position that do not chain, a bad kind.
+    let moved = text.replacen("\"kind\":\"reanchor\",\"at\":2,", "\"kind\":\"reanchor\",\"at\":3,", 1);
+    assert!(IndexLog::from_jsonl(&moved).unwrap_err().contains("re-anchor line after 2"));
+    let broken = IndexLog { cov: ch.cov, lines: lines.clone(), reanchors: vec![ra(n, 1, 250), ra(n, 7, 251)] }.to_jsonl().unwrap();
+    assert!(IndexLog::from_jsonl(&broken).unwrap_err().contains("do not chain"));
+    let mut bad = ra(n, 1, 250);
+    bad.kind = "add".into();
+    assert!(bad.to_line().is_err());
 }
 
 // ---------------------------------------------------------------- IX8
@@ -1260,7 +1309,7 @@ fn s2c_mfb_log_txid_recomputed() {
     ch.buy(0, &c, ops, 300);
     let blk = |n: usize| Hash::from_bytes([n as u8; 32]);
     let lines: Vec<IndexLogLine> = ch.log.iter().enumerate().map(|(n, a)| IndexLogLine::add(n as u64, blk(n), 1_000 + n as u64, a)).collect();
-    let log = IndexLog { cov: ch.cov, lines };
+    let log = IndexLog { cov: ch.cov, lines, reanchors: vec![] };
     let text = log.to_jsonl().unwrap();
     // The control: the untouched log rebuilds.
     IndexLog::from_jsonl(&text).unwrap().rebuild(ch.t.clone(), ch.cov, None).unwrap();
@@ -1413,7 +1462,7 @@ fn s2c_mfc_log_line_with_large_foreign_u64() {
     let direct = replay(&ch, &log);
     let blk = |n: usize| Hash::from_bytes([n as u8; 32]);
     let lines: Vec<IndexLogLine> = log.iter().enumerate().map(|(n, a)| IndexLogLine::add(n as u64, blk(n), 1_000 + n as u64, a)).collect();
-    let il = IndexLog { cov: ch.cov, lines };
+    let il = IndexLog { cov: ch.cov, lines, reanchors: vec![] };
     let text = il.to_jsonl().unwrap_or_else(|e| panic!("MF-C: a log line with a foreign u64 >= 2^53 is unwritable: {e}"));
     let back = IndexLog::from_jsonl(&text).unwrap();
     assert_eq!(back, il);
@@ -1664,11 +1713,11 @@ fn s2d_index_log_header_cov_checked() {
     let other = Hash::from_bytes(other);
     let blk = |n: usize| Hash::from_bytes([n as u8; 32]);
     let lines: Vec<IndexLogLine> = a.log.iter().enumerate().map(|(n, x)| IndexLogLine::add(n as u64, blk(n), 1_000 + n as u64, x)).collect();
-    let good = IndexLog { cov: a.cov, lines: lines.clone() };
+    let good = IndexLog { cov: a.cov, lines: lines.clone(), reanchors: vec![] };
     let ix = good.rebuild(a.t.clone(), a.cov, None).unwrap();
     assert!(!ix.live().is_empty());
     // A's lines under another instance's ID, rebuilt for A (the verified ID) and for B.
-    let swapped = IndexLog::from_jsonl(&IndexLog { cov: other, lines }.to_jsonl().unwrap()).unwrap();
+    let swapped = IndexLog::from_jsonl(&IndexLog { cov: other, lines, reanchors: vec![] }.to_jsonl().unwrap()).unwrap();
     for (expected, name) in [(a.cov, "header B, expected A"), (other, "header A, expected B")] {
         let log = if expected == a.cov { &swapped } else { &good };
         let r = log.rebuild(a.t.clone(), expected, None);

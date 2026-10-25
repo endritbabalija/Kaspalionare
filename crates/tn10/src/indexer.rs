@@ -40,7 +40,9 @@ use kaspa_consensus_core::tx::{Transaction, TransactionId};
 use kaspa_rpc_core::{RpcDataVerbosityLevel, RpcOptionalTransaction, api::rpc::RpcApi};
 use lottery::buy::Templates;
 use lottery::index::{Accepted, Event, Rebuild, Spent, State};
-use lottery::store::{self, IndexLog, IndexLogLine, IndexSnapshot, LogKind};
+use kaspa_consensus_core::tx::{ScriptPublicKey, TransactionOutpoint};
+use lottery::index::Live;
+use lottery::store::{self, IndexLog, IndexLogLine, IndexSnapshot, LogKind, REANCHOR, ReanchorLine};
 
 pub const LOG_FILE: &str = "index-log.jsonl";
 pub const SNAPSHOT_FILE: &str = "index.json";
@@ -161,6 +163,9 @@ pub struct Indexer {
     /// block and DAA that accepted them (dropped again if that block is removed).
     watched: HashSet<TransactionId>,
     accepted: HashMap<TransactionId, (Hash, u64)>,
+    /// The log's re-anchor lines (M8 S4) and how many of them are on disk.
+    reanchors: Vec<ReanchorLine>,
+    persisted_ra: usize,
 }
 
 impl Indexer {
@@ -180,6 +185,8 @@ impl Indexer {
             last_daa: start_daa,
             watched: HashSet::new(),
             accepted: HashMap::new(),
+            reanchors: vec![],
+            persisted_ra: 0,
         };
         let Some(dir) = dir else { return Ok(me) };
         let log_path = dir.join(LOG_FILE);
@@ -210,6 +217,8 @@ impl Indexer {
         }
         me.lines = log.lines;
         me.persisted = me.lines.len();
+        me.reanchors = log.reanchors;
+        me.persisted_ra = me.reanchors.len();
         let snap_path = dir.join(SNAPSHOT_FILE);
         if snap_path.exists() {
             let s: IndexSnapshot = store::read(&fs::read_to_string(&snap_path).map_err(|e| e.to_string())?, store::INDEX)?;
@@ -219,9 +228,20 @@ impl Indexer {
             if let Some(h) = s.last_chain_block {
                 me.last = Hash::from_bytes(h);
             }
+            if let Some(d) = s.last_chain_daa {
+                me.last_daa = me.last_daa.max(d);
+            }
         }
         if let Some(a) = me.active.last() {
             me.last_daa = me.last_daa.max(a.chain_daa);
+        }
+        // A re-anchor with no add/remove line after it: the resume block is its new block,
+        // also when a crash came between the log line and the snapshot (old block saved).
+        if let Some(r) = me.reanchors.last() {
+            if r.at == me.lines.len() as u64 && (me.last.as_bytes() == r.old_block || me.last.as_bytes() == r.new_block) {
+                me.last = Hash::from_bytes(r.new_block);
+            }
+            me.last_daa = me.last_daa.max(r.new_daa);
         }
         Ok(me)
     }
@@ -251,6 +271,33 @@ impl Indexer {
 
     pub fn lines(&self) -> &[IndexLogLine] {
         &self.lines
+    }
+
+    pub fn reanchors(&self) -> &[ReanchorLine] {
+        &self.reanchors
+    }
+
+    /// Record a re-anchor (checked by `check_unchanged` on a node, see `reanchor`): the
+    /// line goes into the log after every add/remove line so far, the resume block becomes
+    /// its new block, and both files are written at once.
+    pub fn apply_reanchor(&mut self, r: ReanchorLine) -> Result<(), String> {
+        if r.kind != REANCHOR || r.old_block != self.last.as_bytes() || r.at != self.lines.len() as u64 {
+            return Err(format!(
+                "re-anchor: the line (kind {:?}, old block {}, at {}) does not continue this index (resume block {}, {} lines)",
+                r.kind,
+                store::to_hex(&r.old_block),
+                r.at,
+                self.last,
+                self.lines.len()
+            ));
+        }
+        if r.new_daa <= self.last_daa {
+            return Err(format!("re-anchor: new block DAA {} is not above the resume block's {}", r.new_daa, self.last_daa));
+        }
+        self.last = Hash::from_bytes(r.new_block);
+        self.last_daa = r.new_daa;
+        self.reanchors.push(r);
+        self.persist()
     }
 
     fn relevant(&self, tx: &Transaction) -> bool {
@@ -333,8 +380,19 @@ impl Indexer {
             text.push_str(&IndexLog::header_line(self.cov)?);
             text.push('\n');
         }
+        // Add/remove lines and re-anchor lines in log order (a re-anchor line follows the
+        // `at` add/remove lines before it).
+        let mut ra = self.reanchors[self.persisted_ra..].iter().peekable();
         for l in &self.lines[self.persisted..] {
+            while let Some(r) = ra.next_if(|r| r.at <= l.seq) {
+                text.push_str(&r.to_line()?);
+                text.push('\n');
+            }
             text.push_str(&l.to_line()?);
+            text.push('\n');
+        }
+        for r in ra {
+            text.push_str(&r.to_line()?);
             text.push('\n');
         }
         if !text.is_empty() {
@@ -343,7 +401,11 @@ impl Indexer {
             f.sync_all().map_err(|e| e.to_string())?;
         }
         self.persisted = self.lines.len();
-        write_atomic(&dir.join(SNAPSHOT_FILE), &store::write(&IndexSnapshot::of(&self.ix, Some(self.last)), store::INDEX)?)
+        self.persisted_ra = self.reanchors.len();
+        let mut snap = IndexSnapshot::of(&self.ix, Some(self.last));
+        snap.reanchors = self.reanchors.clone();
+        snap.last_chain_daa = Some(self.last_daa);
+        write_atomic(&dir.join(SNAPSHOT_FILE), &store::write(&snap, store::INDEX)?)
     }
 
     /// The oldest round whose earliest buy's accepting chain block is in effect in the log,
@@ -386,9 +448,22 @@ pub struct PollStats {
 /// is an error that names it; nothing is skipped.
 pub async fn poll<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer) -> Result<PollStats, String> {
     let mut st = PollStats::default();
+    poll_into(c, x, &mut st).await?;
+    Ok(st)
+}
+
+/// `poll`, adding to `st`. After an error `st` still holds every batch already ingested and
+/// persisted (their events included), so a caller that retries (`campaign::Node`, M8 S4)
+/// loses none of them.
+pub async fn poll_into<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer, st: &mut PollStats) -> Result<(), String> {
     loop {
         let r = c.get_virtual_chain_from_block_v2(x.last, Some(RpcDataVerbosityLevel::Full), None).await.map_err(|e| {
-            format!("get_virtual_chain_from_block_v2 from {} (DAA {}): {e}; the resume block is unknown to this node or below its retention root: stopping, nothing skipped", x.last, x.last_daa)
+            let e = e.to_string();
+            if transient(&e) {
+                format!("get_virtual_chain_from_block_v2 from {} (DAA {}): {e} (node or connection failure; the position is saved)", x.last, x.last_daa)
+            } else {
+                format!("get_virtual_chain_from_block_v2 from {} (DAA {}): {e}; the resume block is unknown to this node or below its retention root: stopping, nothing skipped", x.last, x.last_daa)
+            }
         })?;
         st.calls += 1;
         let b = batch_of(r)?;
@@ -404,10 +479,159 @@ pub async fn poll<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer) -> Result<PollStat
         st.events.extend(g.events);
         // A call from the sink adds nothing: the index has caught up.
         if n_added == 0 {
-            break;
+            return Ok(());
         }
     }
-    Ok(st)
+}
+
+/// A node or connection failure worth retrying on another connection (M8 S4: public nodes
+/// timed out on long catch-up calls and dropped WebSockets in sitting 3). Anything else
+/// (a pruned or unknown resume block, a malformed answer, an index error) is not: the
+/// indexer stops on it, nothing skipped.
+pub fn transient(e: &str) -> bool {
+    let e = e.to_lowercase();
+    if e.contains("cannot find header") || e.contains("retention root") {
+        return false;
+    }
+    ["timeout", "timed out", "websocket", "disconnect", "not connected", "connection", "closed", "reset by peer", "broken pipe"].iter().any(|k| e.contains(k))
+}
+
+/// The argument a re-anchor line carries (M8 S4, PENDING A4 amendment).
+pub const REANCHOR_ARGUMENT: &str = "KIP-20 covenant binding (refs/kips/kip-0020.md:25-27, 33): an output can carry this instance's covenant ID only if its authorizing input spends a UTXO with that ID, or as the genesis of an ID that hashes the spent genesis outpoint (outpoints never repeat). So every instance transaction spends at least one instance UTXO (the indexer keeps exactly the transactions that spend a live instance UTXO or create an instance-bound output, and the latter needs the former). Every live instance UTXO of the index was still unspent on the node, with the same script, value and creation DAA, after the new block was chosen, and the node returned no instance-bound UTXO the index did not know: no instance transaction was accepted between the old and the new block.";
+
+/// A UTXO as the node's utxoindex returns it (`get_utxos_by_addresses`, rusty-kaspa v2.1.0
+/// `rpc/core/src/api/rpc.rs:363`; `RpcUtxoEntry.covenant_id`, `rpc/core/src/model/tx.rs:30`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeUtxo {
+    pub outpoint: TransactionOutpoint,
+    pub amount: u64,
+    pub spk: ScriptPublicKey,
+    pub daa: u64,
+    pub covenant_id: Option<Hash>,
+}
+
+impl NodeUtxo {
+    pub fn of(e: &kaspa_rpc_core::RpcUtxosByAddressesEntry) -> Self {
+        Self {
+            outpoint: e.outpoint.clone().into(),
+            amount: e.utxo_entry.amount,
+            spk: e.utxo_entry.script_public_key.clone(),
+            daa: e.utxo_entry.block_daa_score,
+            covenant_id: e.utxo_entry.covenant_id,
+        }
+    }
+}
+
+/// What `check_unchanged` saw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unchanged {
+    pub live_checked: usize,
+    /// Entries the node returned at the queried addresses.
+    pub node_entries: usize,
+    /// Of those, entries not bound to the instance (anyone may pay to a P2SH address).
+    pub foreign: usize,
+}
+
+/// The re-anchor proof's check (M8 S4): every live instance UTXO of the index is unspent on
+/// the node with the same script, value, creation DAA and covenant ID, and no entry the node
+/// returned is bound to `cov` without being known to the index. `node` = the node's entries
+/// at the addresses of every live UTXO's script (plus any others queried). Every problem is
+/// listed in the error.
+pub fn check_unchanged(live: &HashMap<TransactionOutpoint, Live>, cov: Hash, node: &[NodeUtxo]) -> Result<Unchanged, String> {
+    let by_op: HashMap<TransactionOutpoint, &NodeUtxo> = node.iter().map(|n| (n.outpoint, n)).collect();
+    let mut bad: Vec<String> = vec![];
+    let mut ops: Vec<&TransactionOutpoint> = live.keys().collect();
+    ops.sort_by_key(|o| (o.transaction_id, o.index));
+    for op in ops {
+        let l = &live[op];
+        match by_op.get(op) {
+            None => bad.push(format!("live {op} ({:?}): spent or unknown to the node", l.role)),
+            Some(n) => {
+                if n.amount != l.value || n.spk != l.spk || n.daa != l.daa || n.covenant_id != Some(cov) {
+                    bad.push(format!(
+                        "live {op} ({:?}): node (value {}, DAA {}, cov {:?}, script {}) != index (value {}, DAA {}, cov {cov})",
+                        l.role,
+                        n.amount,
+                        n.daa,
+                        n.covenant_id,
+                        if n.spk == l.spk { "same" } else { "differs" },
+                        l.value,
+                        l.daa
+                    ));
+                }
+            }
+        }
+    }
+    let mut foreign = 0;
+    for n in node {
+        if live.contains_key(&n.outpoint) {
+            continue;
+        }
+        if n.covenant_id == Some(cov) {
+            bad.push(format!("node UTXO {} (value {}, DAA {}) is bound to the instance but unknown to the index", n.outpoint, n.amount, n.daa));
+        } else {
+            foreign += 1;
+        }
+    }
+    if !bad.is_empty() {
+        let n = bad.len();
+        bad.truncate(20);
+        return Err(format!("re-anchor refused: {n} problem(s): {}{}", bad.join("; "), if n > 20 { "; ..." } else { "" }));
+    }
+    Ok(Unchanged { live_checked: live.len(), node_entries: node.len(), foreign })
+}
+
+/// Re-anchor the index (M8 S4, PENDING A4 amendment) after its resume block fell below the
+/// node's pruning point: (1) the node must no longer know the resume block (else: resume
+/// normally); (2) the new block is the node's sink, chosen first; (3) then every live
+/// instance UTXO and every entry at their addresses (plus `extra`) is read from the
+/// utxoindex and checked by `check_unchanged` (a UTXO spent after (2) is missing, so the
+/// check is conservative). `write`: record the line in the index (`apply_reanchor`), else
+/// only return it (a read-only check).
+pub async fn reanchor<C: RpcApi + ?Sized>(c: &C, x: &mut Indexer, node_url: &str, extra: &[kaspa_addresses::Address], now: u64, write: bool) -> Result<(ReanchorLine, Unchanged), String> {
+    if let Ok(b) = c.get_block(x.last, false).await {
+        return Err(format!("re-anchor refused: the node still knows the resume block {} (DAA {}); resume normally", x.last, b.header.daa_score));
+    }
+    let sink = c.get_block_dag_info().await.map_err(|e| e.to_string())?.sink;
+    let new_daa = c.get_block(sink, false).await.map_err(|e| e.to_string())?.header.daa_score;
+    let mut addrs: Vec<kaspa_addresses::Address> = vec![];
+    let mut seen: HashSet<String> = HashSet::new();
+    for l in x.ix.live().values() {
+        let a = kaspa_txscript::extract_script_pub_key_address(&l.spk, kaspa_addresses::Prefix::Testnet).map_err(|e| format!("live {}: {e}", l.outpoint))?;
+        if seen.insert(a.to_string()) {
+            addrs.push(a);
+        }
+    }
+    for a in extra {
+        if seen.insert(a.to_string()) {
+            addrs.push(a.clone());
+        }
+    }
+    if let Some(a) = addrs.iter().find(|a| a.prefix != kaspa_addresses::Prefix::Testnet) {
+        return Err(format!("{a} is not a testnet address; refusing"));
+    }
+    let mut node: Vec<NodeUtxo> = vec![];
+    for chunk in addrs.chunks(50) {
+        let v = c.get_utxos_by_addresses(chunk.to_vec()).await.map_err(|e| format!("get_utxos_by_addresses: {e}"))?;
+        node.extend(v.iter().map(NodeUtxo::of));
+    }
+    let u = check_unchanged(x.ix.live(), x.cov, &node)?;
+    let line = ReanchorLine {
+        kind: REANCHOR.into(),
+        at: x.lines.len() as u64,
+        old_block: x.last.as_bytes(),
+        old_daa: x.last_daa,
+        new_block: sink.as_bytes(),
+        new_daa,
+        node: node_url.into(),
+        live_checked: u.live_checked as u64,
+        wall_time: now,
+        argument: REANCHOR_ARGUMENT.into(),
+    };
+    if write {
+        x.apply_reanchor(line.clone())?;
+    }
+    Ok((line, u))
 }
 
 /// Deletion evidence for block `h` (A4): `Some(what the node returned)` if the node no
@@ -460,5 +684,117 @@ mod tests {
         x.ingest(ChainBatch { removed: vec![Hash::from_bytes([3; 32])], added: vec![block(4, 31, vec![])] }).unwrap();
         assert_eq!(x.accepted_at(&b.id()), None, "its block was removed");
         assert!(x.lines().is_empty());
+    }
+
+    // ---- M8 S4 re-anchor
+
+    const COV: [u8; 32] = [9; 32];
+
+    fn live_set() -> HashMap<TransactionOutpoint, Live> {
+        (1..=3u8)
+            .map(|n| {
+                let op = TransactionOutpoint::new(Hash::from_bytes([n; 32]), n as u32);
+                let l = Live { outpoint: op, role: lottery::index::Role::Ticket, value: 400_000_000 + n as u64, daa: 598_642_000 + n as u64, spk: ScriptPublicKey::from_vec(0, vec![0xaa, 0x20, n, 0x87]), state: None };
+                (op, l)
+            })
+            .collect()
+    }
+
+    fn node_of(live: &HashMap<TransactionOutpoint, Live>) -> Vec<NodeUtxo> {
+        live.values().map(|l| NodeUtxo { outpoint: l.outpoint, amount: l.value, spk: l.spk.clone(), daa: l.daa, covenant_id: Some(Hash::from_bytes(COV)) }).collect()
+    }
+
+    /// Unchanged live set: accepted (a foreign payment to an instance address is counted,
+    /// not refused). One live UTXO spent, one with another DAA, value or script, or an
+    /// instance-bound UTXO the index does not know: refused.
+    #[test]
+    fn reanchor_check_unchanged_missing_changed_unknown() {
+        let cov = Hash::from_bytes(COV);
+        let live = live_set();
+        let mut node = node_of(&live);
+        let first = live.values().next().unwrap().clone();
+        node.push(NodeUtxo { outpoint: TransactionOutpoint::new(Hash::from_bytes([7; 32]), 0), amount: 1_000, spk: first.spk.clone(), daa: 600_000_000, covenant_id: None });
+        let u = check_unchanged(&live, cov, &node).unwrap();
+        assert_eq!(u, Unchanged { live_checked: 3, node_entries: 4, foreign: 1 });
+
+        let mut spent = node_of(&live);
+        spent.retain(|n| n.outpoint != first.outpoint);
+        let e = check_unchanged(&live, cov, &spent).unwrap_err();
+        assert!(e.contains("spent or unknown to the node") && e.contains("1 problem"), "{e}");
+
+        for edit in [
+            (|n: &mut NodeUtxo| n.daa += 1) as fn(&mut NodeUtxo),
+            |n: &mut NodeUtxo| n.amount -= 1,
+            |n: &mut NodeUtxo| n.spk = ScriptPublicKey::from_vec(0, vec![0x51]),
+            |n: &mut NodeUtxo| n.covenant_id = None,
+        ] {
+            let mut changed = node_of(&live);
+            edit(&mut changed[0]);
+            let e = check_unchanged(&live, cov, &changed).unwrap_err();
+            assert!(e.contains("!= index"), "{e}");
+        }
+
+        let mut unknown = node_of(&live);
+        unknown.push(NodeUtxo { outpoint: TransactionOutpoint::new(Hash::from_bytes([8; 32]), 1), amount: 5, spk: first.spk.clone(), daa: 605_000_000, covenant_id: Some(cov) });
+        let e = check_unchanged(&live, cov, &unknown).unwrap_err();
+        assert!(e.contains("bound to the instance but unknown to the index"), "{e}");
+    }
+
+    fn line(x: &Indexer, new: u8, new_daa: u64) -> ReanchorLine {
+        ReanchorLine {
+            kind: REANCHOR.into(),
+            at: x.lines().len() as u64,
+            old_block: x.last.as_bytes(),
+            old_daa: x.last_daa,
+            new_block: [new; 32],
+            new_daa,
+            node: "wss://example.invalid/testnet-10".into(),
+            live_checked: 3,
+            wall_time: 1_792_900_000,
+            argument: REANCHOR_ARGUMENT.into(),
+        }
+    }
+
+    /// The re-anchor line is written to both files; a reopened index resumes from the new
+    /// block (also when the snapshot still names the old one, a crash between the two
+    /// writes); a line that does not continue the index is refused.
+    #[test]
+    fn reanchor_persists_and_resumes_from_the_new_block() {
+        let dir = std::env::temp_dir().join(format!("tn10-reanchor-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = Templates::get(lottery::buy::b_max());
+        let cov = Hash::from_bytes(COV);
+        let mut x = Indexer::open(Some(&dir), t.clone(), cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        x.ingest(ChainBatch { removed: vec![], added: vec![block(2, 20, vec![plain_tx(1)])] }).unwrap();
+        x.persist().unwrap();
+        assert!(x.apply_reanchor(ReanchorLine { old_block: [5; 32], ..line(&x, 50, 5_000) }).unwrap_err().contains("does not continue"));
+        assert!(x.apply_reanchor(line(&x, 50, 20)).unwrap_err().contains("not above"));
+        x.apply_reanchor(line(&x, 50, 5_000)).unwrap();
+        assert_eq!((x.last, x.last_daa), (Hash::from_bytes([50; 32]), 5_000));
+        let text = fs::read_to_string(dir.join(LOG_FILE)).unwrap();
+        assert!(text.lines().nth(1).unwrap().starts_with("{\"kind\":\"reanchor\""), "{text}");
+        let snap: IndexSnapshot = store::read(&fs::read_to_string(dir.join(SNAPSHOT_FILE)).unwrap(), store::INDEX).unwrap();
+        assert_eq!((snap.last_chain_block, snap.last_chain_daa, snap.reanchors.len()), (Some([50; 32]), Some(5_000), 1));
+        let y = Indexer::open(Some(&dir), t.clone(), cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        assert_eq!((y.last, y.last_daa, y.reanchors().len()), (Hash::from_bytes([50; 32]), 5_000, 1));
+        // A crash after the log line, before the snapshot: the snapshot names the old block.
+        let mut old = snap.clone();
+        old.last_chain_block = Some([2; 32]);
+        old.last_chain_daa = Some(20);
+        old.reanchors.clear();
+        write_atomic(&dir.join(SNAPSHOT_FILE), &store::write(&old, store::INDEX).unwrap()).unwrap();
+        let z = Indexer::open(Some(&dir), t, cov, None, Hash::from_bytes([1; 32]), 10).unwrap();
+        assert_eq!((z.last, z.last_daa), (Hash::from_bytes([50; 32]), 5_000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transient_node_failures_are_retried_pruning_is_not() {
+        for e in ["RPC request timeout", "WebSocket disconnected", "websocket error: Connection reset by peer", "not connected", "connection closed"] {
+            assert!(transient(e), "{e}");
+        }
+        for e in ["RPC Server (remote error) -> cannot find header e0a6", "the queried hash does not have retention root on its chain", "v2: 3 added chain blocks but 2 acceptance entries", "log line 4: rebuilt state differs"] {
+            assert!(!transient(e), "{e}");
+        }
     }
 }

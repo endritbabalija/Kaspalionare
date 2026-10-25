@@ -463,11 +463,53 @@ impl IndexLogLine {
     }
 }
 
-/// `index-log.jsonl`: a header line, then the lines in `seq` order 0, 1, 2, ...
+/// The `kind` of a re-anchor line.
+pub const REANCHOR: &str = "reanchor";
+
+/// A re-anchor line of `index-log.jsonl` (M8 S4, PENDING A4 amendment). The indexer's
+/// resume block `old_block` had fallen below every node's pruning point, so the index was
+/// moved to `new_block` after a check on `node` that each of the `live_checked` live
+/// instance UTXOs was still unspent with the same script, value and creation DAA, and that
+/// the node returned no instance-bound UTXO the index did not know (`argument` says why
+/// that proves there was no instance transaction in the gap). It changes no index state;
+/// `at` is the number of add/remove lines before it (their `seq` stays 0, 1, 2, ...). A
+/// reader of an older `index/1` refuses the line (unknown `kind`) instead of skipping it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReanchorLine {
+    pub kind: String,
+    pub at: u64,
+    #[serde(with = "hex")]
+    pub old_block: [u8; 32],
+    /// The old block's DAA score as the index recorded it (snapshots before M8 S4 did not
+    /// store it: then the DAA of the newest logged transaction, a lower bound).
+    pub old_daa: u64,
+    #[serde(with = "hex")]
+    pub new_block: [u8; 32],
+    pub new_daa: u64,
+    pub node: String,
+    pub live_checked: u64,
+    /// Unix seconds of the check.
+    pub wall_time: u64,
+    pub argument: String,
+}
+
+impl ReanchorLine {
+    /// This line as one JSON line (no newline); `kind` must be `reanchor`.
+    pub fn to_line(&self) -> Result<String, String> {
+        if self.kind != REANCHOR {
+            return Err(format!("re-anchor line: kind {:?} is not {REANCHOR:?}", self.kind));
+        }
+        write_line(self)
+    }
+}
+
+/// `index-log.jsonl`: a header line, then the add/remove lines in `seq` order 0, 1, 2, ...,
+/// with the re-anchor lines among them (each after the `at` add/remove lines before it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexLog {
     pub cov: Hash,
     pub lines: Vec<IndexLogLine>,
+    pub reanchors: Vec<ReanchorLine>,
 }
 
 impl IndexLog {
@@ -479,8 +521,17 @@ impl IndexLog {
     pub fn to_jsonl(&self) -> Result<String, String> {
         let mut s = write_line(&IndexLogHeader { format: INDEX.into(), cov: self.cov.as_bytes() })?;
         s.push('\n');
-        for l in &self.lines {
+        let mut ra = self.reanchors.iter().peekable();
+        for (i, l) in self.lines.iter().enumerate() {
+            while let Some(r) = ra.next_if(|r| r.at <= i as u64) {
+                s.push_str(&r.to_line()?);
+                s.push('\n');
+            }
             s.push_str(&write_line(l)?);
+            s.push('\n');
+        }
+        for r in ra {
+            s.push_str(&r.to_line()?);
             s.push('\n');
         }
         Ok(s)
@@ -492,11 +543,27 @@ impl IndexLog {
         let v: Value = serde_json::from_str(head).map_err(|e| e.to_string())?;
         check_format(&v, INDEX)?;
         let h: IndexLogHeader = read_line(head)?;
-        let lines: Vec<IndexLogLine> = it.map(read_line).collect::<Result<_, _>>()?;
+        let mut lines: Vec<IndexLogLine> = vec![];
+        let mut reanchors: Vec<ReanchorLine> = vec![];
+        for l in it {
+            let v: Value = serde_json::from_str(l).map_err(|e| e.to_string())?;
+            if v.get("kind").and_then(Value::as_str) == Some(REANCHOR) {
+                let r: ReanchorLine = read_line(l)?;
+                if r.at != lines.len() as u64 {
+                    return Err(format!("index log: a re-anchor line after {} add/remove lines says at = {}", lines.len(), r.at));
+                }
+                if reanchors.last().is_some_and(|p| p.at == r.at && p.new_block != r.old_block) {
+                    return Err("index log: consecutive re-anchor lines do not chain (old block != the previous new block)".into());
+                }
+                reanchors.push(r);
+            } else {
+                lines.push(read_line(l)?);
+            }
+        }
         if let Some((i, l)) = lines.iter().enumerate().find(|(i, l)| l.seq != *i as u64) {
             return Err(format!("index log: line {i} has seq {}", l.seq));
         }
-        Ok(Self { cov: Hash::from_bytes(h.cov), lines })
+        Ok(Self { cov: Hash::from_bytes(h.cov), lines, reanchors })
     }
 
     /// The index the log describes: `add` lines applied in order, each `remove` line
@@ -505,7 +572,9 @@ impl IndexLog {
     /// (and so are their removals). `cov` is the covenant ID the caller verified (the launch
     /// bundle's, `bundle::verify`); the header's is only a label and must equal it (S2d: a
     /// header naming another instance would otherwise skip every line as foreign and
-    /// rebuild an empty index, silently).
+    /// rebuild an empty index, silently). Re-anchor lines change no state: the index after
+    /// one is the index before it (the line is the logged proof that no instance
+    /// transaction happened in the skipped chain range; M8 S4).
     pub fn rebuild(&self, t: Arc<Templates>, cov: Hash, genesis: Option<Vec<State>>) -> Result<Rebuild, String> {
         if self.cov != cov {
             return Err(format!("index log: header covenant ID {} is not the verified instance's {cov}", self.cov));
@@ -619,6 +688,12 @@ pub struct IndexSnapshot {
     /// Instance-wide missed transitions (`Rebuild::gaps`, S2c should-fix 4); a round's own
     /// are in its `gaps`.
     pub gaps: Vec<String>,
+    /// The log's re-anchor lines (M8 S4; absent from older snapshots).
+    #[serde(default)]
+    pub reanchors: Vec<ReanchorLine>,
+    /// The DAA score of `last_chain_block` (M8 S4; absent from older snapshots).
+    #[serde(default)]
+    pub last_chain_daa: Option<u64>,
 }
 
 impl IndexSnapshot {
@@ -671,6 +746,8 @@ impl IndexSnapshot {
             rounds,
             live_utxos: live,
             gaps: ix.gaps().to_vec(),
+            reanchors: vec![],
+            last_chain_daa: None,
         }
     }
 }

@@ -318,6 +318,52 @@ pub struct Node {
     pub addr: Address,
     pub url: String,
     pub to: anchor::Timeouts,
+    /// `TN10_WRPC_URL`, or `None` for the public resolver (used again on a reconnect).
+    pub cfg_url: Option<String>,
+}
+
+/// Index catch-up retries after a node or connection failure (M8 S4).
+pub const POLL_RETRIES: usize = 12;
+
+/// The wait before retry `n` (1-based): 5 s doubling, at most 120 s.
+pub fn retry_backoff(n: usize) -> u64 {
+    (5u64 << n.saturating_sub(1).min(5)).min(120)
+}
+
+impl Node {
+    /// A fresh connection (through the resolver unless `TN10_WRPC_URL` is set, so usually
+    /// another public node); the network guard of `net::connect` applies again.
+    pub async fn reconnect(&mut self) -> R<()> {
+        let _ = self.client.disconnect().await;
+        let c = net::connect(self.cfg_url.clone()).await?;
+        self.url = c.url().unwrap_or_default();
+        self.client = c;
+        Ok(())
+    }
+
+    /// `indexer::poll` with bounded retries on node or connection failures (M8 S4): each
+    /// batch is persisted as it is ingested, so a retry resumes from the last saved
+    /// position on a new connection; the events of batches before the failure are kept.
+    /// A non-transient error (a pruned resume block) stops at once.
+    pub async fn poll_retry(&mut self, x: &mut Indexer) -> R<indexer::PollStats> {
+        let mut st = indexer::PollStats::default();
+        let mut n = 0;
+        loop {
+            match indexer::poll_into(&self.client, x, &mut st).await {
+                Ok(()) => return Ok(st),
+                Err(e) if indexer::transient(&e) && n < POLL_RETRIES => {
+                    n += 1;
+                    let w = retry_backoff(n);
+                    println!("  indexer: {e}; retry {n}/{POLL_RETRIES} in {w} s on a new connection (resume block {}, DAA {})", x.last, x.last_daa);
+                    tokio::time::sleep(std::time::Duration::from_secs(w)).await;
+                    if let Err(c) = self.reconnect().await {
+                        println!("  indexer: reconnect failed: {c}");
+                    }
+                }
+                Err(e) => return Err(if n > 0 { format!("{e} (after {n} retries)") } else { e }),
+            }
+        }
+    }
 }
 
 impl Net for Node {
@@ -361,7 +407,7 @@ impl Net for Node {
         self.client.submit_transaction(RpcTransaction::from(&f.tx), false).await.map(|_| ()).map_err(|e| e.to_string())
     }
     async fn sync(&mut self, x: &mut Indexer) -> R<Synced> {
-        let p = indexer::poll(&self.client, x).await?;
+        let p = self.poll_retry(x).await?;
         Ok((p.events, p.reverted))
     }
     async fn wait_accepted(&mut self, x: &mut Indexer, ids: &[TransactionId]) -> R<Synced> {
@@ -372,7 +418,7 @@ impl Net for Node {
         let mut evs = vec![];
         let mut reverted = 0;
         loop {
-            let p = indexer::poll(&self.client, x).await?;
+            let p = self.poll_retry(x).await?;
             evs.extend(p.events);
             reverted += p.reverted;
             let left: Vec<_> = ids.iter().filter(|i| x.accepted_at(i).is_none()).collect();
@@ -2204,7 +2250,10 @@ impl<N: Net> Runner<N> {
         }
         // S4 owner note: the claim is built from the wallet store and from the indexer store,
         // compared, and the indexer-built one is submitted (A7: both items).
-        let n = self.claims(s, &format!("C8/r{r}"), r, ClaimFrom::Both, false, 1).await?;
+        // Owner decision 2026-10-25 (round 8 closed past the U6 bound, D102): every winning
+        // index of ours is claimed in this sitting, before the tickets' return_deposit_after
+        // opens (T + D_RET), each with the dual build and comparison.
+        let n = self.claims(s, &format!("C8/r{r}"), r, ClaimFrom::Both, false, usize::MAX).await?;
         let how = |what: &str| if n > 0 { format!("exercised ({what}; see the dual-claim check)") } else { format!("not exercised: no winning round-{r} holding of ours (luck)") };
         self.check(s, "A7: a claim from wallet-kept trees > 30 h later", true, how("built from the wallet store, identical to the submitted one")).await?;
         self.check(s, "A7: a claim from the indexer copy", true, how("the indexer-built claim was submitted")).await?;
@@ -2226,9 +2275,52 @@ impl<N: Net> Runner<N> {
         Ok(())
     }
 
+    /// M8 S4: log a re-anchor (`tn10 campaign reanchor`) as a check of the current step.
+    pub async fn record_reanchor(&mut self, l: &store::ReanchorLine, u: &indexer::Unchanged) -> R<()> {
+        let step = self.c.step.clone();
+        let detail = format!(
+            "old block {} (DAA {}) -> new block {} (DAA {}) on {}; {} live instance UTXOs unchanged, no unknown instance-bound UTXO ({} node entries, {} not instance-bound); argument: {}",
+            hex(&l.old_block),
+            l.old_daa,
+            hex(&l.new_block),
+            l.new_daa,
+            l.node,
+            u.live_checked,
+            u.node_entries,
+            u.foreign,
+            l.argument
+        );
+        self.check(&step, &format!("indexer re-anchored after the pruning window (DAA {})", l.new_daa), true, detail).await
+    }
+
+    /// One index catch-up to the node's sink (with the wallet feed).
+    pub async fn catch_up(&mut self) -> R<()> {
+        self.sync().await?;
+        let x = self.x()?;
+        println!("indexer caught up: last chain block {} (DAA {})", x.last, x.last_daa);
+        Ok(())
+    }
+
     /// The report (C7): every step, its transactions and checks.
     pub fn report(&self) -> R<String> {
         let mut t = format!("# M8 campaign report ({})\n\ncovenant ID `{}`; node {}\n\n", if self.net.dry() { "DRY RUN, nothing submitted" } else { "testnet-10" }, hex(&self.cov()?.as_bytes()), self.net.node());
+        if let Some(x) = self.x.as_ref().filter(|x| !x.reanchors().is_empty()) {
+            t.push_str("## Index re-anchors (M8 S4)\n\n");
+            for r in x.reanchors() {
+                t.push_str(&format!(
+                    "- after {} log lines: `{}` (DAA {}) -> `{}` (DAA {}) on {}, {} live instance UTXOs unchanged, wall {}\n",
+                    r.at,
+                    hex(&r.old_block),
+                    r.old_daa,
+                    hex(&r.new_block),
+                    r.new_daa,
+                    r.node,
+                    r.live_checked,
+                    r.wall_time
+                ));
+            }
+            t.push('\n');
+        }
         for st in &self.c.steps {
             t.push_str(&format!("## {} (DAA {}, wall {})\n\n", st.id, st.daa, st.wall_time));
             for k in &st.checks {
@@ -2468,5 +2560,14 @@ mod tests {
         let win = [s.main[0], s.main[1], s.main[2], s.main[3], s.main[4], s.bonus];
         assert!(combos.iter().any(|c| lottery::game::tier_of(c, &win).is_some()), "after {tries} tries");
         assert_eq!(xh[0] & 1, 1);
+    }
+
+    /// M8 S4: the catch-up retries are bounded (12, about 17 min of waits in all).
+    #[test]
+    fn poll_retry_backoff_is_bounded() {
+        let w: Vec<u64> = (1..=POLL_RETRIES).map(retry_backoff).collect();
+        assert_eq!(&w[..7], &[5, 10, 20, 40, 80, 120, 120]);
+        assert!(w.iter().all(|&s| s <= 120));
+        assert_eq!(w.iter().sum::<u64>(), 5 + 10 + 20 + 40 + 80 + 120 * 7);
     }
 }

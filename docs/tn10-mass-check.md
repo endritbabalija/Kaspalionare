@@ -942,6 +942,59 @@ The refused transactions are in the table above. Fan-outs and fresh funding tran
 - C6/close r6 `80e35d62fb42851c2982f8ef0e1e74402099add10b292f150e8a81c2d84997d0` (proton-10.kaspa.stream, chain DAA 598,619,963)
 - C6/draw r6 `98ce1ffe76f1ca4688227c20a6d3c76b95ab8e1b63ab6771eec3c1ea4a584a1d` (proton-10.kaspa.stream, chain DAA 598,620,662)
 
+## M8 S4: 30-hour soak C8a-C8c, mode B (spec 8 A5 C8, D117; 2026-10-17 to 2026-10-25)
+
+Same instance as the fast campaign: covenant ID `e9f4f810c86467e7768aa1b42e6c62182b8a0d934bda922bdbb2804f223988d6`. Soak round **8**, deadline T = DAA 598,647,336.
+
+### Sittings
+
+| Sitting | When (local) | Result |
+|---|---|---|
+| 1, C8a | 2026-10-17 02:50-03:00 | round 7 closed `db81b784c9a7e94f68512819a23b29286ec5e901477b2c312143e11fd43813f7` and drawn empty `6ea01d94c4681c50b9c7e3f67f2c7b7970dd94b41ff8ecb20374f7d413d775c8`; 75 buys (b = 4) in round 8; t0 = 02:58:30 (first buy `c508432c397c56a0060b3f52735aac71ef918d5e360d7c62d0faad0871daef2d`, chain DAA 598,642,246, chain block `e0a62803c331902af3c429c0936bfc84244dc7c1fe4efbfcfaf7c435248257d5`) |
+| 2, C8b | 2026-10-17 14:31 | indexer caught up inside the pruning window (chain block `e0953ebf…e4b5`, DAA 599,058,255), 0 transactions; about 25 min for about 417,000 DAA |
+| 3, first try | 2026-10-18 ~20:00-21:01 | never reached the close: public nodes timed out on long `get_virtual_chain_from_block_v2` catch-up calls, then the run was killed for low memory. Nothing submitted |
+| 3, C8c | 2026-10-25 02:30-02:33 CEST | re-anchor, close, deletion evidence, draw from the indexer store, four claims (dual build), refresh; 12 checks, 0 failed |
+
+### Re-anchor (PENDING A4 amendment)
+
+By 25 Oct the saved resume block `e2f2ddcfbea137fb31e7e5aeece693944354555abc00f8731472462313d1cf70` was below every node's pruning point (`boson-10.kaspa.red`: "cannot find header"; pruning point DAA 604,298,078, 34.3 h back, virtual DAA 605,531,267). `tn10 campaign reanchor` (wss://vector-10.kaspa.green/kaspa/testnet-10/wrpc/borsh, wall 1,792,888,212) picked the sink first, then read the utxoindex (`get_utxos_by_addresses`): **all 380 live instance UTXOs unchanged** (script, value, creation DAA, covenant ID); 578 entries at their addresses and ours, 198 not instance-bound, **no unknown instance-bound UTXO**. The `index/1` record (log line 406, `at` 405):
+
+- old block `e2f2ddcf…cf70`, old_daa 598,642,669 (the newest logged transaction; the snapshot of that time did not store the block's own DAA, about 600.02 M);
+- new block `1c6f6873fb149b31523f3355e049ee1e3e89d68650b2541a8ffed76696af6f72`, DAA 605,547,454;
+- argument: KIP-20 (`refs/kips/kip-0020.md:25-27, 33`) lets an output carry the instance covenant ID only by spending a UTXO with that ID (or by a genesis over a unique outpoint), so every instance transaction spends an instance UTXO; an unchanged live set means no instance transaction happened between the two blocks.
+
+The catch-up from the new block took seconds (chain block `428c66ff…d25e`, DAA 605,547,467). Round 8's buys were indexed on 17 Oct and their trees were in both stores, so the soak evidence does not depend on the gap.
+
+### C8c transactions (all through wss://electron-10.kaspa.blue/kaspa/testnet-10/wrpc/borsh; accepting chain DAA)
+
+- fresh funding `dfe3ea7397a80196688d0c7185b8a5402bbdc7721223e8f236e295c310065812` (10 KAS, plain)
+- close r8 `6e9ddf5bb426a45f235e5b5f181e6d50388fe40089c9dcdb4cae626f0a4d2b9b` (605,547,994; fee 0.4323 KAS): round 9 m' = 2, s_R = 500; wallet and indexer roots = the frozen roots
+- draw r8 from the **indexer** store `a08b156fb90063e62da8a760b3afbcf0a58bf3c16dee9d2268075dba1a8eed6c` (605,548,738; fee 0.2215 KAS): D = 605,548,594, anchor X `204c2a2a3d6bcda377600b272d2990b0480520253e11775de22e7eb9bb0b2a7e` (DAA 605,548,594), P `9277a7f7…86d9`; conversion and record = model (D124); fee output paid to round 9's fee address; win [2, 6, 8, 13, 17] + 2; pools tier 2 13.69, tier 3 10.69, tier 4 10.69 KAS
+- claims, each built from the wallet store and from the indexer store, identical except the funding signature (same txid; 2 covenant inputs and all 3 outputs equal), the indexer-built one submitted; all tier 4, h 1, prize 0.003 KAS, ACCRUE:
+  - `43fb4cf3c4405e61ddb6e50c4af5e250f7c91348f5b5aa412f8b71f833f8b37f` (605,548,761)
+  - `2e9508db40615cfd8c955cd42112a9bf574b6edb85b001faf4254538909f97be` (605,548,883)
+  - `69744d6a4017bcdf0bc7fb2b1e8dbfe51f9045d2f4ee56f2ba4abac1cdd55f90` (605,548,940)
+  - `31deb51166dfe2919160f8971f3fcc5ec19fd3c2f976e8b0f30f709222e438af` (605,549,055)
+- refresh of the oldest round-8 ticket (idle about 8 days) `d9886d26a583c208586ff8b19ad2c271724bcd0550867dc558af648aac5d6d60` (605,549,110; fee 0.0769 KAS)
+
+### Deletion evidence (D117)
+
+Before the draw, the runner's check: `get_block(e0a62803c331902af3c429c0936bfc84244dc7c1fe4efbfcfaf7c435248257d5)` failed with "RPC Server (remote error) -> cannot find header" (the chain block that accepted round 8's first buy). The same block was already refused by `boson-10.kaspa.red` at 02:04 CEST. The draw and the claims were built about 192 h after the buys (D117 needs more than 30 h).
+
+### A7 items
+
+Both are exercised: a claim from wallet-kept trees more than 30 h later, and a claim from the indexer copy (four dual-built claims, the indexer-built ones submitted). The C5c "claim from the indexer copy" that luck skipped in S3b is covered here.
+
+### Late-close finding (U6, D102; owner accepted 2026-10-25)
+
+The latest close of round 8 that keeps its pools' claim deadline at or before the tickets' `return_deposit_after` (T + D_RET = 610,743,336; `ticket.sil:379`, D_RET 12,096,000) was DAA 610,743,336 − (600 + 864,000 + 6,048,000) = **603,830,736** (about 23 Oct). The close came at 605,547,994, so round 8's claim deadline is D + 6,912,000 = 612,460,594. From about 31 Oct until that deadline, anyone could return an unclaimed winning round-8 ticket and the prize would be lost. Every round-8 ticket is ours, and every winning index was claimed in this sitting, so nobody lost anything. D102's bound is reachable through a late close alone, with no missed draw (PENDING row in the M8 handoff).
+
+### Spend and timing
+
+Sitting 3 cost about 1.05 tKAS in fees. The balance after it is 5,819.01 tKAS, so **890.54 tKAS spent or locked** since the start (cap 950). That is 11.87 tKAS more than the 5,807.14 recorded after sitting 1, probably the draw's fee output (s_F of round 8's sales) paid to our fee address (not verified).
+
+Timing: a catch-up of about 29 h through public nodes needs many retries. Single long v2 calls hit the wRPC client's fixed 60 s request timeout, and WebSockets drop. The runner now retries up to 12 times on a fresh resolver connection and resumes from the last saved batch. Sitting 2 should sit late in its window, and sitting 3 must keep the close inside the U6 bound (here at most T + 6 days).
+
 ## M8 S4: private simnet, forced jackpot, duplicate and second prize (SN1-SN5; spec 8 A5b, D114, D125; 2026-10-17)
 
 **Simnet only. Not a testnet-10 or mainnet result, and not a mainnet cost.** Each scenario ran on its own fresh in-process rusty-kaspa v2.1.0 node (`--simnet`, no peers, inbound 0, no DNS seeding or UPnP, Borsh wRPC on 127.0.0.1 only, fresh data directory under `crates/target/simnet-data/`). The runner was the only miner. It used the production templates (`Templates::get(b_max())`, `short_void_window = false`) and no test-only game or seed variant. Every lottery transaction was built by the `lottery` builders, run first in the local v2.1.0 engine, with each covenant input's entry compared to the node's UTXO-index entry, then sent with `submit_transaction` and mined from the node's own templates. The one block the runner changed is the anchor X: the template at DAA D (its selected parent, the sink, at D − 1), with only the nonce changed. That block was hashed locally (`hashing::header::hash_override_nonce_time`, `refs/rusty-kaspa-v2.1.0/consensus/core/src/hashing/header.rs:5-35`), and simnet skips proof of work (`consensus/core/src/config/params.rs:737`). After 50 more blocks, `tn10/src/anchor.rs` rebuilt and self-checked the 272-byte proof from RPC (`get_seq_commit_lane_proof`), unchanged, and its X equalled the ground block. Command (from `crates/`, with `LIBCLANG_PATH` and `PROTOC` set): `cargo run -j 2 -p simnet --release -- all` (or `sn1` … `sn5`). The run below is `all`, 14.9 s in total, with node data in `simnet-data/1792200531729`, `…535455`, `…539112` and `…542495`. Every draw, claim and settle output value equalled the model (`DrawCase::expected`, `ClaimCase::expected`, `SettleCase::expected`). Each round result's X.hash and winning numbers equalled `game::seed_numbers` of the ground header. All four held main numbers are [6, 10, 22, 25, 27] (colex rank 77,777). K = 16, price 1 KAS, cap 2,000 bp.
