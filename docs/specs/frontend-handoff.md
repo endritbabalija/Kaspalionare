@@ -1,6 +1,6 @@
 # Front-end track: build handoff
 
-Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D137). Delete this file when the track closes and its content is in `docs/DECISIONS.md`.
+Spec: `docs/specs/frontend.md` (approved 2026-10-25, D129–D139). Delete this file when the track closes and its content is in `docs/DECISIONS.md`.
 
 ## How the build session works
 

@@ -219,7 +219,7 @@ Done when:
 - the verdict (S3), s, N, W_c and fees per round are DECISIONS rows and update outline 5.1; `covenant-reviewer` has checked the probes and tests.
 
 ## Track — Web front end, testnet-10 beta (alongside M8)
-Status: spec approved 2026-10-25 (`docs/specs/frontend.md`, D129–D137); not started. Implementation in a fresh chat, stages F0–F6, each a fresh agent, handoff `docs/specs/frontend-handoff.md`.
+Status: spec approved 2026-10-25 (`docs/specs/frontend.md`, D129–D139); not started. Implementation in a fresh chat, stages F0–F6, each a fresh agent, handoff `docs/specs/frontend-handoff.md`.
 
 A phone-first web app, Kaspalionare: play, my tickets and claims, rounds with in-browser verification, run-the-round, the backer vault, how it works. The `lottery` builders run in the browser as wasm (`crates/web`); a read-only, untrusted indexer API (`crates/indexer-api`); wallet signing (KasWare, Kaspire) plus a quick testnet wallet. No covenant change. Testnet only.
 

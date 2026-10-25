@@ -1,6 +1,6 @@
 # Front end spec: the Kaspalionare web app (testnet-10 beta)
 
-Status: approved 2026-10-25 (owner, design session), with the owner's two build rules added (D137). Implementation in a fresh chat, stages F0–F6, handoff `docs/specs/frontend-handoff.md`. Decisions D129–D137 (section 11). Design references are to `docs/design.md` v0.4.1. rusty-kaspa paths are relative to `refs/rusty-kaspa-v2.1.0`.
+Status: approved 2026-10-25 (owner, design session), with the owner's build rules (D137), the draw cabinet (D138) and dark-first themes (D139) added the same day. Implementation in a fresh chat, stages F0–F6, handoff `docs/specs/frontend-handoff.md`. Decisions D129–D139 (section 11). Design references are to `docs/design.md` v0.4.1. rusty-kaspa paths are relative to `refs/rusty-kaspa-v2.1.0`.
 
 This is a track of its own, like the seed track. It runs alongside M8 and needs no covenant change. `docs/milestones.md` listed "any front end" as out of scope; D129 opens it for testnet only. Mainnet stays out of scope.
 
@@ -10,6 +10,8 @@ This is a track of its own, like the seed track. It runs alongside M8 and needs 
 - **Scope of the first version:** play (buy, my tickets, claim), the run-the-round buttons (`close()`, `draw()`), the backer vault page, the round explorer with verification, and a how-it-works page.
 - **Referral default:** referral links. With no link, the referral goes to the site owner's address.
 - **Feel:** calm, transparent, technical. The mock-up "Instrument panel" was approved as is: https://claude.ai/artifact/DiZopDGHYt1a74ZYvvyozv
+- **Theme (added the same day):** dark by default, light available. The site follows the device setting and has a switch (D139). Dark boards were added to the canvas.
+- **How it works (added the same day):** the draw-cabinet figure is the centrepiece (D138).
 - **Name:** Kaspalionare. English only. Phone first.
 - **Claims and deposit returns:** the player presses the button. There is no helper service.
 - **Signing:** both paths. The player's own wallet (KasWare, Kaspire) is the main path, plus a quick testnet wallet kept in the page.
@@ -114,7 +116,11 @@ Bottom navigation on a phone: **Play · My tickets · Rounds**. The menu holds *
 
 **S6 How it works.**
 - A plain-language explainer: the four functions, where the money goes (design 5.1 and 5.2 as a picture), why counts are frozen before the seed, the claim window, and what "verify" checks.
-- It reuses the isometric figures in `docs/figures/` (round machine, draw cabinet, shard rack) as static or interactive figures.
+- **Its centrepiece is the draw-cabinet figure** (`docs/figures/draw-cabinet/`, made with the `anatomy` skill), as its guided tour, in the theme that matches the page (D138). The figure is self-contained (SVG plus its own script, no network requests, about 610 KB uncompressed per variant), scales to phone width and respects reduced motion. Before it ships, F6 does three things:
+  1. **Real numbers.** The example round in `model.mjs` is computed by a JavaScript port of `game.rs` at the old margin of 11,700 (the floor has been 15,000 since D113). The numbers are instead generated from the Rust `lottery` code at build time (a small generator writes the model as JSON), so the figure cannot drift from the protocol. Section 1's no-second-copy rule then holds for the figure too.
+  2. **Rebuildable from a clean clone.** `build.mjs` imports the `anatomy` kit from `.claude/skills/anatomy/`, which is not committed. Either the kit is committed, or the built HTML is committed with a note that rebuilding needs the skill.
+  3. **Embedded in isolation.** The figure is served as its own file and shown in a titled frame on S6, loaded only when S6 opens. Its own CSP allows its inline module script by hash. Its colours are matched to the section 5 tokens in both themes.
+- The other figures (round machine, shard rack) may follow under the same three conditions.
 - It states the open release-gate items honestly: the seed's miner-withholding bias (D100) and that this is a testnet beta.
 
 **S7 Wallet sheet.**
@@ -151,18 +157,30 @@ Each component lists its states.
 ## 5. Visual design
 
 - **The approved mock-up is the reference:** https://claude.ai/artifact/DiZopDGHYt1a74ZYvvyozv
-- **Colours** (tokens):
+- **Themes (owner, D139):**
+  - Dark is the default look, and light is available.
+  - The site follows the device's colour-scheme setting. With no preference set, it shows dark.
+  - A theme switch in the menu (dark, light, device) overrides the setting and is remembered per browser.
+  - Both themes are designed, tested and shipped from the first stage that draws a screen (F3).
+- **Colours** (tokens; one file, one name per role, a value per theme):
 
-  | Token | Hex | Use |
-  |---|---|---|
-  | paper | #F6F6F3 | ground |
-  | ink | #15171A | text, selected |
-  | graphite | #565C63 | labels |
-  | rule | #DFE1DC | lines |
-  | teal | #0E7A70 | actions, links |
-  | mint | #74CDBF | wins, fill only |
-  | amber | #A14F08 | time, warnings |
-  | white | #FFFFFF | cards |
+  | Token | Dark (default) | Light | Use |
+  |---|---|---|---|
+  | ground | #0E1012 | #F6F6F3 | page background |
+  | surface | #16191C | #FFFFFF | cards, unpicked balls, secondary buttons |
+  | ink | #ECEEEA | #15171A | text; selected ball (dark: light ball, dark text) |
+  | on-ink | #0E1012 | #FFFFFF | text on an ink fill |
+  | graphite | #9AA1A8 | #565C63 | labels |
+  | rule | #2A2E33 | #DFE1DC | lines, card borders |
+  | rule-soft | #22262A | #ECEDEA | row dividers |
+  | control-line | #3A3F44 | #C9CCC6 | button and ball outlines |
+  | teal | #0E7A70 | #0E7A70 | primary buttons (white text) |
+  | link | #5CC8B8 | #0E7A70 | text links |
+  | mint | #74CDBF | #74CDBF | wins, fill only, with dark text |
+  | amber | #E59A4E | #A14F08 | time, warnings |
+  | status-open | #12332F / #7FD8CA | #E3F3F0 / #0A5C54 | Open pill (fill / text) |
+  | status-closing | #3A2A17 / #F0B27A | #F3EADF / #7E3E06 | Closing pill, testnet badge |
+  | status-drawn | #24282C / #ECEEEA | #E9EAE6 / #15171A | Drawn pill |
 
 - **Type:** Geist for text and Geist Mono for every number, hash and address. The fonts are served by the site itself: no third-party font requests.
 - **Rules:**
@@ -180,8 +198,7 @@ Each component lists its states.
 
      A fact the player needs becomes a value, not a sentence: the deposit row shows its return date ("back 2 Nov"), and the referral row shows its destination. Explanations live only on S6 How it works.
 - **The mock-up's colours, type and layout are the reference; its explanatory lines are not.** Rule 6 supersedes the explanatory lines in the mock-up: the footer note on Play, the referral paragraph, the deposit sentence and the notes under ticket results.
-- **Light mode at launch.** The tokens are built so a dark mode can be added later.
-- **Accessibility:** WCAG 2.1 AA contrast, touch targets of at least 44 px, real buttons and labels, keyboard use on desktop, and no meaning carried by colour alone (matched balls also carry a label for screen readers).
+- **Accessibility:** WCAG 2.1 AA contrast in both themes, touch targets of at least 44 px, real buttons and labels, keyboard use on desktop, and no meaning carried by colour alone (matched balls also carry a label for screen readers).
 
 ## 6. Architecture
 
@@ -346,7 +363,8 @@ Attack tests are written first for every check that guards money or data.
 - The same flows with KasWare and the quick wallet, run by hand with a written log (Kaspire too if F0 passes), on a beta instance with the fastest genesis knobs the floors allow (chosen with the owner in F6).
 
 **Quality:**
-- axe-core finds no serious or critical issues on S1–S8.
+- axe-core finds no serious or critical issues on S1–S8, in both themes.
+- The theme follows the device setting, defaults to dark with no preference, and the menu switch overrides it and is remembered (a Playwright check with emulated colour schemes).
 - **The copy pass:** every visible string on S1–S5, S7 and S8 is a figure, a name, a status, an error or a control label (rule 6). The list of strings is checked in the F6 review.
 - **The DX and AX checks** (1.1):
   - a fresh clone runs the site against simnet with one documented command;
@@ -365,7 +383,7 @@ Attack tests are written first for every check that guards money or data.
 - every journey J1–J7 has passed on testnet-10 with a logged transaction ID;
 - every test above passes in CI-equivalent local runs, with output shown;
 - the reviewers' must-fix items are fixed;
-- D129–D137 and any build decisions are rows in `docs/DECISIONS.md`;
+- D129–D139 and any build decisions are rows in `docs/DECISIONS.md`;
 - `docs/milestones.md` shows the track as done.
 
 ## 9. Build plan (implementation in a fresh chat; each stage a fresh agent, handoff `docs/specs/frontend-handoff.md`)
@@ -378,14 +396,14 @@ Attack tests are written first for every check that guards money or data.
 | F3 | `web/` shell with `web/CLAUDE.md`, the one-command simnet dev run, generated types and the component catalogue (1.1); tokens, components (section 4), wallet adapters with the post-sign check, local store, S1 Play and S7 | Buy works end to end on simnet with the quick wallet; post-sign attack tests pass |
 | F4 | S2 My tickets, claims, deposit return, S8 backup and import | Claim from the local copy with the API stopped, and from an imported backup, on simnet |
 | F5 | S3 Rounds, verify, S4 run the round (close, draw, void) | Simnet end-to-end suite green, including the doctored-API mismatch |
-| F6 | S5 Vault, S6 How it works; beta instance genesis on testnet-10; indexer server; Vercel deploy | Testnet-10 journeys J1–J7 logged; security review; records |
+| F6 | S5 Vault, S6 How it works with the draw cabinet and its three conditions (D138); beta instance genesis on testnet-10; indexer server; Vercel deploy | Testnet-10 journeys J1–J7 logged; security review; records |
 
 The F0 result can change F3: if the wallet path waits, the quick wallet carries the beta alone.
 
 ## 10. Out of scope
 
 - Mainnet and real money. A legal and compliance review is required before any real-money front end (operating a lottery is regulated in most places). It goes on the release gate.
-- Dark mode (the tokens are ready), languages other than English, native apps, and iPhone wallet support (no iOS wallet with a dApp API was found).
+- Languages other than English, native apps, and iPhone wallet support (no iOS wallet with a dApp API was found).
 - A claim or deposit-return helper service, notifications, email, and accounts.
 - A `refresh()` UI (the local copy keeps the ticket state; refresh stays a library function).
 - Ticket transfer, `set_params()` (the admin uses the existing tools), analytics, and SEO or a marketing site.
@@ -401,6 +419,8 @@ The F0 result can change F3: if the wallet path waits, the quick wallet carries 
 - **D135:** the look is "Instrument panel" (section 5, mock-up approved).
 - **D136:** claims and deposit returns are made by the player. No helper service.
 - **D137:** two owner rules for the build. Choose what improves UX, DX and AX together without breaking anything (1.1). The UI carries no taglines, helper text or secondary labels; if a screen needs them, fix the layout (section 5, rule 6).
+- **D138:** S6's centrepiece is the draw-cabinet figure, with its example round generated from the Rust code (not the JavaScript port at the old margin), a build that works from a clean clone, and isolated embedding (S6).
+- **D139:** dark is the default theme and light is available. The site follows the device setting, shows dark when there is none, and has a remembered switch in the menu. Both themes ship from F3 (section 5). Dark mock-ups were added to the approved canvas.
 
 ## 12. Risks and open items
 
