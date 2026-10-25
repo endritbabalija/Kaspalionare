@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F0 wallet probe</title>
+<style>
+  :root { --ground:#0E1012; --surface:#16191C; --ink:#ECEEEA; --graphite:#9AA1A8; --rule:#2A2E33; --teal:#0E7A70; --amber:#E59A4E; --mint:#74CDBF; }
+  body { background:var(--ground); color:var(--ink); font:15px/1.4 system-ui, sans-serif; margin:0; padding:16px; }
+  h1 { font-size:18px; margin:0 0 4px; } h2 { font-size:15px; margin:0 0 8px; }
+  .badge { display:inline-block; background:#3A2A17; color:#F0B27A; border-radius:4px; padding:1px 6px; font-size:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px; margin:12px 0; }
+  section { background:var(--surface); border:1px solid var(--rule); border-radius:8px; padding:12px; }
+  button { background:var(--teal); color:#fff; border:0; border-radius:6px; padding:10px 12px; margin:3px 2px; min-height:44px; font:inherit; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--ink); border:1px solid #3A3F44; }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin:4px 0; }
+  .label { color:var(--graphite); width:56px; font-size:13px; }
+  code, pre, .mono { font-family:ui-monospace, Consolas, monospace; font-size:12px; }
+  pre { background:#0B0D0F; border:1px solid var(--rule); border-radius:6px; padding:8px; white-space:pre-wrap; word-break:break-all; max-height:55vh; overflow:auto; margin:0; }
+  .ok { color:var(--mint); } .bad { color:var(--amber); }
+</style>
+</head>
+<body>
+<h1>F0 wallet probe <span class="badge">testnet-10</span></h1>
+<div class="mono" id="state" data-testid="state">loading</div>
+
+<div class="grid">
+  <section aria-labelledby="kw">
+    <h2 id="kw">KasWare</h2>
+    <div class="mono" id="kasware-status" data-testid="kasware-status">not connected</div>
+    <div class="row">
+      <button data-testid="kasware-switch" class="secondary" onclick="switchNet()">Switch to testnet-10</button>
+      <button data-testid="kasware-connect" onclick="connect('kasware')">Connect</button>
+    </div>
+    <div class="row"><span class="label">buy</span>
+      <button data-testid="kasware-buy-indices" onclick="run('kasware','buy','indices')">1 signPskt, P2PK indices</button>
+      <button data-testid="kasware-buy-nolist" onclick="run('kasware','buy','nolist')">2 signPskt, no list</button>
+      <button data-testid="kasware-buy-push" onclick="run('kasware','buy','push')">3 pushPskt</button>
+    </div>
+    <div class="row"><span class="label">close</span>
+      <button data-testid="kasware-close-indices" onclick="run('kasware','close','indices')">4 signPskt, P2PK indices</button>
+      <button data-testid="kasware-close-nolist" onclick="run('kasware','close','nolist')">5 signPskt, no list</button>
+      <button data-testid="kasware-close-push" onclick="run('kasware','close','push')">6 pushPskt</button>
+    </div>
+  </section>
+  <section aria-labelledby="kp">
+    <h2 id="kp">Kaspire</h2>
+    <div class="mono" id="kaspire-status" data-testid="kaspire-status">not connected</div>
+    <div class="row">
+      <button data-testid="kaspire-connect" onclick="connect('kaspire')">Connect</button>
+    </div>
+    <div class="row"><span class="label">buy</span>
+      <button data-testid="kaspire-buy-indices" onclick="run('kaspire','buy','indices')">1 signPskt, P2PK indices</button>
+      <button data-testid="kaspire-buy-nolist" onclick="run('kaspire','buy','nolist')">2 signPskt, no list</button>
+      <button data-testid="kaspire-buy-push" onclick="run('kaspire','buy','push')">3 signPskt + pushTx</button>
+    </div>
+    <div class="row"><span class="label">close</span>
+      <button data-testid="kaspire-close-indices" onclick="run('kaspire','close','indices')">4 signPskt, P2PK indices</button>
+      <button data-testid="kaspire-close-nolist" onclick="run('kaspire','close','nolist')">5 signPskt, no list</button>
+      <button data-testid="kaspire-close-push" onclick="run('kaspire','close','push')">6 signPskt + pushTx</button>
+    </div>
+  </section>
+</div>
+
+<pre id="out" data-testid="log" aria-live="polite"></pre>
+
+<script>
+"use strict";
+// KasWare: docs.kasware.xyz (kaspa-connection, kaspa-transaction). Kaspire:
+// kaspire.kaslab.space/developers/extension. Both read 2026-10-25.
+const NET = { kasware: "kaspa_testnet_10", kaspire: "testnet-10" };
+const conn = { kasware: null, kaspire: null };
+const prov = (w) => w === "kasware" ? window.kasware : window.kaspire;
+const out = document.getElementById("out");
+
+function show(text, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = new Date().toLocaleTimeString() + "  " + text;
+  out.prepend(line);
+}
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+}
+
+function errText(e) {
+  let raw = "";
+  try { raw = JSON.stringify(e, Object.getOwnPropertyNames(Object(e))); } catch (_) {}
+  return { error: String((e && (e.message || e.reason)) || e), raw };
+}
+
+async function refresh() {
+  try {
+    const s = await api("/api/state");
+    document.getElementById("state").textContent = s.instance
+      ? `instance ${s.instance} · DAA ${s.daa} · close() ${s.closed ? "done" : s.close_in_s > 0 ? "opens in ~" + s.close_in_s + " s" : "open"} · shards sold ${s.shards_used}/16`
+      : `DAA ${s.daa}`;
+  } catch (_) {}
+}
+setInterval(refresh, 3000); refresh();
+
+async function switchNet() {
+  const p = window.kasware;
+  if (!p) { show("KasWare not found in this browser", "bad"); return; }
+  try { await p.switchNetwork(NET.kasware); show("KasWare: switched to " + NET.kasware); }
+  catch (e) { const x = errText(e); show("KasWare switchNetwork: " + x.error, "bad"); api("/api/note", { text: "kasware switchNetwork failed: " + x.error, raw: x.raw }); }
+}
+
+async function checkNet(w) {
+  const p = prov(w);
+  const net = await p.getNetwork();
+  if (net !== NET[w]) throw new Error(`${w} is on ${net || "(none)"}, not ${NET[w]}`);
+  return net;
+}
+
+async function connect(w) {
+  const p = prov(w);
+  if (!p) { show(w + " not found in this browser", "bad"); api("/api/note", { text: w + " provider not injected" }); return; }
+  try {
+    const accounts = await p.requestAccounts();
+    const address = Array.isArray(accounts) ? accounts[0] : accounts;
+    const network = await p.getNetwork();
+    let publicKey = null;
+    try { publicKey = await p.getPublicKey(); } catch (_) {}
+    if (network !== NET[w] || typeof address !== "string" || !address.startsWith("kaspatest:")) {
+      const t = `${w}: refused: network ${network}, address ${address}`;
+      show(t, "bad"); api("/api/note", { text: t }); return;
+    }
+    const r = await api("/api/connect", { wallet: w, address, network, publicKey });
+    if (!r.ok) { show(`${w}: ${r.error}`, "bad"); return; }
+    conn[w] = address;
+    document.getElementById(w + "-status").textContent = `${address} · ${r.balance_kas} KAS · ${r.utxos} UTXOs`;
+    show(`${w} connected: ${address}`, "ok");
+  } catch (e) {
+    const x = errText(e); show(`${w} connect: ${x.error}`, "bad"); api("/api/note", { text: w + " connect failed: " + x.error, raw: x.raw });
+  }
+}
+
+async function run(w, kind, variant) {
+  const p = prov(w);
+  if (!p || !conn[w]) { show(`connect ${w} first`, "bad"); return; }
+  const tag = `${w} ${kind}/${variant}`;
+  let b = null, call = "";
+  try {
+    await checkNet(w);
+    show(`${tag}: building`);
+    b = await api("/api/build", { kind, variant });
+    if (!b.ok) { show(`${tag}: ${b.error}`, "bad"); return; }
+    show(`${tag}: #${b.id} built, txid ${b.txid}; sign inputs ${JSON.stringify(b.signInputs.map(x => x.index))}; approve in the wallet`);
+    const options = variant === "nolist" ? {} : { signInputs: b.signInputs };
+    const args = { txJsonString: b.txJsonString, options };
+    if (w === "kaspire") args.sender = conn[w];
+    if (w === "kasware" && variant === "push") {
+      call = "pushPskt";
+      const res = await p.pushPskt(args);
+      const v = await api("/api/pushed", { id: b.id, result: res });
+      show(`${tag}: ${v.ok ? "SUBMITTED by the wallet, txid " + v.txid + "; check " + JSON.stringify(v.check) : v.error}`, v.ok ? "ok" : "bad");
+      if (v.next) show(String(v.next));
+      return;
+    }
+    call = "signPskt";
+    const signed = await p.signPskt(args);
+    const signedStr = typeof signed === "string" ? signed : JSON.stringify(signed);
+    const pushHere = w === "kaspire" && variant === "push";
+    const v = await api("/api/signed", { id: b.id, signed: signedStr, submit: !pushHere });
+    if (!v.ok) { show(`${tag}: refused at ${v.stage}: ${JSON.stringify(v.refusals || v.error || v.inputs)}`, "bad"); return; }
+    if (pushHere) {
+      call = "pushTx";
+      const res = await p.pushTx(signedStr);
+      const x = await api("/api/pushed", { id: b.id, result: res });
+      show(`${tag}: ${x.ok ? "SUBMITTED by the wallet, txid " + x.txid + "; check " + JSON.stringify(x.check) : x.error}`, x.ok ? "ok" : "bad");
+      if (x.next) show(String(x.next));
+      return;
+    }
+    show(`${tag}: post-sign check passed, engine passed, ACCEPTED by the node: ${v.txid}`, "ok");
+    if (v.next) show(String(v.next));
+  } catch (e) {
+    const x = errText(e);
+    show(`${tag}: ${call || "error"}: ${x.error}`, "bad");
+    api("/api/wallet-error", { id: b && b.id, call, error: x.error, raw: x.raw });
+  } finally { refresh(); }
+}
+</script>
+</body>
+</html>

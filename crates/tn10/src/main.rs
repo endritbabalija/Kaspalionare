@@ -13,6 +13,8 @@ mod fees;
 mod indexer;
 mod net;
 mod probe;
+mod pskt;
+mod wallet_probe;
 
 use std::{collections::BTreeMap, path::PathBuf, process::ExitCode};
 
@@ -203,7 +205,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--out <file>] | bundle-verify <file> | masses>
+const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--out <file>] | bundle-verify <file> | masses | wallet-probe <serve [--port n] | selftest> | send <kaspatest:address> <KAS> [--parts n]>
 probe cases: all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62 (conflict-m6 is not part of all)";
 
 /// The value after `--name` in `args`.
@@ -562,6 +564,41 @@ async fn bundle_verify_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Front-end F0 (spec frontend 9): `wallet-probe serve [--port n]`, `wallet-probe selftest`.
+async fn wallet_probe_cmd(args: &[String]) -> Result<(), String> {
+    let env = load_env();
+    let kp = keypair(&env)?;
+    let addr = address(&kp);
+    net::check_testnet(&addr)?;
+    let client = net::connect(env.get(URL_VAR).cloned()).await?;
+    let ctx = probe::Ctx { client, addr, sk: kp.secret_bytes(), report: vec![] };
+    match args.first().map(String::as_str) {
+        Some("serve") => {
+            let port = flag(args, "--port").map(|p| p.parse::<u16>().map_err(|e| format!("--port: {e}"))).transpose()?.unwrap_or(8710);
+            wallet_probe::serve(wallet_probe::Probe::new(ctx, wallet_probe::Log::new("serve")?), port).await
+        }
+        Some("selftest") => wallet_probe::selftest(wallet_probe::Probe::new(ctx, wallet_probe::Log::new("selftest")?)).await,
+        _ => Err("usage: tn10 wallet-probe <serve [--port 8710] | selftest>".into()),
+    }
+}
+
+/// `send <kaspatest:address> <KAS> [--parts n]` (F0: fund a fresh wallet without the faucet).
+async fn send_cmd(args: &[String]) -> Result<(), String> {
+    let to = args.first().ok_or("usage: tn10 send <kaspatest:address> <KAS> [--parts n]")?;
+    let kas: f64 = args.get(1).ok_or("amount in KAS")?.parse().map_err(|e| format!("amount: {e}"))?;
+    let parts = flag(args, "--parts").map(|p| p.parse::<usize>().map_err(|e| format!("--parts: {e}"))).transpose()?.unwrap_or(3);
+    // Refuse before connecting: only testnet addresses.
+    if !to.starts_with("kaspatest:") {
+        return Err(format!("`{to}` is not a kaspatest: address; refusing"));
+    }
+    let env = load_env();
+    let kp = keypair(&env)?;
+    let addr = address(&kp);
+    let client = net::connect(env.get(URL_VAR).cloned()).await?;
+    let mut ctx = probe::Ctx { client, addr, sk: kp.secret_bytes(), report: vec![] };
+    wallet_probe::send(&mut ctx, to, kas, parts).await
+}
+
 async fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
@@ -576,6 +613,8 @@ async fn run() -> ExitCode {
         Some("bundle") => bundle_cmd(rest).await,
         Some("bundle-verify") => bundle_verify_cmd(rest).await,
         Some("masses") => masses_cmd(),
+        Some("wallet-probe") => wallet_probe_cmd(rest).await,
+        Some("send") => send_cmd(rest).await,
         _ => Err(USAGE.into()),
     };
     match res {

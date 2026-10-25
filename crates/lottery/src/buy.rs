@@ -1047,6 +1047,24 @@ impl Built {
     /// inputs. An owner input (spec M5) is budgeted at one signature check (P2PK_UNITS) and,
     /// if its signed run needs more (P2SH), re-budgeted from that run and signed again.
     pub fn finish(&self) -> Final {
+        self.finish_inner(true)
+    }
+
+    /// Spec frontend 6.1 (F0, signing split from building): `finish()` without the
+    /// signatures. Budgets, the storage-mass commit and every covenant sigscript are exactly
+    /// `finish()`'s; each funding input keeps the placeholder sigscript of the final size
+    /// (66 zero bytes), so the masses equal the signed transaction's. Returns the
+    /// transaction and the indices of the funding inputs the payer must sign (SIG_HASH_ALL).
+    /// Owner inputs (spec M5 D67) are refused: their budget depends on the signed run.
+    pub fn finish_unsigned(&self) -> Result<(Final, Vec<usize>), String> {
+        if let Some(i) = self.inputs.iter().position(|i| matches!(i.kind, InKind::Owner(_))) {
+            return Err(format!("input {i} is an owner input; finish_unsigned supports funding inputs only"));
+        }
+        let sign = self.inputs.iter().enumerate().filter(|(_, i)| matches!(i.kind, InKind::Funding)).map(|(n, _)| n).collect();
+        Ok((self.finish_inner(false), sign))
+    }
+
+    fn finish_inner(&self, sign: bool) -> Final {
         let entries: Vec<UtxoEntry> = self.inputs.iter().map(|i| i.entry.clone()).collect();
         let sigs = self.sigscripts();
         let max_budget = vec![u16::MAX; sigs.len()];
@@ -1079,7 +1097,7 @@ impl Built {
                 harness::commit_storage_mass(&tx, &entries);
             }
             let mut tx = tx;
-            for (i, inp) in self.inputs.iter().enumerate() {
+            for (i, inp) in self.inputs.iter().enumerate().filter(|_| sign) {
                 match &inp.kind {
                     InKind::Funding => {
                         let sig = sign_input(&PopulatedTransaction::new(&tx, entries.clone()), i, &self.funding_sk, SIG_HASH_ALL);

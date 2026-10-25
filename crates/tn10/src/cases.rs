@@ -339,7 +339,7 @@ pub async fn close_m2(ctx: &mut Ctx) -> Result<(), String> {
 }
 
 /// Wait until the virtual DAA score passes `target` (lock times are absolute DAA scores, R3).
-async fn wait_daa(ctx: &Ctx, target: u64, what: &str) -> Result<(), String> {
+pub(crate) async fn wait_daa(ctx: &Ctx, target: u64, what: &str) -> Result<(), String> {
     use kaspa_rpc_core::api::rpc::RpcApi;
     let start = std::time::Instant::now();
     loop {
@@ -357,7 +357,7 @@ async fn wait_daa(ctx: &Ctx, target: u64, what: &str) -> Result<(), String> {
 
 /// The virtual's selected parent (sink). Taken before a submission, it is a start hash for
 /// `merged`: the chain block that merges the transaction comes after it.
-async fn sink(ctx: &Ctx) -> Result<kaspa_rpc_core::RpcHash, String> {
+pub(crate) async fn sink(ctx: &Ctx) -> Result<kaspa_rpc_core::RpcHash, String> {
     use kaspa_rpc_core::api::rpc::RpcApi;
     Ok(ctx.client.get_block_dag_info().await.map_err(|e| e.to_string())?.sink)
 }
@@ -378,7 +378,7 @@ async fn sink(ctx: &Ctx) -> Result<kaspa_rpc_core::RpcHash, String> {
 ///
 /// The accepting chain block comes from `GetVirtualChainFromBlock(start, accepted ids)`,
 /// its DAA score from `GetBlock`; the loop waits until the UTXO index entry equals it.
-async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_core::tx::TransactionOutpoint, spk: &kaspa_consensus_core::tx::ScriptPublicKey) -> Result<(Utxo, f64), String> {
+pub(crate) async fn merged(ctx: &Ctx, start: kaspa_rpc_core::RpcHash, op: kaspa_consensus_core::tx::TransactionOutpoint, spk: &kaspa_consensus_core::tx::ScriptPublicKey) -> Result<(Utxo, f64), String> {
     merged_poll(ctx, start, op, spk, std::time::Duration::from_secs(1)).await
 }
 

@@ -6299,8 +6299,10 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 name = "tn10"
 version = "0.1.0"
 dependencies = [
+ "blake2b_simd",
  "harness",
  "kaspa-addresses 2.1.0",
+ "kaspa-consensus-client",
  "kaspa-consensus-core 2.1.0",
  "kaspa-hashes 2.1.0",
  "kaspa-rpc-core",
@@ -6310,6 +6312,8 @@ dependencies = [
  "kaspa-wrpc-client",
  "lottery",
  "secp256k1",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
