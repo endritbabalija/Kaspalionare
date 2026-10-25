@@ -14,6 +14,7 @@ const sales: Sales = {
   m: 2,
   deadline: '13662',
   bMax: 4,
+  shape: { mainMax: 30, mainPicks: 5, bMax: 4, coinsMax: 8 },
   shards: [],
   virtualDaaScore: '9000',
   observedAt: Date.now(),
@@ -30,6 +31,7 @@ function play(over: Partial<Play>): Play {
     busy: false,
     m: 2,
     bMax: 4,
+    shape: sales.shape,
     onMain: noop,
     onBonus: noop,
     onQuickPick: noop,
@@ -79,6 +81,39 @@ describe('S1 buy card (spec 3, 7)', () => {
     expect(screen.getByTestId('referral-to').getAttribute('data-value')).toBe('round');
     expect(screen.getByTestId('cost-total').getAttribute('data-sompi')).toBe('145000000');
     expect((screen.getByTestId('buy-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('the top-level cost rows add up to the total; the referral is a part of the price (F2/F3 review)', () => {
+    for (const paid of [false, true]) {
+      cleanup();
+      render(<BuyCard play={play({ cost: ready(paid) })} walletConnected />);
+      const rows = screen.getAllByTestId(/^cost-row-/);
+      const top = rows.filter((r) => r.getAttribute('data-part') !== 'true').map((r) => r.dataset.testid);
+      expect(top).toEqual(['cost-row-price', 'cost-row-deposit', 'cost-row-fee']);
+      const parts = rows.filter((r) => r.getAttribute('data-part') === 'true').map((r) => r.dataset.testid);
+      expect(parts).toEqual(['cost-row-referral', 'cost-row-deposit-back']);
+      const sum = ['cost-price', 'cost-deposit', 'cost-fee']
+        .map((id) => BigInt(screen.getByTestId(id).getAttribute('data-sompi') ?? 'x'))
+        .reduce((a, b) => a + b, 0n);
+      expect(sum.toString()).toBe(screen.getByTestId('cost-total').getAttribute('data-sompi'));
+      expect(screen.getByTestId('cost-referral').getAttribute('data-sompi')).toBe(paid ? '20000000' : '5000000');
+    }
+  });
+
+  it('while a purchase outcome is unknown, Buy stays disabled', () => {
+    render(
+      <BuyCard
+        play={play({
+          cost: ready(false),
+          tx: { step: 'signed', checking: false, failed: 'x', failedCode: 'submit_unknown' },
+        })}
+        walletConnected
+      />,
+    );
+    expect((screen.getByTestId('buy-button') as HTMLButtonElement).disabled).toBe(true);
+    cleanup();
+    render(<BuyCard play={play({ cost: ready(false), tx: { step: 'signed', checking: true } })} walletConnected />);
+    expect(screen.getByTestId('tx-checking').textContent).toBe('Checking');
   });
 
   it('a paid referral names its destination; without a wallet the button connects', () => {

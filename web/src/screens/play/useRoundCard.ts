@@ -43,8 +43,10 @@ export function useRoundCard(ctx: Ctx): { load: RoundCardLoad; retry: () => void
   }, [run, tick]);
 
   const retry = useCallback(() => {
+    // A worker that stopped too often is tried again on this press (no reload needed).
+    ctx.lottery.recover();
     setLoad({ kind: 'loading' });
     setTick((x) => x + 1);
-  }, []);
+  }, [ctx]);
   return { load, retry };
 }

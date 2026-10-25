@@ -32,8 +32,8 @@ beforeAll(async () => {
   key = unwrap(await lottery.call('quickWalletNew'));
   spk = unwrap(await lottery.call('scriptOf', key.address));
   const store = new QuickKeyStore(new MemoryKV(), 'testnet-10');
-  await store.save(key);
-  quick = new QuickWalletAdapter(lottery, store, 'testnet-10', () => Promise.resolve([]));
+  await store.replace(null, key);
+  quick = new QuickWalletAdapter(lottery, store, 'testnet-10', () => Promise.resolve([]), key);
   const own = <T extends { funds: BuyInput['funds'] }>(i: T): T => ({
     ...i,
     funds: { ...i.funds, change: key.address, coins: i.funds.coins.map((c) => ({ ...c, scriptPublicKey: spk })) },

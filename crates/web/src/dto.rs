@@ -404,7 +404,9 @@ pub struct BuyFigures {
     pub referral: ReferralFigure,
     /// The network fee (sompi), at the node's fee rate.
     pub fee: Dec,
-    /// What leaves the wallet: price + deposit + fee.
+    /// What the purchase costs the wallet: price + deposit + fee (the cost panel's rows add up
+    /// to it; the referral is part of the price, also when it is paid to the buyer's own
+    /// address through a link).
     pub total: Dec,
     pub ticket: TicketOut,
 }

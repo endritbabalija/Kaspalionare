@@ -62,6 +62,22 @@ export class LotteryClient {
     return this.raw(name, ...args);
   }
 
+  /**
+   * After the client gave up (more than RESTARTS_MAX deaths in a minute), let a user action (Retry) try
+   * again without a reload (F2/F3 review note): the count starts over and the next call boots a new worker.
+   * Does nothing after `dispose`.
+   */
+  recover(): void {
+    if (this.failed === 'disposed') return;
+    this.failed = null;
+    this.restarts = [];
+  }
+
+  /** Whether the client has given up until `recover`. */
+  get stopped(): boolean {
+    return this.failed !== null;
+  }
+
   /** Stop the worker for good (page unload). */
   dispose(): void {
     this.kill('disposed');

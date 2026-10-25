@@ -361,9 +361,15 @@ pub fn buy_figures(net: Net, i: &BuyFiguresInput) -> Result<BuyFigures> {
     let fee = u.fee;
     let wallet_in = dec("summary.walletIn", &i.built.summary.wallet_in)?;
     let wallet_back = dec("summary.walletBack", &i.built.summary.wallet_back)?;
-    let total = wallet_in.checked_sub(wallet_back).ok_or_else(|| of("wallet total"))?;
+    // A buyer may name themselves through a link (design 5.1, spec 7): the referral output then
+    // pays the wallet's own script, so the summary counts it as coming back. It is still the
+    // referral, part of the price: the total is price + deposit + fee either way, and the
+    // referral row shows the wallet's own address (F2/F3 review S2).
+    let self_referral = paid && i.built.summary.outputs.get(2).is_some_and(|o| o.to_wallet);
+    let returned = wallet_back.checked_sub(if self_referral { r } else { 0 }).ok_or_else(|| bad("the referral is not among what comes back"))?;
+    let total = wallet_in.checked_sub(returned).ok_or_else(|| of("wallet total"))?;
     if Some(total) != price.checked_add(deposit).and_then(|x| x.checked_add(fee)) {
-        return Err(bad("what the wallet loses is not price + deposit + fee"));
+        return Err(bad("what the wallet pays is not price + deposit + fee"));
     }
     let back = s.deadline.checked_add(lottery::game::D_RET).ok_or_else(|| of("T + D_RET"))?;
     let tbytes = verify::state_bytes(&ticket)?;

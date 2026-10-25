@@ -1,7 +1,10 @@
 // Cost panel shell (spec 4, 7): empty, estimating, ready, fee-too-high warning. Rows are figures with their
-// names (rule 6: a cost row is data); the amounts come from the built transaction (part B fills them from
-// BuiltTx), never from separate arithmetic.
+// names (rule 6: a cost row is data); the amounts come from the built transaction (`buyFigures`), never from
+// separate arithmetic. The top-level rows add up to Total; a `part` row (indented under the row before it)
+// is a share of that row or a fact about it (the referral share of the price, the deposit's return date),
+// so the figures reconcile as shown (F2/F3 review note).
 import { useId, type ReactNode } from 'react';
+import { cn } from '@/lib/cn';
 import { Amount } from './Amount';
 
 export type CostPanelState = 'empty' | 'estimating' | 'ready' | 'fee-too-high';
@@ -11,8 +14,12 @@ export interface CostRow {
   name: string;
   /** Sompi, when known. */
   sompi?: string;
-  /** A fact shown as a value next to the amount (for example the deposit's return date). */
+  /** A value in place of an amount (for example the deposit's return date). */
+  value?: ReactNode;
+  /** A fact shown under the name (for example the referral's destination). */
   note?: ReactNode;
+  /** Part of the row before it (indented; not added again into Total). */
+  part?: boolean;
 }
 
 export interface CostPanelProps {
@@ -34,15 +41,27 @@ export function CostPanel({ state, rows, total, warning }: CostPanelProps) {
       className="flex flex-col gap-1 rounded-[14px] border border-rule bg-surface p-4 text-sm"
     >
       <h2 id={title} className="m-0 mb-1 text-[17px] font-semibold">
-        What you pay
+        Cost
       </h2>
       {rows.map((r) => (
-        <div key={r.id} data-testid={`cost-row-${r.id}`} className="flex min-h-11 items-center justify-between gap-3">
+        <div
+          key={r.id}
+          data-testid={`cost-row-${r.id}`}
+          data-part={r.part ? 'true' : undefined}
+          className={cn(
+            'flex min-h-11 items-center justify-between gap-3',
+            r.part && 'ml-3 border-l border-rule pl-3 text-[13px] text-graphite',
+          )}
+        >
           <span className="flex min-w-0 flex-col">
             <span>{r.name}</span>
             {r.note && <span className="font-mono text-[12px] break-all text-graphite">{r.note}</span>}
           </span>
-          <Value state={state} sompi={r.sompi} testId={`cost-${r.id}`} />
+          {r.value !== undefined && state !== 'estimating' && state !== 'empty' ? (
+            <span className="font-mono text-[12px] text-graphite">{r.value}</span>
+          ) : (
+            <Value state={state} sompi={r.sompi} testId={`cost-${r.id}`} />
+          )}
         </div>
       ))}
       <div className="flex min-h-11 items-center justify-between border-t border-rule pt-1 font-semibold">

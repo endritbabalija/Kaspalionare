@@ -10,6 +10,7 @@ const BASE = [
   'errorTable',
   'indexerLimits',
   'jackpotOdds',
+  'gameShape',
   'decodeState',
   'decodeRedeem',
   'verifyState',

@@ -99,7 +99,7 @@ export function WalletProvider({ ctx, children }: { ctx: Ctx; children: ReactNod
   const adoptKey = useCallback(
     async (k: QuickKey) => {
       const { mod, store } = await quickParts();
-      const adapter = new mod.QuickWalletAdapter(lottery, store, config.network, coins);
+      const adapter = new mod.QuickWalletAdapter(lottery, store, config.network, coins, k);
       const address = await checked(k.address);
       remember('quick');
       setQuickStored(true);
@@ -120,6 +120,16 @@ export function WalletProvider({ ctx, children }: { ctx: Ctx; children: ReactNod
     }
   }, [quickParts, adoptKey, fail]);
 
+  /** Whether this browser holds a quick key now (another tab may have made or replaced one). */
+  const refreshStored = useCallback(async () => {
+    try {
+      const { store } = await quickParts();
+      setQuickStored(!!(await store.load()));
+    } catch {
+      // the wallet sheet shows the error that led here
+    }
+  }, [quickParts]);
+
   const createQuick = useCallback(async () => {
     setS({ state: 'connecting', kind: 'quick' });
     try {
@@ -127,27 +137,31 @@ export function WalletProvider({ ctx, children }: { ctx: Ctx; children: ReactNod
       await adoptKey(await mod.createQuickKey(lottery, store));
     } catch (e) {
       fail(e);
+      void refreshStored();
     }
-  }, [quickParts, adoptKey, lottery, fail]);
+  }, [quickParts, adoptKey, lottery, fail, refreshStored]);
 
   const importQuick = useCallback(
-    async (secretKey: string) => {
+    async (secretKey: string, replacing: string | null) => {
       setS({ state: 'connecting', kind: 'quick' });
       try {
         const { mod, store } = await quickParts();
-        await adoptKey(await mod.importQuickKey(lottery, store, secretKey));
+        await adoptKey(await mod.importQuickKey(lottery, store, secretKey, replacing));
+        return true;
       } catch (e) {
         fail(e);
+        void refreshStored();
+        return false;
       }
     },
-    [quickParts, adoptKey, lottery, fail],
+    [quickParts, adoptKey, lottery, fail, refreshStored],
   );
 
   const exportQuick = useCallback(async () => {
     const { store } = await quickParts();
     const k = await store.load();
     if (!k) throw new PageError('wallet_missing', 'no quick wallet key in this browser');
-    return k.secretKey;
+    return { address: k.address, secretKey: k.secretKey };
   }, [quickParts]);
 
   const disconnect = useCallback(() => {

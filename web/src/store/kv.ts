@@ -9,6 +9,11 @@ export interface KV {
   put<T>(store: string, key: string, value: T): Promise<void>;
   all<T>(store: string): Promise<T[]>;
   del(store: string, key: string): Promise<void>;
+  /**
+   * Read and write one record in a single transaction (compare and swap): `f` gets the current value and
+   * returns the new one, or throws to leave it as it is. No other tab's write can come in between.
+   */
+  update<T>(store: string, key: string, f: (current: T | undefined) => T): Promise<void>;
 }
 
 function req<T>(r: IDBRequest<T>): Promise<T> {
@@ -73,6 +78,26 @@ export class IdbKV implements KV {
   async del(store: string, key: string): Promise<void> {
     await req((await this.tx(store, 'readwrite')).delete(key));
   }
+
+  async update<T>(store: string, key: string, f: (current: T | undefined) => T): Promise<void> {
+    const os = await this.tx(store, 'readwrite');
+    await new Promise<void>((resolve, reject) => {
+      const t = os.transaction;
+      let thrown: unknown;
+      const g = os.get(key);
+      g.onsuccess = () => {
+        try {
+          os.put(f(g.result as T | undefined), key);
+        } catch (e) {
+          thrown = e;
+          t.abort();
+        }
+      };
+      t.oncomplete = () => resolve();
+      t.onabort = () => reject(thrown ?? new PageError('storage_unavailable', String(t.error)));
+      t.onerror = () => reject(thrown ?? new PageError('storage_unavailable', String(t.error)));
+    });
+  }
 }
 
 export class MemoryKV implements KV {
@@ -100,5 +125,15 @@ export class MemoryKV implements KV {
   del(store: string, key: string): Promise<void> {
     this.s(store).delete(key);
     return Promise.resolve();
+  }
+
+  update<T>(store: string, key: string, f: (current: T | undefined) => T): Promise<void> {
+    try {
+      const next = f(structuredClone(this.s(store).get(key)) as T | undefined);
+      this.s(store).set(key, structuredClone(next));
+      return Promise.resolve();
+    } catch (e) {
+      return Promise.reject(e);
+    }
   }
 }

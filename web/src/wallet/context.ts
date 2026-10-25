@@ -18,9 +18,13 @@ export interface WalletSession {
   connect(kind: 'kasware' | 'kaspire'): Promise<void>;
   openQuick(): Promise<void>;
   createQuick(): Promise<void>;
-  importQuick(secretKey: string): Promise<void>;
-  /** The quick wallet's secret key, for its export (spec S7). */
-  exportQuick(): Promise<string>;
+  /**
+   * Import a key; another key replaces the stored one only when `replacing` is the stored key's address
+   * (the key the sheet just showed). Resolves to whether the imported key is now connected.
+   */
+  importQuick(secretKey: string, replacing: string | null): Promise<boolean>;
+  /** The stored quick wallet key, for its export (spec S7). */
+  exportQuick(): Promise<{ address: string; secretKey: string }>;
   disconnect(): void;
 }
 

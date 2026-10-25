@@ -3,7 +3,7 @@
 // scripts/check-bundle.mjs fails a production build on the faucet marker or path.
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { requestFaucet } from './faucet';
+import { FAUCET_MARKER, requestFaucet } from './faucet';
 
 export default function DevFaucet({
   faucetUrl,
@@ -20,6 +20,7 @@ export default function DevFaucet({
     <div className="flex flex-col gap-1">
       <Button
         data-testid="dev-faucet"
+        data-marker={FAUCET_MARKER}
         data-state={state}
         disabled={state === 'paying'}
         onClick={() => {

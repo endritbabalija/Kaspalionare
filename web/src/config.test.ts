@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readConfig, type ConfigEnv } from './config';
+import { readConfig, TESTNET_FAUCET_LINK, type ConfigEnv } from './config';
 
 const COV = 'ab'.repeat(32);
 const base: ConfigEnv = { VITE_INDEXER_URL: 'http://127.0.0.1:8790/v1', VITE_COVENANT_ID: COV };
@@ -40,5 +40,41 @@ describe('config (spec 6.5, 6.6)', () => {
     expect(
       'problems' in readConfig({ ...base, VITE_NETWORK: 'simnet', VITE_REFERRAL_ADDRESS: 'kaspatest:qq' }, true),
     ).toBe(true);
+  });
+
+  it('links the testnet-10 faucet by default (owner, 2026-10-26); none on the simnet, which has its dev faucet', () => {
+    const tn = readConfig(base, false);
+    if (!('config' in tn)) throw new Error(tn.problems.join(', '));
+    expect(tn.config.faucetLink).toBe(TESTNET_FAUCET_LINK);
+    expect(TESTNET_FAUCET_LINK).toBe('https://faucet-tn10.kaspanet.io');
+    const other = readConfig({ ...base, VITE_FAUCET_LINK: 'https://faucet.example/tn10' }, false);
+    if (!('config' in other)) throw new Error(other.problems.join(', '));
+    expect(other.config.faucetLink).toBe('https://faucet.example/tn10');
+    const sim = readConfig({ ...base, VITE_NETWORK: 'simnet' }, true);
+    if (!('config' in sim)) throw new Error(sim.problems.join(', '));
+    expect(sim.config.faucetLink).toBeUndefined();
+  });
+
+  it('takes an https explorer only (F2/F3 review note)', () => {
+    for (const bad of [
+      'javascript:alert(1)',
+      'http://explorer.example',
+      'data:text/html,x',
+      'explorer.example',
+      'https://u:p@x.example',
+    ]) {
+      expect('problems' in readConfig({ ...base, VITE_EXPLORER_URL: bad }, false)).toBe(true);
+    }
+    const ok = readConfig({ ...base, VITE_EXPLORER_URL: 'https://explorer-tn10.kaspa.org' }, false);
+    if (!('config' in ok)) throw new Error(ok.problems.join(', '));
+    expect(ok.config.explorerUrl).toBe('https://explorer-tn10.kaspa.org');
+  });
+
+  it('a built testnet-10 page takes a wss:// node only (its CSP refuses ws://, check-csp)', () => {
+    expect('problems' in readConfig({ ...base, VITE_NODE_URL: 'ws://node.example/tn10' }, false)).toBe(true);
+    const ok = readConfig({ ...base, VITE_NODE_URL: 'wss://node.example/tn10' }, false);
+    expect('config' in ok).toBe(true);
+    const dev = readConfig({ ...base, VITE_NODE_URL: 'ws://127.0.0.1:17210' }, true);
+    expect('config' in dev).toBe(true);
   });
 });

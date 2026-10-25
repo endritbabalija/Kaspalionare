@@ -29,13 +29,14 @@ export interface ShellProps {
   children: ReactNode;
 }
 
+/** Spec 7 honesty: every page shows the network, and that its coins have no value, as the badge's value. */
 export function NetworkBadge({ network }: { network: string }) {
   return (
     <span
       data-testid="network-badge"
       className="inline-flex h-6 items-center rounded-full bg-status-closing-bg px-2 font-mono text-[11px] text-status-closing-fg uppercase"
     >
-      {network}
+      {network} · no value
     </span>
   );
 }

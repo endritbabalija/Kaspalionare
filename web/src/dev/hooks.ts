@@ -8,6 +8,8 @@
 export const DEV_HOOKS_MARKER = 'KASPALIONARE_DEV_HOOKS';
 
 export interface DevHooks {
+  /** DEV_HOOKS_MARKER: kept on the object so the marker survives tree-shaking in a dev build (the control of check-bundle). */
+  marker?: string;
   /** Build on this shard index when it is live. */
   forceShard?: number;
   /** The shard index the last build used. */
@@ -22,5 +24,6 @@ export interface DevHooks {
 export function installDevHooks(): DevHooks {
   const w = window as unknown as { __klDev?: DevHooks };
   w.__klDev ??= {};
+  w.__klDev.marker = DEV_HOOKS_MARKER;
   return w.__klDev;
 }

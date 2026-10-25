@@ -27,8 +27,9 @@ use crate::indexer::ApiObject;
 
 /// The most objects one `nodeEntries` call takes (the indexer's own list cap).
 pub const OBJECTS_MAX: usize = crate::indexer::OBJECTS_MAX as usize;
-/// The most UTXOs a node answer may carry into the page (more is refused, not truncated).
-pub const UTXOS_MAX: usize = 4 * OBJECTS_MAX;
+/// The most wallet coins `nodeCoins` lists (the largest first). A build takes at most
+/// `lottery::web::build::F_MAX` of them; anything past this many is dust for the page.
+pub const COINS_LISTED_MAX: usize = 256;
 /// The longest node URL accepted.
 pub const URL_MAX: usize = 512;
 
@@ -68,6 +69,32 @@ pub fn jackpot_odds(m: u32) -> Result<Dec> {
         return Err(Error::new(Code::InputRange, format!("m = {m} (1..={})", lottery::game::M_HARD)));
     }
     Ok((lottery::game::N * i64::from(m)).to_string())
+}
+
+/// The game's fixed shape as the page's picker and coin choice use it (spec 1: the page has no
+/// TypeScript copy of game-size arithmetic; F2/F3 review note): 5 of 1..30, at most B_MAX
+/// combinations a ticket, at most F_MAX wallet coins a build.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GameShape {
+    /// The highest main number (`lottery::combo::MAIN_MAX`).
+    pub main_max: u32,
+    /// Main numbers in a combination (`Combo::main`).
+    pub main_picks: u32,
+    /// Combinations on one ticket (`lottery::game::TICKET_B_MAX`; an instance's B_MAX may be
+    /// lower: `checkIndexerInstance`).
+    pub b_max: u32,
+    /// Wallet coins one build takes (`lottery::web::build::F_MAX`).
+    pub coins_max: u32,
+}
+
+pub fn game_shape() -> GameShape {
+    GameShape {
+        main_max: u32::from(lottery::combo::MAIN_MAX),
+        main_picks: lottery::combo::Combo::new([0; 5], 0).main.len() as u32,
+        b_max: lottery::game::TICKET_B_MAX as u32,
+        coins_max: lottery::web::build::F_MAX as u32,
+    }
 }
 
 /// A node URL the page may connect to on `net`: `ws://` or `wss://`, no spaces or controls,
@@ -139,15 +166,58 @@ pub fn object_addresses(net: Net, objects: &[ApiObject]) -> Result<Vec<Address>>
     Ok(out)
 }
 
-/// The node's entries for exactly the objects' outpoints (others dropped). An object with no
-/// entry is missing from the result: `checkIndexerObjects`/`checkIndexerRound` then refuse it
-/// as not live (`chain_mismatch`).
-pub fn entries_for(objects: &[ApiObject], node: Vec<Utxo>) -> Result<Vec<Utxo>> {
-    if node.len() > UTXOS_MAX {
-        return Err(Error::new(Code::InputRange, format!("the node returned {} UTXOs (at most {UTXOS_MAX})", node.len())));
+/// The outpoints (lower-case txid, index) the page asks the node about for these objects.
+pub fn wanted(objects: &[ApiObject]) -> BTreeSet<(String, u32)> {
+    objects.iter().map(|o| (o.transaction_id.to_ascii_lowercase(), o.index)).collect()
+}
+
+/// The node's entries kept for exactly the `want`ed outpoints, the rest dropped as they stream
+/// past (F2/F3 review S5: anyone can send dust to a covenant address, so the node's answer for
+/// an address has no size the page can rely on; nothing is counted before this filter, and
+/// what is kept is at most one entry per wanted outpoint). An object with no entry is missing
+/// from the result: `checkIndexerObjects`/`checkIndexerRound` then refuse it as not live
+/// (`chain_mismatch`).
+pub fn keep_outpoints<T>(want: &BTreeSet<(String, u32)>, node: impl IntoIterator<Item = T>, outpoint: impl Fn(&T) -> (String, u32)) -> Vec<T> {
+    let mut seen = BTreeSet::new();
+    node.into_iter()
+        .filter(|u| {
+            let k = outpoint(u);
+            want.contains(&k) && seen.insert(k)
+        })
+        .collect()
+}
+
+/// `keep_outpoints` over the page's `Utxo` form (native tests; the client filters the RPC
+/// entries before converting them).
+pub fn entries_for(objects: &[ApiObject], node: impl IntoIterator<Item = Utxo>) -> Vec<Utxo> {
+    keep_outpoints(&wanted(objects), node, |u| (u.transaction_id.to_ascii_lowercase(), u.index))
+}
+
+/// The `n` largest of a wallet's plain coins (covenant outputs dropped), the largest first, kept
+/// in a bounded heap as the node's answer streams past (F2/F3 review S5: dust sent to the
+/// wallet's address cannot crowd out its real coins or stop the page). Ties keep the earlier.
+pub fn largest_coins<T>(node: impl IntoIterator<Item = T>, n: usize, plain: impl Fn(&T) -> bool, amount: impl Fn(&T) -> u64) -> Vec<T> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    // A min-heap on (amount, later first): its top is the coin to drop next.
+    let mut heap: BinaryHeap<Reverse<(u64, Reverse<usize>, usize)>> = BinaryHeap::new();
+    let mut kept: Vec<Option<T>> = vec![];
+    for (seq, c) in node.into_iter().filter(|c| plain(c)).enumerate() {
+        let a = amount(&c);
+        if heap.len() < n {
+            heap.push(Reverse((a, Reverse(seq), kept.len())));
+            kept.push(Some(c));
+        } else if let Some(Reverse((min, _, slot))) = heap.peek().copied() {
+            if a > min {
+                heap.pop();
+                kept[slot] = Some(c);
+                heap.push(Reverse((a, Reverse(seq), slot)));
+            }
+        }
     }
-    let want: BTreeSet<(String, u32)> = objects.iter().map(|o| (o.transaction_id.to_ascii_lowercase(), o.index)).collect();
-    Ok(node.into_iter().filter(|u| want.contains(&(u.transaction_id.to_ascii_lowercase(), u.index))).collect())
+    let mut order: Vec<(u64, usize, usize)> = heap.into_iter().map(|Reverse((a, Reverse(seq), slot))| (a, seq, slot)).collect();
+    order.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+    order.into_iter().filter_map(|(_, _, slot)| kept[slot].take()).collect()
 }
 
 /// The address a wallet coin query is for, checked for the started network (spec 6.6).
@@ -207,6 +277,64 @@ mod tests {
         assert_eq!(submit_refusal(Error::new(Code::NodeUnavailable, "already spent by transaction")).code, Code::NodeUnavailable);
     }
 
+    fn utxo(txid: u8, index: u32, amount: u64, cov: bool) -> Utxo {
+        Utxo {
+            transaction_id: format!("{txid:02x}").repeat(32),
+            index,
+            amount: amount.to_string(),
+            script_public_key: String::new(),
+            block_daa_score: "1".into(),
+            is_coinbase: false,
+            covenant_id: cov.then(|| "cc".repeat(32)),
+        }
+    }
+
+    /// F2/F3 review S5: more than 8,000 dust entries at an object's address (anyone can send
+    /// them) neither stop the page nor hide the object's own entry: the node's answer is
+    /// filtered by outpoint before anything is counted.
+    #[test]
+    fn dust_at_an_address_does_not_stop_the_page() {
+        let o = |txid: u8, index: u32| ApiObject {
+            role: crate::views::RoleName::Shard,
+            transaction_id: format!("{txid:02X}").repeat(32),
+            index,
+            amount: "1".into(),
+            block_daa_score: "1".into(),
+            script_public_key: String::new(),
+            state: String::new(),
+        };
+        let objects = [o(0xab, 0), o(0xcd, 3)];
+        let mut node: Vec<Utxo> = (0..9_000u32).map(|i| utxo(0x11, i, 1, false)).collect();
+        node.insert(4_321, utxo(0xab, 0, 5, true));
+        node.push(utxo(0xcd, 3, 7, true));
+        node.push(utxo(0xcd, 3, 7, true)); // the same outpoint twice: kept once
+        node.push(utxo(0xcd, 4, 7, true)); // another output of that transaction
+        let kept = entries_for(&objects, node);
+        assert_eq!(kept.len(), 2, "exactly the objects' outpoints");
+        assert_eq!((kept[0].index, kept[0].amount.as_str()), (0, "5"));
+        assert_eq!((kept[1].index, kept[1].amount.as_str()), (3, "7"));
+    }
+
+    /// F2/F3 review S5 for a wallet address: 9,000 dust coins and a covenant output, and the
+    /// wallet's real coins are still the ones listed (the largest first, at most n).
+    #[test]
+    fn dust_coins_do_not_crowd_out_the_wallet_coins() {
+        let mut node: Vec<Utxo> = (0..9_000u32).map(|i| utxo(0x22, i, 1 + u64::from(i % 3), false)).collect();
+        node.insert(17, utxo(0x33, 0, 50_000_000_000, false));
+        node.insert(8_000, utxo(0x33, 1, 7_000_000_000, false));
+        node.push(utxo(0x33, 2, 900_000_000_000, true)); // a covenant output is not a coin
+        node.push(utxo(0x33, 3, 7_000_000_000, false)); // a tie: the earlier first
+        let amount = |u: &Utxo| u.amount.parse::<u64>().unwrap();
+        let plain = |u: &Utxo| u.covenant_id.is_none();
+        let top = largest_coins(node.clone(), 4, plain, amount);
+        let got: Vec<(u32, u64)> = top.iter().map(|u| (u.index, amount(u))).collect();
+        assert_eq!(got[..3], [(0, 50_000_000_000), (1, 7_000_000_000), (3, 7_000_000_000)]);
+        assert_eq!(got[3].1, 3, "then the largest dust");
+        assert_eq!(largest_coins(node.clone(), COINS_LISTED_MAX, plain, amount).len(), COINS_LISTED_MAX);
+        assert!(largest_coins(node, 0, plain, amount).is_empty());
+        assert!(largest_coins(Vec::<Utxo>::new(), 4, plain, amount).is_empty());
+    }
+
     #[test]
     fn coin_totals() {
         let u = |a: &str| Utxo { transaction_id: "00".repeat(32), index: 0, amount: a.into(), script_public_key: String::new(), block_daa_score: "1".into(), is_coinbase: false, covenant_id: None };
@@ -257,6 +385,11 @@ mod tests {
         for (id, idx) in [("mainnet", true), ("testnet-11", true), ("simnet", true), ("testnet-10", false)] {
             assert_eq!(check_server(Net::Testnet10, id, idx).unwrap_err().code, Code::NodeNetwork, "{id} {idx}");
         }
+    }
+
+    #[test]
+    fn game_shape_is_the_library_s() {
+        assert_eq!(game_shape(), GameShape { main_max: 30, main_picks: 5, b_max: 4, coins_max: 8 });
     }
 
     #[test]

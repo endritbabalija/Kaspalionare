@@ -1,6 +1,8 @@
 node_modules
 dist
 dist-mainnet-check
+dist-dev-check
+dist-csp-check
 src/wasm
 playwright-report
 test-results

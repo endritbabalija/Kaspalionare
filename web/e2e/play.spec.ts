@@ -239,6 +239,22 @@ test('shard contention: a buy whose shard another buyer took first is rebuilt on
   // A sends: the node refuses its spent shard; the page rebuilds on another one and the purchase goes through.
   await a.page.evaluate(() => (window as unknown as { __klDev: { release: () => void } }).__klDev.release());
   await expect(a.page.getByTestId('tx-rebuilt')).toHaveText('Rebuilt 1/3', { timeout: 60_000 });
+  // F2/F3 review M2: the rebuild is signed by itself only when its figures are the ones shown; otherwise
+  // the new figures wait for a fresh press (purchase_changed) and nothing is signed until then.
+  const outcome = async () => {
+    if ((await a.page.getByTestId('tx-progress').getAttribute('data-step', { timeout: 1000 })) === 'accepted')
+      return 'accepted';
+    const failed = a.page.getByTestId('buy-failed-code');
+    return (await failed.count())
+      ? ((await failed.getAttribute('data-code', { timeout: 1000 })) ?? 'pending')
+      : 'pending';
+  };
+  await expect.poll(outcome, { timeout: 150_000 }).not.toBe('pending');
+  if ((await outcome()) === 'purchase_changed') {
+    await expect(a.page.getByTestId('cost-panel')).toHaveAttribute('data-state', 'ready');
+    await expect(a.page.getByTestId('buy-button')).toBeEnabled();
+    await a.page.getByTestId('buy-button').click();
+  }
   await expect(a.page.getByTestId('tx-progress')).toHaveAttribute('data-step', 'accepted', { timeout: 150_000 });
   const idA = (await a.page.getByTestId('buy-txid').getAttribute('data-value')) ?? '';
   expect(idA).not.toBe('');

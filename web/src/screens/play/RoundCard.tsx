@@ -70,9 +70,10 @@ function ReadyCard({ data, stale, now }: { data: RoundCardData; stale: boolean; 
       <a
         href={`#/rounds?r=${encodeURIComponent(data.round)}`}
         data-testid="round-link"
+        aria-label={`Round ${data.round} details`}
         className="flex min-h-11 items-center text-[13px] font-medium"
       >
-        Round {data.round} details
+        Details
       </a>
     </section>
   );

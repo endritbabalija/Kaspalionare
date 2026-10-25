@@ -187,6 +187,23 @@ codes! {
     /// Front end F3 part B (the page): this browser does not let the page keep its local data
     /// (IndexedDB unavailable, for example in some private windows).
     StorageUnavailable = 44, "storage_unavailable", "This browser cannot keep the page's data.";
+    /// Front end F2/F3 review M2 (the page): the round's sales ended (its deadline passed, or
+    /// `close()` took its shards) before the purchase was sent; the page never moves a purchase
+    /// to the next round.
+    SalesClosed = 45, "sales_closed", "Sales closed; waiting for close().";
+    /// Front end F2/F3 review M2 (the page): a rebuild after a shard conflict changed what the
+    /// player saw (the fee, the total or another figure); the new figures are shown and nothing
+    /// is signed until the player confirms them.
+    PurchaseChanged = 46, "purchase_changed", "The figures changed; check them before you buy.";
+    /// Front end F2/F3 review S3 (the page): the node did not say whether it took the
+    /// transaction (the connection failed after sending, or it is not in a block in time); the
+    /// page checks the chain before it says anything else, and blocks a second purchase.
+    SubmitUnknown = 47, "submit_unknown", "Whether the transaction went through is not known yet.";
+    /// Front end F2/F3 review note (the page): the wallet did not answer a request in time.
+    WalletTimeout = 48, "wallet_timeout", "The wallet did not answer in time.";
+    /// Front end F2/F3 review S1 (the page): the quick wallet's key in this browser is no longer
+    /// the one this page connected with (another tab replaced it); nothing is signed with it.
+    WalletChanged = 49, "wallet_changed", "The wallet's key changed in another tab.";
 }
 
 impl fmt::Display for Code {

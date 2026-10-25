@@ -1,6 +1,8 @@
 // Build crates/web for the browser and write the wasm-bindgen package the page imports as `@wasm/*`.
 //   node scripts/wasm.mjs dev      features simnet,node -> src/wasm/dev      (the private simnet dev run)
 //   node scripts/wasm.mjs release  feature node         -> src/wasm/release  (testnet-10 only; + wasm-opt -Oz)
+//   node scripts/wasm.mjs mainnet  features mainnet,node -> src/wasm/mainnet  (TEST-ONLY: what check-mainnet.mjs
+//                                  builds the page with and scans; it refuses to load, W4)
 // The release build is the documented wasm build command (CLAUDE.md) plus `--features node`, into the
 // default target dir, so W4 (`cargo test -p web --test w4_mainnet`) checks this very artifact. The dev build
 // uses its own target dir (crates/target/web-dev) and never overwrites it.
@@ -9,12 +11,16 @@ import path from 'node:path';
 import { CRATES, WEB, isWin, run, wasmEnv } from './lib.mjs';
 
 const variant = process.argv[2];
-if (variant !== 'dev' && variant !== 'release') {
-  console.error('usage: node scripts/wasm.mjs <dev|release>');
+if (variant !== 'dev' && variant !== 'release' && variant !== 'mainnet') {
+  console.error('usage: node scripts/wasm.mjs <dev|release|mainnet>');
   process.exit(2);
 }
-const features = variant === 'dev' ? 'simnet,node' : 'node';
-const targetDir = variant === 'dev' ? path.join(CRATES, 'target', 'web-dev') : path.join(CRATES, 'target');
+const features = { dev: 'simnet,node', release: 'node', mainnet: 'mainnet,node' }[variant];
+const targetDir = {
+  dev: path.join(CRATES, 'target', 'web-dev'),
+  release: path.join(CRATES, 'target'),
+  mainnet: path.join(CRATES, 'target', 'web-mainnet'),
+}[variant];
 const out = path.join(WEB, 'src', 'wasm', variant);
 const env = wasmEnv();
 
@@ -31,7 +37,7 @@ run(
     '--release',
     '--features',
     features,
-    ...(variant === 'dev' ? ['--target-dir', targetDir] : []),
+    ...(variant !== 'release' ? ['--target-dir', targetDir] : []),
   ],
   { cwd: CRATES, env },
 );

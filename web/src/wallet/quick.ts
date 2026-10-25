@@ -33,31 +33,55 @@ export class QuickKeyStore {
     return r && r.network === this.network ? r.key : undefined;
   }
 
-  async save(key: QuickKey): Promise<void> {
-    await this.kv.put<StoredQuickKey>(KEYS, QUICK, { network: this.network, key, createdMs: String(this.now()) });
-  }
-
-  async forget(): Promise<void> {
-    await this.kv.del(KEYS, QUICK);
+  /**
+   * Store `key` only while the stored key is still the one at address `expected` (null: none stored), in one
+   * transaction (F2/F3 review S1): a key is never overwritten unless the player was shown it in this very flow,
+   * and another tab's write in between is wallet_changed. A record of another network counts as a stored key.
+   */
+  async replace(expected: string | null, key: QuickKey): Promise<void> {
+    await this.kv.update<StoredQuickKey>(KEYS, QUICK, (cur) => {
+      const now = cur ? cur.key.address : null;
+      if (now !== expected) {
+        throw new PageError(
+          'wallet_changed',
+          `the stored key is ${now ? `${cur?.network} …${now.slice(-6)}` : 'none'}, expected ${expected ? `…${expected.slice(-6)}` : 'none'}`,
+        );
+      }
+      return { network: this.network, key, createdMs: String(this.now()) };
+    });
   }
 }
 
+/** A new key, stored only when this browser holds none (another tab may have made one: wallet_changed). */
 export async function createQuickKey(lottery: LotteryClient, store: QuickKeyStore): Promise<QuickKey> {
   const k = unwrap(await lottery.call('quickWalletNew'));
-  await store.save(k);
+  await store.replace(null, k);
   return k;
 }
 
+/**
+ * Import a key. The same key as the stored one is simply used. Another key replaces the stored one only when
+ * `replacing` names the stored key's address, the one the player was shown (exported) in this flow; else
+ * wallet_changed, and the stored key stays (F2/F3 review S1).
+ */
 export async function importQuickKey(
   lottery: LotteryClient,
   store: QuickKeyStore,
   secretKey: string,
+  replacing: string | null,
 ): Promise<QuickKey> {
   const k = unwrap(await lottery.call('quickWalletImport', secretKey.trim().toLowerCase()));
-  await store.save(k);
+  const cur = await store.load();
+  if (cur?.address === k.address) return cur;
+  await store.replace(replacing, k);
   return k;
 }
 
+/**
+ * The quick wallet as an adapter, pinned to the key it connected with (F2/F3 review S1): its address (the
+ * session's payout and change) and every signature are that key's. Before signing it checks that this
+ * browser still holds that key; if another tab replaced it, nothing is signed (wallet_changed).
+ */
 export class QuickWalletAdapter implements WalletAdapter {
   readonly kind = 'quick' as const;
   readonly marker = QUICK_WALLET_MARKER;
@@ -68,35 +92,38 @@ export class QuickWalletAdapter implements WalletAdapter {
     private readonly store: QuickKeyStore,
     private readonly pageNetwork: string,
     private readonly coins: (address: string) => Promise<Utxo[]>,
+    private readonly key: QuickKey,
   ) {}
 
-  private async key(): Promise<QuickKey> {
-    const k = await this.store.load();
-    if (!k) throw new PageError('wallet_missing', 'no quick wallet key in this browser');
-    return k;
-  }
-
-  async connect(): Promise<string> {
-    return (await this.key()).address;
+  connect(): Promise<string> {
+    return Promise.resolve(this.key.address);
   }
 
   network(): Promise<string> {
     return Promise.resolve(this.pageNetwork);
   }
 
-  async address(): Promise<string> {
-    return (await this.key()).address;
+  address(): Promise<string> {
+    return Promise.resolve(this.key.address);
   }
 
   async utxos(): Promise<Utxo[]> {
-    return this.coins(await this.address());
+    return this.coins(this.key.address);
   }
 
   async signInputs(built: BuiltTx, indices: readonly number[]): Promise<string> {
     signItems(built, indices);
     return this.serial.run(async () => {
-      const k = await this.key();
-      return unwrap(await this.lottery.call('quickWalletSign', { built, secretKey: k.secretKey }));
+      const stored = await this.store.load();
+      if (stored?.address !== this.key.address) {
+        throw new PageError(
+          'wallet_changed',
+          `connected …${this.key.address.slice(-6)}, stored ${stored ? `…${stored.address.slice(-6)}` : 'none'}`,
+        );
+      }
+      const other = built.sign.find((s) => s.address && s.address !== this.key.address);
+      if (other) throw new PageError('wallet_changed', `input ${other.index} is not this key's`);
+      return unwrap(await this.lottery.call('quickWalletSign', { built, secretKey: this.key.secretKey }));
     });
   }
 }

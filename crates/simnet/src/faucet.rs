@@ -6,9 +6,11 @@
 //! `POST /faucet?address=kaspasim:...` pays `AMOUNT` from the dev run's throwaway wallet to a
 //! `kaspasim:` address and answers `{"transactionId": "<hex>", "amount": "<sompi>"}` (the dev
 //! loop's next blocks accept it). Anything else is a JSON error. Loopback only, at most
-//! `MAX_REQUESTS` payments per run, one at a time; CORS open (the page is another loopback
-//! origin; a POST with no body and no custom header needs no preflight, but `OPTIONS` is
-//! answered anyway).
+//! `MAX_REQUESTS` payments per run, one at a time. Cross-origin requests are refused (F2/F3
+//! review note): a browser request must come from the dev page's origin (`PAGE_ORIGINS`, the
+//! fixed `npm run dev:simnet` address), so another site open in the same browser cannot drain
+//! the dev wallet with a no-cors POST; CORS names that origin only. A request with no `Origin`
+//! (a local tool such as curl, which can reach the loopback node anyway) is served.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -30,6 +32,22 @@ pub const AMOUNT: u64 = 100 * KAS;
 pub const MAX_REQUESTS: usize = 200;
 /// The request head cap.
 const HEAD_MAX: usize = 8 << 10;
+/// The dev page's origins (`web/scripts/dev-simnet.mjs` serves it on 127.0.0.1:5173, strict port).
+pub const PAGE_ORIGINS: [&str; 2] = ["http://127.0.0.1:5173", "http://localhost:5173"];
+
+/// The request's `Origin` when a browser sent one: Ok(None) without one, Ok(Some(origin)) for the
+/// dev page, Err for any other origin (and for a repeated header).
+pub fn origin_check(head: &str) -> Result<Option<&'static str>, String> {
+    let mut found: Vec<&str> = head.lines().skip(1).filter_map(|l| l.split_once(':')).filter(|(k, _)| k.trim().eq_ignore_ascii_case("origin")).map(|(_, v)| v.trim()).collect();
+    match found.len() {
+        0 => Ok(None),
+        1 => {
+            let o = found.remove(0);
+            PAGE_ORIGINS.iter().find(|p| **p == o).map(|p| Some(*p)).ok_or_else(|| format!("origin {o} is not the dev page"))
+        }
+        _ => Err("more than one Origin header".into()),
+    }
+}
 
 struct State {
     c: Arc<KaspaRpcClient>,
@@ -59,15 +77,13 @@ pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet) -> Resul
     }))
 }
 
-fn reply(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\naccess-control-allow-methods: POST, OPTIONS\r\ncache-control: no-store\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    )
+fn reply(status: &str, origin: Option<&str>, body: &str) -> String {
+    let cors = origin.map(|o| format!("access-control-allow-origin: {o}\r\nvary: origin\r\naccess-control-allow-methods: POST, OPTIONS\r\n")).unwrap_or_default();
+    format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{cors}cache-control: no-store\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
 }
 
-fn err(status: &str, msg: &str) -> String {
-    reply(status, &serde_json::json!({ "error": msg }).to_string())
+fn err(status: &str, origin: Option<&str>, msg: &str) -> String {
+    reply(status, origin, &serde_json::json!({ "error": msg }).to_string())
 }
 
 async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
@@ -86,20 +102,29 @@ async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
     let line = head.lines().next().unwrap_or("");
     let mut parts = line.split(' ');
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let origin = match origin_check(&head) {
+        Ok(o) => o,
+        Err(e) => {
+            println!("dev faucet: refused a cross-origin request: {e}");
+            let _ = s.write_all(err("403 Forbidden", None, &e).as_bytes()).await;
+            let _ = s.shutdown().await;
+            return;
+        }
+    };
     let resp = match (method, target.split_once('?')) {
-        ("OPTIONS", _) => reply("204 No Content", ""),
+        ("OPTIONS", _) => reply("204 No Content", origin, ""),
         ("POST", Some(("/faucet", q))) => match q.split('&').find_map(|kv| kv.strip_prefix("address=")) {
             Some(a) => match pay(&st, &a.replace("%3A", ":").replace("%3a", ":")).await {
                 Ok((id, amount)) => {
                     println!("dev faucet: paid {} KAS to {a}: {id}", amount / KAS);
-                    reply("200 OK", &serde_json::json!({ "transactionId": id, "amount": amount.to_string() }).to_string())
+                    reply("200 OK", origin, &serde_json::json!({ "transactionId": id, "amount": amount.to_string() }).to_string())
                 }
-                Err(e) => err("400 Bad Request", &e),
+                Err(e) => err("400 Bad Request", origin, &e),
             },
-            None => err("400 Bad Request", "address= is required"),
+            None => err("400 Bad Request", origin, "address= is required"),
         },
-        ("POST", _) | ("GET", _) => err("404 Not Found", "POST /faucet?address=<kaspasim:...>"),
-        _ => err("405 Method Not Allowed", "POST only"),
+        ("POST", _) | ("GET", _) => err("404 Not Found", origin, "POST /faucet?address=<kaspasim:...>"),
+        _ => err("405 Method Not Allowed", origin, "POST only"),
     };
     let _ = s.write_all(resp.as_bytes()).await;
     let _ = s.shutdown().await;
@@ -134,4 +159,21 @@ async fn pay(st: &State, address: &str) -> Result<(String, u64), String> {
     g.0.extend(ins.iter().map(|u| u.op));
     g.1 += 1;
     Ok((tx.id().to_string(), AMOUNT))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F2/F3 review note: only the dev page's origin (or no browser at all) may ask for coins.
+    #[test]
+    fn cross_origin_requests_are_refused() {
+        let head = |o: &str| format!("POST /faucet?address=kaspasim:qq HTTP/1.1\r\nHost: 127.0.0.1:8791\r\n{o}\r\n");
+        assert_eq!(origin_check(&head("Origin: http://127.0.0.1:5173\r\n")), Ok(Some("http://127.0.0.1:5173")));
+        assert_eq!(origin_check(&head("origin: http://localhost:5173\r\n")), Ok(Some("http://localhost:5173")));
+        assert_eq!(origin_check(&head("")), Ok(None), "curl and other local tools send no Origin");
+        for bad in ["Origin: https://evil.example\r\n", "Origin: http://127.0.0.1:5174\r\n", "Origin: null\r\n", "Origin: http://127.0.0.1:5173\r\nOrigin: http://127.0.0.1:5173\r\n"] {
+            assert!(origin_check(&head(bad)).is_err(), "{bad}");
+        }
+    }
 }

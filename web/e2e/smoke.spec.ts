@@ -14,7 +14,7 @@ test('the round card shows the open round from the simnet, checked against the n
   const round: string = await card.getAttribute('data-round').then((r) => r ?? '');
   expect(Number(round)).toBeGreaterThanOrEqual(Number(status.currentRound));
   await expect(page.getByTestId('round-number')).toHaveText(`Round ${round}`);
-  await expect(page.getByTestId('network-badge')).toHaveText(/simnet/i);
+  await expect(page.getByTestId('network-badge')).toHaveText(/simnet · no value/i);
   const row = (await (await request.get(`${run.api}rounds`)).json()).rounds.find(
     (x: { round: string }) => x.round === round,
   );

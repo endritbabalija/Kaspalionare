@@ -1,6 +1,6 @@
 // S1's buy card (spec 3, 7, mock-up board 2): the picker, the ticket builder, the cost panel as figure rows
-// from the built transaction (price, deposit with its return date, network fee, referral with its
-// destination, total), the buy button and the transaction progress. After the deadline: "Sales closed;
+// from the built transaction (price with its referral share and destination, deposit with its return date,
+// network fee, total: the top-level rows add up to the total), the buy button and the transaction progress. After the deadline: "Sales closed;
 // waiting for close()" with a link to Rounds (S4).
 import { useId } from 'react';
 import type { BuyFigures } from '@wasm/web.js';
@@ -26,37 +26,31 @@ function rows(
   return [
     { id: 'price', name: 'Price', sompi: f?.price },
     {
-      id: 'deposit',
-      name: 'Deposit',
-      sompi: f?.deposit,
-      note:
-        f && clock ? (
-          <span className="inline-flex items-baseline gap-1">
-            <span>back</span>
-            <Time
-              daa={f.depositBack}
-              virtualDaa={clock.virtualDaa}
-              observedAt={clock.observedAt}
-              testId="deposit-back"
-            />
-          </span>
-        ) : undefined,
-    },
-    { id: 'fee', name: 'Network fee', sompi: f?.fee },
-    {
       id: 'referral',
       name: 'Referral',
+      part: true,
       sompi: f?.referral.amount,
       note: f ? (
         f.referral.paid && f.referral.address ? (
           <HashOrAddress value={f.referral.address} kind="address" explorer={explorer} testId="referral-to" />
         ) : (
           <span data-testid="referral-to" data-value="round">
-            Stays in round
+            Round
           </span>
         )
       ) : undefined,
     },
+    { id: 'deposit', name: 'Deposit', sompi: f?.deposit },
+    {
+      id: 'deposit-back',
+      name: 'Back',
+      part: true,
+      value:
+        f && clock ? (
+          <Time daa={f.depositBack} virtualDaa={clock.virtualDaa} observedAt={clock.observedAt} testId="deposit-back" />
+        ) : undefined,
+    },
+    { id: 'fee', name: 'Network fee', sompi: f?.fee },
   ];
 }
 
@@ -113,6 +107,7 @@ export function BuyCard({
       <NumberPicker
         pick={play.pick}
         m={play.m}
+        shape={s.shape}
         ticketFull={play.ticket.length >= play.bMax}
         disabled={play.busy}
         onMain={play.onMain}
@@ -162,7 +157,7 @@ export function BuyCard({
           size="lg"
           data-testid="buy-button"
           data-shard={prepared?.shardIndex ?? ''}
-          disabled={!prepared || play.busy}
+          disabled={!prepared || play.busy || tx?.failedCode === 'submit_unknown'}
           onClick={() => void play.onBuy()}
         >
           Buy
@@ -170,7 +165,7 @@ export function BuyCard({
       )}
       {tx && (
         <section aria-label="Purchase" data-testid="buy-progress" className={card}>
-          <TxProgress step={tx.step} failed={tx.failed} rebuilt={tx.rebuilt} />
+          <TxProgress step={tx.step} failed={tx.failed} rebuilt={tx.rebuilt} checking={tx.checking} />
           {tx.failedCode && <span data-testid="buy-failed-code" data-code={tx.failedCode} hidden />}
           {tx.id && <HashOrAddress value={tx.id} kind="transaction" explorer={explorer} testId="buy-txid" />}
         </section>

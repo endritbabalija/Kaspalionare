@@ -495,18 +495,22 @@ pub struct RoundCheckInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CheckedRound {
     pub round: Dec,
-    /// The status the chain objects show (`open`, `closing`, `drawn`), or the API's when no
-    /// live object of the round shows one (`void`, or a drawn round whose pools are gone);
-    /// `statusChecked` says which.
+    /// The status the chain objects show (`open`: live shards or round r's controller;
+    /// `closing`: the marker; `drawn`: a pool or the record), or the API's when no live object
+    /// of the round shows one (`void`, or a drawn round whose pools are gone); `statusChecked`
+    /// says which. A page shows only a checked status (F2/F3 review S4).
     pub status: RoundStatus,
     pub status_checked: bool,
     pub m: Option<u32>,
     pub k: u32,
     pub objects: Vec<CheckedObject>,
-    /// The roots rebuilt from the purchases (they matched the chain's), when purchases were
-    /// given and a chain object to compare with was live.
+    /// The roots rebuilt from the purchases (they matched the chain's), position i for shard i,
+    /// when purchases were given and the chain fixes every one of the k roots: the marker's or a
+    /// pool's frozen roots once closed; while open, round r's controller and a live shard for
+    /// every index 0..k-1 (else the check fails: F2/F3 review M1).
     pub roots: Option<RootsOut>,
-    /// The purchases, checked (as given), ready for `buildClaim`/`buildDraw`.
+    /// The purchases, all k lists checked against `roots` (as given), ready for
+    /// `buildClaim`/`buildDraw`. Present exactly when `roots` is.
     pub purchases: Option<Vec<Hex>>,
     /// The winning numbers from the anchor proof (`final` against the pools, `provisional`
     /// against the node's anchor block), when a proof was given.
@@ -560,16 +564,23 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
         }
         objects.push(c);
     }
-    // The status the chain shows.
+    // The status the chain shows. A live controller of round r means round r is not closed yet
+    // (`close()` spends it and creates round r + 1's): open, whether or not its shards were served
+    // (F2/F3 review S4: an open round served with its controller and without its shards must not
+    // pass as drawn).
+    let open_controller = controller.as_ref().is_some_and(|(_, c)| c.round == r);
     let shown = if marker.is_some() {
         Some(RoundStatus::Closing)
     } else if !pools.is_empty() || record.is_some() {
         Some(RoundStatus::Drawn)
-    } else if !shards.is_empty() {
+    } else if !shards.is_empty() || open_controller {
         Some(RoundStatus::Open)
     } else {
         None
     };
+    if open_controller && (marker.is_some() || !pools.is_empty() || record.is_some()) {
+        return Err(chain_mismatch(format!("round {r}: its controller is live, so it is not closed, yet a closed round's object was served")));
+    }
     if let Some(s) = shown {
         if s != a.status {
             return Err(chain_mismatch(format!("the indexer says round {r} is {:?}; the chain's objects say {s:?}", a.status)));
@@ -622,13 +633,30 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
         if let Some(against) = against {
             let out = api::check_roots(&RootsInput { covenant_id: i.covenant_id.clone(), against, purchases: p.shards.clone() }).map_err(mismatch)?;
             roots_out = Some(out);
-        } else if !shards.is_empty() {
-            let mut roots = vec![];
+        } else if shown == Some(RoundStatus::Open) {
+            // Open (F2/F3 review M1): every list is checked, or none is returned. That needs round r's
+            // controller (it fixes m and k on the chain, checked above) and, for every index 0..k-1,
+            // exactly one live shard of the round whose root the list rebuilds. The roots come out
+            // keyed by shard index (position i is shard i's).
+            if !open_controller {
+                return Err(chain_mismatch(format!("round {r}: its controller was not served, so k and m are not the chain's")));
+            }
+            if a.k as usize > K_MAX {
+                return Err(chain_mismatch(format!("round {r}: k = {} is above {K_MAX}", a.k)));
+            }
+            let mut by_index: Vec<Option<&lottery::state::ShardState>> = vec![None; a.k as usize];
             for (_, s) in &shards {
-                let list = p.shards.get(s.shard_index as usize).ok_or_else(|| chain_mismatch("no purchase list for a live shard"))?;
+                let slot = by_index.get_mut(s.shard_index as usize).ok_or_else(|| chain_mismatch(format!("round {r}: shard index {} is not below k", s.shard_index)))?;
+                if slot.replace(s).is_some() {
+                    return Err(chain_mismatch(format!("round {r}: shard {} served twice", s.shard_index)));
+                }
+            }
+            let mut roots = vec![];
+            for (n, (slot, list)) in by_index.iter().zip(&p.shards).enumerate() {
+                let s = slot.ok_or_else(|| chain_mismatch(format!("round {r}: shard {n} was not served, so its purchases are not checked")))?;
                 let tree = verify::rebuild_tree_bytes(s.m, &unhex("purchases.shards", list).map_err(mismatch)?).map_err(mismatch)?;
                 if tree.root() != s.root {
-                    return Err(chain_mismatch(format!("tree_mismatch: shard {}'s purchases do not rebuild its live root", s.shard_index)));
+                    return Err(chain_mismatch(format!("tree_mismatch: shard {n}'s purchases do not rebuild its live root")));
                 }
                 roots.push(hex(&s.root));
             }

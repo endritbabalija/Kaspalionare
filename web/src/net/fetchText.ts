@@ -3,6 +3,9 @@
 // and abandoned beyond it, so a huge answer never sits in the page's memory.
 import { PageError } from '@/lib/errors';
 
+/** How long one indexer response may take, headers and body (F2/F3 review note: never wait forever). */
+export const FETCH_TIMEOUT_MS = 15_000;
+
 export interface TextResponse {
   status: number;
   text: string;
@@ -11,14 +14,31 @@ export interface TextResponse {
 export async function fetchText(
   url: string,
   cap: number,
-  init?: { signal?: AbortSignal; fetch?: typeof fetch },
+  init?: { signal?: AbortSignal; fetch?: typeof fetch; timeoutMs?: number },
 ): Promise<TextResponse> {
   const f = init?.fetch ?? fetch;
+  const ms = init?.timeoutMs ?? FETCH_TIMEOUT_MS;
+  const timer = new AbortController();
+  const t = setTimeout(() => timer.abort(new DOMException(`no answer after ${ms / 1000} s`, 'TimeoutError')), ms);
+  const signal = init?.signal ? AbortSignal.any([init.signal, timer.signal]) : timer.signal;
+  try {
+    return await read(f, url, cap, signal);
+  } catch (e) {
+    if (signal.aborted && !(e instanceof PageError && e.code === 'bytes_length')) {
+      throw new PageError('indexer_unavailable', `${url}: ${String(signal.reason ?? e)}`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function read(f: typeof fetch, url: string, cap: number, signal: AbortSignal): Promise<TextResponse> {
   let res: Response;
   try {
     res = await f(url, {
       method: 'GET',
-      signal: init?.signal,
+      signal,
       credentials: 'omit',
       cache: 'no-store',
       redirect: 'error',

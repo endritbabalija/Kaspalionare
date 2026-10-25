@@ -242,6 +242,13 @@ pub fn error_table() -> JsValue {
     crate::node::error_table().serialize(&ser).unwrap_or(JsValue::NULL)
 }
 
+/// The game's fixed shape (5 of 1..30, B_MAX, F_MAX) for the picker and the coin choice.
+#[wasm_bindgen(js_name = gameShape, unchecked_return_type = "GameShape")]
+pub fn game_shape() -> JsValue {
+    let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    crate::node::game_shape().serialize(&ser).unwrap_or(JsValue::NULL)
+}
+
 /// The jackpot odds at bonus range m: "1 in" this many (C = N x m, design 4.1).
 #[wasm_bindgen(js_name = jackpotOdds, unchecked_return_type = "Outcome<Dec>")]
 pub fn jackpot_odds(m: u32) -> JsValue {

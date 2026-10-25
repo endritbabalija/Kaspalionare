@@ -1037,6 +1037,45 @@ fn buy_figures_are_bound_to_the_transaction() {
     }
 }
 
+/// F2/F3 review S2: a buyer may name themselves through a referral link (design 5.1, spec 7).
+/// The referral output then pays the wallet's own script, so the built summary counts it as
+/// coming back to the wallet; it is still the referral, part of the price. `buyFigures` shows
+/// it as the referral paid to the wallet's own address, with the same total (price + deposit
+/// + fee) as for any other referrer; before the fix it refused every such purchase
+/// (`built_mismatch`), so a self-referral link blocked buying in that browser.
+#[test]
+fn a_self_referral_is_the_referral_row_paid_to_the_own_address() {
+    let mut paid_cases = 0;
+    for name in ["buy b=1 ref", "buy b=4"] {
+        let (_, inp) = find(name);
+        let Input::Buy(mut b) = inp else { unreachable!() };
+        let own = api::address_of(Net::Testnet10, &b.funds.coins[0].script_public_key).unwrap();
+        b.referrer = Some(own.clone());
+        let built = api::build_buy(Net::Testnet10, &b).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let f = api::buy_figures(Net::Testnet10, &figures_input(&b, &built)).unwrap_or_else(|e| panic!("{name}: self-referral refused: {e}"));
+        let fee: u64 = built.fee.parse().unwrap();
+        let (price, deposit): (u64, u64) = (f.price.parse().unwrap(), f.deposit.parse().unwrap());
+        assert_eq!(f.total, (price + deposit + fee).to_string(), "{name}: total = price + deposit + fee");
+        if f.referral.paid {
+            paid_cases += 1;
+            assert_eq!(f.referral.address.as_deref(), Some(own.as_str()), "{name}: the referral row names the own address");
+            assert!(built.summary.outputs[2].to_wallet, "{name}: output 2 pays the wallet itself");
+            let r: u64 = f.referral.amount.parse().unwrap();
+            let (win, back): (u64, u64) = (built.summary.wallet_in.parse().unwrap(), built.summary.wallet_back.parse().unwrap());
+            assert_eq!(win - back + r, price + deposit + fee, "{name}: the referral comes back with the change");
+            // The same build named with another referrer, or with none, is still refused.
+            let mut other = figures_input(&b, &built);
+            other.referrer = Some(addr(&lottery::state::Payout::Schnorr([0x45; 32])));
+            assert_eq!(api::buy_figures(Net::Testnet10, &other).unwrap_err().code, Code::BuiltMismatch, "{name}: another referrer");
+            let mut none = figures_input(&b, &built);
+            none.referrer = None;
+            assert_eq!(api::buy_figures(Net::Testnet10, &none).unwrap_err().code, Code::BuiltMismatch, "{name}: no referrer");
+        }
+        println!("{name} self-referral: referral {} paid {} to {:?}, total {}", f.referral.amount, f.referral.paid, f.referral.address, f.total);
+    }
+    assert!(paid_cases > 0, "no fixture pays the referral: the self-referral case is not exercised");
+}
+
 /// The page's Vitest suite (`web/src/wallet/postsign.test.ts`) builds from these fixture
 /// inputs in the real wasm (with its own fresh quick-wallet key put in place of the fixture
 /// wallet's coins), so the file must be the fixtures' current page JSON. It holds no key.

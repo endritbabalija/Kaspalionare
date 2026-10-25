@@ -34,7 +34,7 @@ export async function checkedRound(ctx: Ctx, r: string): Promise<CheckedRound> {
 export interface RoundCardData {
   round: string;
   status: RoundStatus;
-  /** Whether a live chain object showed the status (else it is the indexer's word). */
+  /** Always true: a status no live chain object shows is never put on the card (loadRoundCard refuses it). */
   statusChecked: boolean;
   m: number;
   /** J, sompi (the round's controller state). */
@@ -67,6 +67,11 @@ export async function loadRoundCard(ctx: Ctx, now: () => number = Date.now): Pro
   const ctrl = controllerOf(checked);
   if (!ctrl || checked.m === undefined) {
     throw new PageError('chain_mismatch', `round ${checked.round}: no live controller of the round on the node`);
+  }
+  // Only a status the chain's objects show is ever shown (F2/F3 review S4); with round r's controller live
+  // that is `open`.
+  if (!checked.statusChecked) {
+    throw new PageError('chain_mismatch', `round ${checked.round}: no live object of the round shows its status`);
   }
   const m = Number(ctrl.m);
   const odds = unwrap(await ctx.lottery.call('jackpotOdds', m));

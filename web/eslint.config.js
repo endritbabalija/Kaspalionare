@@ -10,6 +10,8 @@ export default tseslint.config(
     ignores: [
       'dist',
       'dist-mainnet-check',
+      'dist-dev-check',
+      'dist-csp-check',
       'node_modules',
       'src/wasm',
       'playwright-report',

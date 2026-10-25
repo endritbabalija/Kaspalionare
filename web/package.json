@@ -12,7 +12,7 @@
     "dev": "vite",
     "wasm:dev": "node scripts/wasm.mjs dev",
     "wasm:release": "node scripts/wasm.mjs release",
-    "build": "node scripts/wasm.mjs release && tsc -b && vite build && node scripts/check-bundle.mjs",
+    "build": "node scripts/wasm.mjs release && tsc -b && vite build && node scripts/check-bundle.mjs && node scripts/check-bundle-control.mjs",
     "check:mainnet": "node scripts/check-mainnet.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b",
@@ -22,7 +22,9 @@
     "test:unit": "vitest run",
     "test": "node scripts/ensure-wasm.mjs && npm run typecheck && npm run lint && npm run format:check && npm run test:unit",
     "e2e": "playwright test",
-    "e2e:install": "node scripts/playwright-install.mjs"
+    "e2e:install": "node scripts/playwright-install.mjs",
+    "wasm:mainnet": "node scripts/wasm.mjs mainnet",
+    "check:csp": "node scripts/check-csp.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dropdown-menu": "2.1.25",

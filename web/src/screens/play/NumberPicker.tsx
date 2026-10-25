@@ -1,14 +1,15 @@
-// S1's number picker (spec 3): 5 of 1..30, then a bonus in 1..m (m from the round's live shards), quick pick
+// S1's number picker (spec 3): 5 of 1..30 (the game's shape from the wasm), then a bonus in 1..m (m from the round's live shards), quick pick
 // and clear, and "Add" to put the combination on the ticket (up to B_MAX).
 import { useId } from 'react';
 import { BonusTile } from '@/components/BonusTile';
 import { NumberBall, type NumberBallState } from '@/components/NumberBall';
 import { Button } from '@/components/ui/button';
-import { MAIN_MAX, MAIN_PICKS, complete, type Pick } from '@/play/picker';
+import { complete, type Pick, type Shape } from '@/play/picker';
 
 export interface NumberPickerProps {
   pick: Pick;
   m: number;
+  shape: Shape;
   /** The ticket is full (B_MAX combinations): nothing more can be added. */
   ticketFull: boolean;
   disabled?: boolean;
@@ -22,7 +23,7 @@ export interface NumberPickerProps {
 export function NumberPicker(p: NumberPickerProps) {
   const title = useId();
   const bonusTitle = useId();
-  const full = p.pick.main.length >= MAIN_PICKS;
+  const full = p.pick.main.length >= p.shape.mainPicks;
   const ballState = (n: number): NumberBallState => {
     if (p.disabled) return 'disabled';
     if (p.pick.main.includes(n)) return 'picked';
@@ -39,11 +40,11 @@ export function NumberPicker(p: NumberPickerProps) {
           Numbers
         </h2>
         <span data-testid="picked-count" className="font-mono text-[13px] text-graphite tabular-nums">
-          {p.pick.main.length}/{MAIN_PICKS}
+          {p.pick.main.length}/{p.shape.mainPicks}
         </span>
       </div>
       <div className="grid grid-cols-6 gap-1.5" role="group" aria-labelledby={title}>
-        {Array.from({ length: MAIN_MAX }, (_, i) => i + 1).map((n) => (
+        {Array.from({ length: p.shape.mainMax }, (_, i) => i + 1).map((n) => (
           <NumberBall key={n} n={n} state={ballState(n)} onToggle={p.onMain} />
         ))}
       </div>
@@ -71,7 +72,7 @@ export function NumberPicker(p: NumberPickerProps) {
           variant="primary"
           data-testid="add-combination"
           onClick={p.onAdd}
-          disabled={p.disabled || p.ticketFull || !complete(p.pick, p.m)}
+          disabled={p.disabled || p.ticketFull || !complete(p.pick, p.m, p.shape)}
         >
           Add
         </Button>

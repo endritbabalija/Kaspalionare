@@ -17,15 +17,27 @@ export interface Config {
   bundleHash: string | undefined;
   /** The site owner's referral address (a kaspatest: address; spec 7; kaspasim: on the simnet dev run). */
   referralAddress: string | undefined;
-  /** The testnet-10 faucet the wallet sheet links to (spec S7; https only). */
+  /** The testnet-10 faucet the wallet sheet links to (spec S7; https only; default TESTNET_FAUCET_LINK; none on the simnet). */
   faucetLink: string | undefined;
-  /** The testnet block explorer (transactions at <url>/txs/<id>, addresses at <url>/addresses/<a>). */
+  /** The testnet block explorer (transactions at <url>/txs/<id>, addresses at <url>/addresses/<a>; https only). */
   explorerUrl: string | undefined;
   /** The dev faucet (simnet dev run only; never in a production build). */
   faucetUrl: string | undefined;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
+
+/** The testnet-10 faucet the quick wallet sheet links to unless the build names another (owner, 2026-10-26). */
+export const TESTNET_FAUCET_LINK = 'https://faucet-tn10.kaspanet.io';
+
+function httpsOrigin(v: string): boolean {
+  try {
+    const u = new URL(v);
+    return u.protocol === 'https:' && !u.username && !u.password && u.host.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 function nonEmpty(v: string | undefined): string | undefined {
   return v && v.trim().length ? v.trim() : undefined;
@@ -62,21 +74,29 @@ export function readConfig(env: ConfigEnv, dev: boolean): { config: Config } | {
   const refPrefix = network === 'simnet' ? 'kaspasim:' : 'kaspatest:';
   if (referralAddress && !referralAddress.startsWith(refPrefix))
     problems.push(`VITE_REFERRAL_ADDRESS is not ${refPrefix}`);
-  const faucetLink = nonEmpty(env.VITE_FAUCET_LINK);
-  if (faucetLink && !faucetLink.startsWith('https://')) problems.push('VITE_FAUCET_LINK is not https://');
+  // The testnet-10 faucet link: the owner's default unless set; none on the simnet (its dev faucet instead).
+  const faucetLink = nonEmpty(env.VITE_FAUCET_LINK) ?? (network === 'testnet-10' ? TESTNET_FAUCET_LINK : undefined);
+  if (faucetLink && !httpsOrigin(faucetLink)) problems.push('VITE_FAUCET_LINK is not an https:// URL');
+  const explorerUrl = nonEmpty(env.VITE_EXPLORER_URL);
+  if (explorerUrl && !httpsOrigin(explorerUrl)) problems.push('VITE_EXPLORER_URL is not an https:// URL');
+  // A built page connects to a testnet-10 node over TLS only: its CSP allows wss: (vercel.json), and a URL the
+  // CSP refuses leaves the node client waiting forever (found by check-csp.mjs).
+  const nodeUrl = nonEmpty(env.VITE_NODE_URL);
+  if (nodeUrl && network === 'testnet-10' && !dev && !nodeUrl.startsWith('wss://'))
+    problems.push('VITE_NODE_URL is not wss://');
   const faucetUrl = dev && network === 'simnet' ? nonEmpty(env.VITE_FAUCET_URL) : undefined;
   if (problems.length || !indexerUrl || !covenantId) return { problems };
   return {
     config: {
       network,
-      nodeUrl: nonEmpty(env.VITE_NODE_URL),
+      nodeUrl,
       indexerUrl: indexerUrl.endsWith('/') ? indexerUrl : `${indexerUrl}/`,
       covenantId,
       bundleHash,
       referralAddress,
-      explorerUrl: nonEmpty(env.VITE_EXPLORER_URL),
+      explorerUrl,
       faucetUrl,
-      faucetLink,
+      faucetLink: network === 'testnet-10' ? faucetLink : undefined,
     },
   };
 }

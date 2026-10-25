@@ -121,35 +121,42 @@ fn dto_of(e: kaspa_rpc_core::RpcUtxosByAddressesEntry) -> Utxo {
     convert::utxo_dto(&op, &entry)
 }
 
-async fn utxos_of(c: &KaspaRpcClient, n: Net, addresses: Vec<String>) -> Result<Vec<Utxo>> {
-    let mut a = vec![];
-    for s in &addresses {
-        n.script_of("address", s)?;
-        a.push(kaspa_addresses::Address::try_from(s.as_str()).map_err(|e| Error::new(Code::InputFormat, format!("address: {e}")))?);
-    }
-    let v = c.get_utxos_by_addresses(a).await.map_err(|e| rpc_err("getUtxosByAddresses", e))?;
-    if v.len() > node::UTXOS_MAX {
-        return Err(Error::new(Code::InputRange, format!("the node returned {} UTXOs (at most {})", v.len(), node::UTXOS_MAX)));
-    }
-    Ok(v.into_iter().map(dto_of).collect())
+/// The node's UTXOs at one address, as the RPC returns them. rusty-kaspa v2.1.0 has no query
+/// by outpoint (`rpc/core/src/api/rpc.rs`: `get_utxos_by_addresses`, line 363, is the only UTXO
+/// read), so the answer is everything at the address; its size is bounded only by the wRPC
+/// message limit. Callers filter it as it is consumed (F2/F3 review S5), one address at a time,
+/// so dust at one address never meets another address's answer.
+async fn utxos_at(c: &KaspaRpcClient, n: Net, address: &str) -> Result<Vec<kaspa_rpc_core::RpcUtxosByAddressesEntry>> {
+    n.script_of("address", address)?;
+    let a = kaspa_addresses::Address::try_from(address).map_err(|e| Error::new(Code::InputFormat, format!("address: {e}")))?;
+    c.get_utxos_by_addresses(vec![a]).await.map_err(|e| rpc_err("getUtxosByAddresses", e))
 }
 
 async fn entries(n: Net, objects: Vec<ApiObject>) -> Result<Vec<Utxo>> {
     let c = client()?;
     let addrs = node::object_addresses(n, &objects)?;
-    if addrs.is_empty() {
-        return Ok(vec![]);
+    let want = node::wanted(&objects);
+    let mut out = vec![];
+    for a in &addrs {
+        let v = utxos_at(&c, n, a).await?;
+        let kept = node::keep_outpoints(&want, v, |e| (convert::hex(&e.outpoint.transaction_id.as_bytes()), e.outpoint.index));
+        out.extend(kept.into_iter().map(dto_of));
     }
-    let all = utxos_of(&c, n, addrs).await?;
-    node::entries_for(&objects, all)
+    // One entry per outpoint, also when two objects share an address.
+    Ok(node::entries_for(&objects, out))
 }
 
-async fn coins(n: Net, address: String) -> Result<Vec<Utxo>> {
+/// The address's plain coins: the `limit` largest, the largest first (None: all, for the balance).
+async fn coins(n: Net, address: String, limit: Option<usize>) -> Result<Vec<Utxo>> {
     let c = client()?;
     let a = node::coin_address(n, &address)?;
-    let mut v = utxos_of(&c, n, vec![a]).await?;
-    v.retain(|u| u.covenant_id.is_none());
-    Ok(v)
+    let v = utxos_at(&c, n, &a).await?;
+    let plain = |e: &kaspa_rpc_core::RpcUtxosByAddressesEntry| e.utxo_entry.covenant_id.is_none();
+    let kept = match limit {
+        Some(k) => node::largest_coins(v, k, plain, |e| e.utxo_entry.amount),
+        None => v.into_iter().filter(plain).collect(),
+    };
+    Ok(kept.into_iter().map(dto_of).collect())
 }
 
 async fn fee_rate() -> Result<u32> {
@@ -221,10 +228,11 @@ pub async fn node_entries(#[wasm_bindgen(unchecked_param_type = "ApiObject[]")] 
     out(r.await)
 }
 
-/// A wallet address's plain (non-covenant) coins as the node reports them.
+/// A wallet address's plain (non-covenant) coins as the node reports them: the
+/// `COINS_LISTED_MAX` largest, the largest first (dust beyond them is never listed).
 #[wasm_bindgen(js_name = nodeCoins, unchecked_return_type = "Outcome<Utxo[]>")]
 pub async fn node_coins(address: String) -> JsValue {
-    let r = async { coins(net()?, address).await };
+    let r = async { coins(net()?, address, Some(node::COINS_LISTED_MAX)).await };
     out(r.await)
 }
 
@@ -232,7 +240,7 @@ pub async fn node_coins(address: String) -> JsValue {
 /// (spec S7; never the wallet's own word).
 #[wasm_bindgen(js_name = nodeBalance, unchecked_return_type = "Outcome<Dec>")]
 pub async fn node_balance(address: String) -> JsValue {
-    let r = async { node::coins_total(&coins(net()?, address).await?) };
+    let r = async { node::coins_total(&coins(net()?, address, None).await?) };
     out(r.await)
 }
 

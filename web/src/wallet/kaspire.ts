@@ -81,6 +81,9 @@ export class KaspireAdapter implements WalletAdapter {
   async signInputs(built: BuiltTx, indices: readonly number[]): Promise<string> {
     const signInputs = signItems(built, indices);
     const sender = await this.address();
+    // As KasWare: the network again before each signature (F2/F3 review note).
+    const net = await this.network();
+    if (net !== this.expected) throw new PageError('wallet_network', `Kaspire switched to ${net}`);
     const out = await this.serial
       .run(() => this.api.signPskt({ sender, txJsonString: built.transaction, options: { signInputs } }))
       .catch((e: unknown) => {

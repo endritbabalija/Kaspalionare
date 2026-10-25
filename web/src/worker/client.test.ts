@@ -103,6 +103,19 @@ describe('LotteryClient', () => {
     });
   });
 
+  it('after giving up, a user action (recover) lets the next call boot a new worker (no reload)', async () => {
+    let dead = true;
+    const { client } = setup([(m) => (dead ? { id: m.id, ok: false, crash: 'boom' } : ok(m, { ok: {} }))]);
+    for (let i = 0; i <= RESTARTS_MAX; i++)
+      await expect(client.call('nodeInfo')).rejects.toMatchObject({ code: 'worker_stopped' });
+    expect(client.stopped).toBe(true);
+    dead = false;
+    await expect(client.call('nodeInfo')).rejects.toMatchObject({ code: 'worker_stopped' });
+    client.recover();
+    expect(client.stopped).toBe(false);
+    expect(await client.call('nodeInfo')).toEqual({ ok: {} });
+  });
+
   it('refuses oversized arguments before posting them', async () => {
     const { client, workers } = setup([(m) => ok(m, { ok: {} })]);
     await expect(client.call('parseIndexerRound', 'x'.repeat(ARGS_MAX_BYTES + 1))).rejects.toMatchObject({
