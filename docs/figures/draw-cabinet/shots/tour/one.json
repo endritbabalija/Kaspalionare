@@ -1,0 +1,1 @@
+[["wait",1000],["eval","window.__tour.at(3, 0.3)"],["wait",120],["shot","shots/tour/s03.png"]]

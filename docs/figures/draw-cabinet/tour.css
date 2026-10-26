@@ -1,0 +1,21 @@
+/* guided tour: a callout pinned to the part that moves, a leader to it, and one dot per stop */
+.dc-stage{overflow:hidden}
+/* the view runs past the drawing while zoomed, so its edges fade into the card instead of cutting */
+.dc-stage>svg{-webkit-mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent),linear-gradient(0deg,transparent,#000 4%,#000 96%,transparent);-webkit-mask-composite:source-in;mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent),linear-gradient(0deg,transparent,#000 4%,#000 96%,transparent);mask-composite:intersect}
+.dc-lead{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.dc-lead line{stroke:var(--anatomy-lit);stroke-width:1;stroke-dasharray:2 3;stroke-linecap:round}
+.dc-lead circle{fill:var(--anatomy-paper);stroke:var(--anatomy-lit);stroke-width:1.4}
+.dc-callout{position:absolute;left:0;top:0;width:252px;box-sizing:border-box;padding:11px 13px 12px;display:flex;flex-direction:column;gap:5px;
+  background:color-mix(in srgb,var(--anatomy-paper) 90%,transparent);border:1px solid var(--anatomy-lo);border-left:2px solid var(--anatomy-lit);border-radius:3px;
+  -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);pointer-events:none;will-change:transform,opacity;opacity:0}
+.dc-callout-step{font-family:var(--anatomy-mono);font-size:9.5px;letter-spacing:.08em;color:var(--anatomy-muted)}
+.dc-callout strong{font-family:var(--anatomy-mono);font-size:13px;font-weight:600;color:var(--anatomy-lit);letter-spacing:.01em}
+.dc-callout span[data-callout-text]{font-size:12.5px;line-height:1.45;color:var(--anatomy-text)}
+.dc-callout-bar{display:block;height:2px;margin-top:4px;background:var(--anatomy-faint);border-radius:1px;overflow:hidden}
+.dc-callout-bar i{display:block;height:100%;background:var(--anatomy-lit);transform-origin:0 50%;transform:scaleX(0)}
+.dc-callout[data-paused] .dc-callout-bar i{background:var(--anatomy-muted)}
+.dc-dots{position:absolute;left:50%;top:20px;transform:translateX(-50%);display:flex;gap:7px}
+.dc-dots button{all:unset;width:6px;height:6px;border-radius:50%;border:1px solid var(--anatomy-lo);cursor:pointer;transition:background .3s,border-color .3s}
+.dc-dots button[data-on]{background:var(--anatomy-lit);border-color:var(--anatomy-lit)}
+@media (max-width:600px){.dc-callout{width:calc(100% - 20px);padding:9px 11px 10px}.dc-callout span[data-callout-text]{font-size:12px}.dc-dots{display:none}}
+@media (prefers-reduced-motion:reduce){.dc-dots button{transition:none}}

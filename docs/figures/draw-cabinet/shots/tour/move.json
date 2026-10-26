@@ -1,0 +1,9 @@
+[["wait",1000],
+ ["eval","window.__tour.at(0, 999)"],["wait",100],["shot","shots/tour/s00.png"],
+ ["eval","window.__tour.at(3, 999)"],["wait",100],["shot","shots/tour/s03.png"],
+ ["eval","window.__tour.at(4, 999)"],["wait",100],
+ ["key","ArrowRight"],["sheet","shots/tour/move-sheet.png",160,12,null,0.5],
+ ["eval","JSON.stringify(window.__tour.state())"],
+ ["key"," "],["wait",600],["eval","JSON.stringify(window.__tour.state())"],
+ ["wait",800],["eval","JSON.stringify(window.__tour.state())"],
+ ["key"," "],["wait",300],["eval","JSON.stringify(window.__tour.state())"]]

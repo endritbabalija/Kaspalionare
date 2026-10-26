@@ -12,6 +12,7 @@ import { MODEL } from "./model.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KIT = join(HERE, "..", "..", "..", ".claude", "skills", "anatomy", "kit");
 const THEME = process.argv.includes("--light") ? "light" : "dark";
+const TOUR = process.argv.includes("--tour");
 
 const W = 760;
 const H = 590;
@@ -694,10 +695,92 @@ const DATA = {
   jackpotTray: [TRAYS[0].x + TRAYS[0].w / 2, TRAYS[0].y + TRAYS[0].d / 2, TRAYS[0].z + 0.8],
 };
 
+// ---------------------------------------------------------------- the guided tour (--tour): one camera stop per call
+// Each stop plays a window [a, b] of the round clock while the camera frames the parts that move in it.
+// tq is the backers' clock: held at 0 through buy(), run on its own at the vault window, then past every request.
+if (TOUR) {
+  const cube = (x0, y0, z0, x1, y1, z1) => [[x0, y0, z0], [x1, y0, z0], [x0, y1, z0], [x1, y1, z0], [x0, y0, z1], [x1, y0, z1], [x0, y1, z1], [x1, y1, z1]];
+  const ball = (c, r) => cube(c[0] - r, c[1] - r, c[2] - r, c[0] + r, c[1] + r, c[2] + r);
+  // the parts' box on screen; tour.js fits the camera to it at run time, around the real callout size
+  const boxOf = (pts) => {
+    const q = pts.map(at);
+    const xs = q.map((p) => p[0]);
+    const ys = q.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map(f2);
+  };
+  const rackEnd = RACK.x0 + 16 * RACK.pitch;
+  const leverBox = (y) => [...cube(RX, y - 22, 62, LEVER_X + 6, y + 54, 146), [CALLER_CUP[0], CALLER_CUP[1], 0]];
+  const tray = (i) => cube(TRAYS[i].x, TRAYS[i].y, TRAYS[i].z, TRAYS[i].x + TRAYS[i].w, TRAYS[i].y + TRAYS[i].d, TRAYS[i].z + 16);
+  const lZ = SIGHT.z0 + (SIGHT.z1 - SIGHT.z0) * (MODEL.vault.L / 1e7);
+  const MB = MODEL.backers;
+  const fk = (n, d = 0) => n.toLocaleString("en-US", { maximumFractionDigits: d });
+  const S = [
+    {
+      id: "round", title: "One round, no operator", t: [0, 0], tq: "zero", hold: 4.2, side: "right", full: true, anchor: null,
+      text: `Every part is held by a covenant on Kaspa L1. Anyone may buy, pull the levers or claim; the machine only accepts moves its rules allow.`,
+    },
+    {
+      id: "buy", title: "buy()", t: [0, 5.9], tq: "zero", hold: 2.2, side: "right", anchor: [TERM.x + 15.1, TERM.y + 17.5, TERM.z + TERM.h + 1.6],
+      pts: [...cube(TERM.x, TERM.y, ZD, TERM.x + TERM.w, TERM.y + TERM.d, ZD + TERM.h + 4), ...cube(RACK.x0, RACK.y0, ZD, rackEnd, RACK.y1, RACK.top + 6)],
+      text: `Each 1 KAS coin splits by fixed shares: fee 5 %, referral 10 %, callers 0.5 % each, prize tiers 10 %, house 74 %. Its ticket drops into one of 16 shard tubes.`,
+    },
+    {
+      id: "backers", title: "Backers queue requests", t: [5.9, 5.9], tq: "run", hold: 1.6, side: "left", anchor: [CLOCK.c[0], FY, CLOCK.c[1]],
+      pts: [...cube(28, FY, 22, 104, FY + 14, 92), [70, 112, 70]],
+      text: `Backers own the vault through shares. Deposits wait in the glass hopper, withdrawal cards in the rack. Each request spends the vault, so the next waits for the 600-DAA clock.`,
+    },
+    {
+      id: "close", title: "close()", t: [5.9, 6.6], tq: "after", hold: 1.2, side: "right", anchor: [RX + 7.6, LEVERS.close.y, LEVERS.close.z], // the pivot hub: the ball moves
+      pts: leverBox(LEVERS.close.y),
+      text: `After the deadline anyone pulls the lever. close() spends all 16 shards in one transaction, and the caller is paid ${fk(MODEL.amounts.C_close, 2)} KAS.`,
+    },
+    {
+      id: "seal", title: "Counts frozen", t: [6.6, 9.0], tq: "after", hold: 1.2, side: "left", anchor: [(RACK.x0 + rackEnd) / 2, RACK.y1, RACK.top + 1],
+      pts: cube(RACK.x0, RACK.y0, ZD, rackEnd, RACK.y1, RACK.top + 16),
+      text: `The seal bar drops on all 16 tubes. Ticket counts are fixed before the seed reference exists, so nobody can buy into a known draw.`,
+    },
+    {
+      id: "draw", title: "draw()", t: [9.0, 10.4], tq: "after", hold: 1.4, side: "right", anchor: [RX + 3, 45, 72],
+      pts: [...leverBox(LEVERS.draw.y), ...cube(RX, 38, 64, RX + 4, 52, 80)],
+      text: `Anyone pulls the second lever. This prototype reads a clearly marked TEST-ONLY seed; a real seed source is parked.`,
+    },
+    {
+      id: "balls", title: "Five balls and a bonus", t: [10.4, 16.3], tq: "after", hold: 1.6, side: "right", anchor: [SLOTS[2], RAIL.y, RAIL.z + 2],
+      pts: [...ball(GLOBE.c, GLOBE.r), ...ball(BONUS.c, BONUS.r), ...cube(RAIL.x0, RAIL.y - 6, ZD, RAIL.x1, RAIL.y + 6, ZD + 12)],
+      text: `The seed picks 5 main balls from 30 and a bonus from m = ${MODEL.m}. They roll onto the result rail: ${MODEL.win.map((n) => String(n).padStart(2, "0")).join(" ")} + ${String(MODEL.bonus).padStart(2, "0")}.`,
+    },
+    {
+      id: "prizes", title: "Prizes booked", t: [16.3, 17.6], tq: "after", rate: 0.6, hold: 2.2, side: "bottom", anchor: [TRAYS[0].x + TRAYS[0].w / 2, TRAYS[0].y + TRAYS[0].d / 2, TRAYS[0].z + 8],
+      pts: [...tray(0), ...tray(4), ...cube(SIGHT.x0, FY, SIGHT.z0, SIGHT.x1, FY + 2, SIGHT.z1)],
+      text: `The vault pays the jackpot (${fk(MODEL.vault.J, 2)} KAS) and ${MODEL.n2} held second prizes (${fk(MODEL.vault.G2, 2)} each) into their trays; ticket sales fill the lower tiers.`,
+    },
+    {
+      id: "convert", title: "Backers convert, capped", t: [17.6, 19.0], tq: "after", rate: 0.7, hold: 2.6, side: "left", anchor: [(SIGHT.x0 + SIGHT.x1) / 2, FY, lZ],
+      pts: cube(28, FY, 14, DOOR.x1, FY + 22, 92),
+      text: `Only now do requests convert, at the new share price ${MB.price0.toFixed(4)} → ${MB.priceDraw.toFixed(4)}. Withdrawals stop at the red line: the vault keeps L = ${fk(MODEL.vault.Lnext, 0)} KAS for the next round.`,
+    },
+    {
+      id: "claim", title: "claim()", t: [19.0, 24.5], tq: "after", hold: 1.6, side: "top", anchor: [READER.x + READER.w / 2, READER.y + READER.d / 2, READER.z + READER.h],
+      pts: [...cube(READER.x, READER.y, READER.z, READER.x + READER.w, READER.y + READER.d, READER.z + READER.h + 4), ...tray(0), [PAYOUT_CUP[0], PAYOUT_CUP[1], 0]],
+      text: `The reader checks one proof per shard, all 16, so the holder count h = ${MODEL.h} cannot be under-reported. It pays floor(J / ${MODEL.h}) = ${fk(MODEL.prize, 2)} KAS.`,
+    },
+    {
+      id: "settle", title: "settle()", t: [24.5, 29.0], tq: "after", hold: 1.4, side: "right", anchor: [(RECORD.x0 + RECORD.x1) / 2, FY + 5 + RECORD.depth, RECORD.z1],
+      pts: [...cube(RECORD.x0, FY, RECORD.z0, RECORD.x1, FY + 5 + RECORD.depth + 2, RECORD.z1), ...cube(BACKER_CUP[0] - 9, BACKER_CUP[1] - 9, 0, BACKER_CUP[0] + 9, BACKER_CUP[1] + 9, 5)],
+      text: `draw() wrote the conversion once into this record. Anyone calls settle(): each request takes its share, the last takes the rest, and ${fk(MB.pendingAfter)} shares wait for round 8.`,
+    },
+    {
+      id: "next", title: "Round 8 opens", t: [29.0, 31.5], tq: "after", hold: 2.2, side: "right", full: true, anchor: null,
+      text: `The rack empties and a new round starts with m = ${MODEL.mNext} and a fixed jackpot of ${fk(MODEL.vault.Jnext, 0)} KAS. Rounds are strictly ordered.`,
+    },
+  ];
+  DATA.tour = S.map(({ pts, anchor, ...st }) => ({ ...st, box: pts ? boxOf(pts) : null, anchor: anchor ? at(anchor).map(f2) : null }));
+}
+
 const CSS = readFileSync(join(HERE, "draw-cabinet.css"), "utf8");
 const latheSource = readFileSync(join(KIT, "lathe.mjs"), "utf8").replace(/^import .*$/gm, "").replace(/^export /gm, "");
 const latheScript = `const G = (() => {${latheSource}\nreturn { viewOf, frameOf, pointOf, disc, sphereOf, circleOf, dot3, add3, sub3, mul3, unit3, cross3, len3 };})();\n`;
-const LIVE = readFileSync(join(HERE, "live.js"), "utf8").replace("__DATA__", JSON.stringify(DATA));
+const LIVE = readFileSync(join(HERE, "live.js"), "utf8").replace("__DATA__", JSON.stringify(DATA)) + (TOUR ? readFileSync(join(HERE, "tour.js"), "utf8") : "");
 
 const fk = (n, d = 0) => n.toLocaleString("en-US", { maximumFractionDigits: d });
 const MB = MODEL.backers;
@@ -714,12 +797,13 @@ const CAPTION =
   `The conversion is written once into a settlement record (the drawer); settle(), callable by anyone, pays each request its share of what remains, and the last one takes the rest. ` +
   `Prize trays, left to right: jackpot, second, 4 + bonus, 4, 3 + bonus. Coin heights are not to scale.`;
 
+const TOUR_OVERLAY = `<svg class="dc-lead" aria-hidden="true"><line data-lead/><circle data-lead-dot r="3"/></svg><div class="dc-callout" aria-hidden="true" data-callout><span class="dc-callout-step" data-callout-step></span><strong data-callout-title></strong><span data-callout-text></span><span class="dc-callout-bar"><i data-callout-bar></i></span></div><div class="dc-dots" aria-hidden="true" data-dots></div>`;
 const body =
-  `<style>${CSS}</style>` +
+  `<style>${CSS}${TOUR ? readFileSync(join(HERE, "tour.css"), "utf8") : ""}</style>` +
   k.plateHtml({
     fig: "Fig 1",
     title: "Kaspa draw cabinet",
-    hint: "Click or → next call · ← back",
+    hint: TOUR ? "Space pause · ← → step" : "Click or → next call · ← back",
     readout: "round 7 · open",
     keys: [
       { mark: "lit", label: "What the current call moves: coins, tickets, the seal, balls, proof pins" },
@@ -728,10 +812,10 @@ const body =
       { mark: "flat", label: "Backers' window on the vault door: share price, 600-DAA clock, deposit hopper, withdrawal cards, record drawer" },
     ],
     caption: CAPTION,
-    body: `<div class="iso-stage dc-stage" tabindex="0" role="group" aria-label="Lottery draw cabinet. Click, Space or the right arrow moves to the next protocol call; the left arrow goes back.">${svg}<span class="dc-sr" role="status" aria-live="polite" data-status></span></div>`,
+    body: `<div class="iso-stage dc-stage" tabindex="0" role="group" aria-label="${TOUR ? "Guided tour of the lottery draw cabinet. Space pauses or resumes; the arrow keys step through the calls." : "Lottery draw cabinet. Click, Space or the right arrow moves to the next protocol call; the left arrow goes back."}">${svg}${TOUR ? TOUR_OVERLAY : ""}<span class="dc-sr" role="status" aria-live="polite" data-status></span></div>`,
   });
 
-const name = THEME === "light" ? "draw-cabinet-light.html" : "draw-cabinet.html";
+const name = `draw-cabinet${TOUR ? "-tour" : ""}${THEME === "light" ? "-light" : ""}.html`;
 const page = k.pageHtml({ title: "Draw cabinet", theme: THEME, body, script: kitScript() + latheScript + LIVE, width: 820 });
 writeFileSync(join(HERE, name), page);
 console.log("wrote", name, `${(page.length / 1024).toFixed(0)} KB`, `${items.length} items`, `scale ${KS.toFixed(3)}`);
