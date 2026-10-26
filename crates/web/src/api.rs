@@ -119,6 +119,14 @@ pub fn check_roots(i: &RootsInput) -> Result<RootsOut> {
 /// `anchor_invalid`; objects that do not belong together, or numbers that are not the
 /// pool's, are `chain_mismatch`.
 pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
+    winning_numbers_bound(i).map(|(w, _)| w)
+}
+
+/// `winning_numbers`, and whether X.hash is bound to a public node's header and chain: always
+/// on the closed path; on the drawn path when `anchorBlock` was given (F5: after the draw the
+/// numbers alone do not fix X.hash, so a wrong hash could otherwise be shown next to the right
+/// numbers).
+pub fn winning_numbers_bound(i: &WinningInput) -> Result<(WinningOut, bool)> {
     let cov = cov_of(&i.covenant_id)?;
     let proof = unhex("anchorProof", &i.anchor_proof)?;
     let p = verify::anchor_proof(&proof)?;
@@ -136,7 +144,10 @@ pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
             }
             (mk.round, mk.m, lottery::game::anchor_daa(mo.entry.block_daa_score as i64, c.seed_offset), None)
         }
-        RoundObjs::Drawn { pool, drawer } => {
+        RoundObjs::Drawn { pool, drawer, anchor_block } => {
+            if let Some(b) = anchor_block {
+                verify::check_anchor_block(&p, &convert::header(&b.header)?, b.is_chain_block)?;
+            }
             let pl = cases::pool(&obj("pool", pool)?, &cov)?;
             verify::check_pool(&pl)?;
             let dr = cases::drawer(&obj("drawer", drawer)?, &cov)?;
@@ -155,11 +166,15 @@ pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
             (pl.round, pl.m, d, Some(pl.win))
         }
     };
+    let bound = match &i.from {
+        RoundObjs::Closed { .. } => true,
+        RoundObjs::Drawn { anchor_block, .. } => anchor_block.is_some(),
+    };
     let w = verify::winning_numbers_from_anchor(&cov.as_bytes(), round, &proof, d, m)?;
     if pool_win.is_some_and(|win| win != w) {
         return Err(mismatch("the anchor proof's numbers are not the pool's"));
     }
-    Ok(WinningOut {
+    let out = WinningOut {
         winning: Combination { main: [w[0], w[1], w[2], w[3], w[4]], bonus: w[5] },
         status: if pool_win.is_some() { NumbersStatus::Final } else { NumbersStatus::Provisional },
         round: round.to_string(),
@@ -167,7 +182,8 @@ pub fn winning_numbers(i: &WinningInput) -> Result<WinningOut> {
         d: d.to_string(),
         anchor_hash: hex(&p.x_hash()),
         anchor_daa_score: p.x.daa_score.to_string(),
-    })
+    };
+    Ok((out, bound))
 }
 
 // ------------------------------------------------------------------------------ estimate

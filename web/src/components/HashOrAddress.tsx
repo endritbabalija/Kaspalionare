@@ -37,7 +37,7 @@ export function HashOrAddress({ value, kind, explorer, className, testId = 'hash
         data-testid={`${testId}-copy`}
         aria-label={`Copy ${kind}`}
         onClick={copy}
-        className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-graphite hover:text-ink"
+        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-graphite hover:text-ink"
       >
         <svg
           width="16"
@@ -59,7 +59,7 @@ export function HashOrAddress({ value, kind, explorer, className, testId = 'hash
           rel="noreferrer noopener"
           data-testid={`${testId}-explorer`}
           aria-label={`Open ${kind} in the explorer`}
-          className="inline-flex h-11 w-11 items-center justify-center rounded-lg"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg"
         >
           <svg
             width="16"

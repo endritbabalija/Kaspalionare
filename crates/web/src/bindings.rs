@@ -277,6 +277,28 @@ pub fn check_indexer_round(#[wasm_bindgen(unchecked_param_type = "RoundCheckInpu
     out(net().and_then(|n| crate::indexer::check_round(n, &parse("input", input)?)))
 }
 
+// ------------------------------------------------------------------------------ rounds (F5)
+
+/// Spec J6: every check of a round on its own (each object's state, the status, the frozen roots,
+/// each shard's tree, the winning numbers, the anchor block), each match, mismatch or not checkable.
+#[wasm_bindgen(js_name = verifyRound, unchecked_return_type = "Outcome<RoundVerify>")]
+pub fn verify_round(#[wasm_bindgen(unchecked_param_type = "RoundCheckInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::rounds::verify_round(n, &parse("input", input)?)))
+}
+
+/// Spec S4, 7: the caller panel's rows of a built `close()`, `draw()` or void, each checked against
+/// its transaction.
+#[wasm_bindgen(js_name = callerFigures, unchecked_return_type = "Outcome<CallerFigures>")]
+pub fn caller_figures(#[wasm_bindgen(unchecked_param_type = "CallerFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::rounds::caller_figures(n, &parse("input", input)?)))
+}
+
+/// X of an anchor proof (its hash and DAA score), to fetch the anchor block from a public node.
+#[wasm_bindgen(js_name = anchorProofX, unchecked_return_type = "Outcome<AnchorX>")]
+pub fn anchor_proof_x(proof: &str) -> JsValue {
+    out(net().and_then(|_| crate::rounds::anchor_x(proof)))
+}
+
 // ------------------------------------------------------------------------------ page tables (F3)
 
 /// Every error code with its one message (the one table, `lottery::web::Code`). Needs no

@@ -234,6 +234,9 @@ pub struct Drawn {
     pub pools: Vec<(CovUtxo, [u8; 6])>,
     pub drawer: CovUtxo,
     pub anchor_block: AnchorBlock,
+    /// F5: the vault (input 2) and the wallet's coins, so the page's `buildDraw` can rebuild it.
+    pub vault: CovUtxo,
+    pub coins: Vec<Utxo>,
 }
 
 pub fn drawn() -> Drawn {
@@ -252,12 +255,13 @@ pub fn drawn() -> Drawn {
     c.proof = Some(p.clone());
     let wspk = lottery::buy::spk_of(&WALLET_SK);
     c.funder = lottery::web::build::payout_of_spk(&wspk).unwrap();
-    let coins = c
+    let coins: Vec<lottery::web::build::Coin> = c
         .funding
         .iter()
         .enumerate()
         .map(|(n, f)| lottery::web::build::Coin { outpoint: harness::outpoint(4 + n as u32), entry: kaspa_consensus_core::tx::UtxoEntry::new(f.value, wspk.clone(), f.daa, false, None) })
         .collect();
+    let coin_dtos: Vec<Utxo> = coins.iter().map(|k: &lottery::web::build::Coin| utxo_dto(&k.outpoint, &k.entry)).collect();
     let funds = lottery::web::build::Funds { coins, change: wspk, fee: c.fee };
     let ops: Vec<_> = (0..4).map(harness::outpoint).collect();
     let u = lottery::web::build::draw(&c, &ops, &funds).unwrap();
@@ -279,6 +283,8 @@ pub fn drawn() -> Drawn {
         pools,
         drawer: created(&u.tx, output_of(&u.tx, &dr), &c.cov, 2_000_000, &dr),
         anchor_block: AnchorBlock { header: web::convert::header_dto(&header), is_chain_block: true },
+        vault: input(2, State::Vault(c.vault.clone())),
+        coins: coin_dtos,
     }
 }
 
@@ -361,7 +367,7 @@ pub fn verify_calls() -> Vec<(String, Verify)> {
     let wrong = RoundObjs::Closed { marker: x.marker.clone(), controller: x.drawer_before.clone(), anchor_block: x.anchor_block.clone() };
     v.push(("winningNumbers closed, a drawer as the controller".into(), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: wrong, anchor_proof: proof.clone() })));
     for (n, (pool, _)) in x.pools.iter().enumerate() {
-        let from = RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone() };
+        let from = RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone(), anchor_block: None };
         v.push((format!("winningNumbers drawn pool {n}"), Verify::Winning(WinningInput { covenant_id: cov.clone(), from: from.clone(), anchor_proof: proof.clone() })));
         v.push((format!("winningNumbers drawn pool {n}, another X"), Verify::Winning(WinningInput { covenant_id: cov.clone(), from, anchor_proof: other.clone() })));
     }

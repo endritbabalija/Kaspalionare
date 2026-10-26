@@ -539,6 +539,15 @@ pub struct CheckedRound {
     /// a draw's pools are found only by their scripts, which need the winning numbers), so the
     /// page also refuses "void" when its own copy shows the marker live or holds the result.
     pub void_supported: bool,
+    /// F5: `winning`'s X.hash is bound to a public node's header and selected chain: always on the
+    /// closed path (it needs `anchorBlock`); on the drawn path only when `anchorBlock` was given
+    /// (the pool's numbers alone do not fix X.hash: a 32-byte value giving the same numbers is
+    /// easy to find). A page shows X.hash as checked only when this is true.
+    pub anchor_bound: bool,
+    /// F5 (S3, S4): what the node-checked objects fix of the round (T, S, J, D, the claim
+    /// deadline, the void lock, the frozen roots, the caller reward and R), each with the
+    /// objects it is read from; a figure no live object fixes is absent.
+    pub facts: crate::rounds::RoundFacts,
 }
 
 fn dec_of(what: &str, s: &str) -> Result<i64> {
@@ -552,18 +561,23 @@ fn dec_of(what: &str, s: &str) -> Result<i64> {
 /// pool's `win`; and the anchor proof against the pools (`final`) or, before the draw,
 /// against the anchor block a public node reports (`provisional`). Any disagreement is
 /// `chain_mismatch`.
-pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
+/// A round's API objects, each checked against the node's entry (`check_object`) and required to
+/// belong to round `r`, sorted by role (shared by `check_round` and `rounds::verify_round`).
+pub(crate) struct Classified {
+    pub objects: Vec<CheckedObject>,
+    pub shards: Vec<(CovUtxo, lottery::state::ShardState)>,
+    pub marker: Option<(CovUtxo, lottery::state::MarkerState)>,
+    pub pools: Vec<(CovUtxo, lottery::state::PoolState)>,
+    pub controller: Option<(CovUtxo, lottery::state::ControllerState)>,
+    pub drawer: Option<(CovUtxo, lottery::state::DrawerState)>,
+    pub record: Option<(CovUtxo, lottery::state::RecordState)>,
+}
+
+pub(crate) fn classify(net: Net, cov: &kaspa_hashes::Hash, r: i64, objects: &[ApiObject], utxos: &[Utxo]) -> Result<Classified> {
     use lottery::index::State;
-    let cov = cov_of(&i.covenant_id)?;
-    let a = &i.round;
-    let r = dec_of("round.round", &a.round)?;
-    if a.objects.len() > 64 || i.utxos.len() > 256 {
-        return Err(Error::new(Code::InputRange, format!("{} objects, {} UTXOs", a.objects.len(), i.utxos.len())));
-    }
-    let mut objects = vec![];
-    let (mut shards, mut marker, mut pools, mut controller, mut drawer, mut record) = (vec![], None, vec![], None, None, None);
-    for o in &a.objects {
-        let (c, s) = check_object(net, &cov, o, &i.utxos)?;
+    let mut c = Classified { objects: vec![], shards: vec![], marker: None, pools: vec![], controller: None, drawer: None, record: None };
+    for o in objects {
+        let (co, s) = check_object(net, cov, o, utxos)?;
         let belongs = match &s {
             State::Shard(x) => x.round == r,
             State::Marker(x) => x.round == r,
@@ -578,16 +592,29 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
             return Err(chain_mismatch(format!("{:?} of round {} served for round {r}", s.role(), s.round())));
         }
         match &s {
-            State::Shard(x) => shards.push((c.object.clone(), x.clone())),
-            State::Marker(x) => marker = Some((c.object.clone(), x.clone())),
-            State::Pool(x) => pools.push((c.object.clone(), x.clone())),
-            State::Controller(x) => controller = Some((c.object.clone(), x.clone())),
-            State::Drawer(x) => drawer = Some((c.object.clone(), x.clone())),
-            State::Record(x) => record = Some(x.clone()),
+            State::Shard(x) => c.shards.push((co.object.clone(), x.clone())),
+            State::Marker(x) => c.marker = Some((co.object.clone(), x.clone())),
+            State::Pool(x) => c.pools.push((co.object.clone(), x.clone())),
+            State::Controller(x) => c.controller = Some((co.object.clone(), x.clone())),
+            State::Drawer(x) => c.drawer = Some((co.object.clone(), x.clone())),
+            State::Record(x) => c.record = Some((co.object.clone(), x.clone())),
             _ => {}
         }
-        objects.push(c);
+        c.objects.push(co);
     }
+    Ok(c)
+}
+
+pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
+    let cov = cov_of(&i.covenant_id)?;
+    let a = &i.round;
+    let r = dec_of("round.round", &a.round)?;
+    if a.objects.len() > 64 || i.utxos.len() > 256 {
+        return Err(Error::new(Code::InputRange, format!("{} objects, {} UTXOs", a.objects.len(), i.utxos.len())));
+    }
+    let cl = classify(net, &cov, r, &a.objects, &i.utxos)?;
+    let facts = crate::rounds::facts(r, &cl)?;
+    let Classified { objects, shards, marker, pools, controller, drawer, record } = cl;
     // The status the chain shows. A live controller of round r means round r is not closed yet
     // (`close()` spends it and creates round r + 1's): open, whether or not its shards were served
     // (F2/F3 review S4: an open round served with its controller and without its shards must not
@@ -700,20 +727,20 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
         }
     }
     // The anchor proof.
-    let mut winning = None;
+    let (mut winning, mut anchor_bound) = (None, false);
     if let Some(ap) = &i.anchor_proof {
         if dec_of("anchorProof.round", &ap.round)? != r {
             return Err(chain_mismatch("the anchor proof is for another round"));
         }
         let from = if let (Some(pool), Some(dr)) = (pools.first(), drawer.as_ref()) {
-            Some(RoundObjs::Drawn { pool: pool.0.clone(), drawer: dr.0.clone() })
+            Some(RoundObjs::Drawn { pool: pool.0.clone(), drawer: dr.0.clone(), anchor_block: i.anchor_block.clone() })
         } else if let (Some(mk), Some(ct), Some(block)) = (marker.as_ref(), controller.as_ref(), i.anchor_block.as_ref()) {
             Some(RoundObjs::Closed { marker: mk.0.clone(), controller: ct.0.clone(), anchor_block: block.clone() })
         } else {
             None
         };
         if let Some(from) = from {
-            let w = api::winning_numbers(&WinningInput { covenant_id: i.covenant_id.clone(), from, anchor_proof: ap.anchor_proof.clone() }).map_err(mismatch)?;
+            let (w, bound) = api::winning_numbers_bound(&WinningInput { covenant_id: i.covenant_id.clone(), from, anchor_proof: ap.anchor_proof.clone() }).map_err(mismatch)?;
             if let Some(d) = &a.draw {
                 if !d.anchor_hash.eq_ignore_ascii_case(&w.anchor_hash) || d.winning != Some(w.winning) {
                     return Err(chain_mismatch(format!("round {r}: the indexer's anchor hash or numbers are not the proof's")));
@@ -723,6 +750,7 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
                 return Err(chain_mismatch(format!("round {r}: the indexer's D is not the chain's {}", w.d)));
             }
             winning = Some(w);
+            anchor_bound = bound;
         }
     }
     let void_supported = a.status == RoundStatus::Void && shown.is_none() && drawer.as_ref().is_some_and(|(_, d)| d.round > r);
@@ -737,6 +765,8 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
         roots: roots_out,
         purchases: checked_purchases,
         winning,
+        anchor_bound,
+        facts,
     })
 }
 

@@ -19,6 +19,10 @@ import { Time } from '@/components/Time';
 import { TicketRow } from '@/components/TicketRow';
 import { TxProgress } from '@/components/TxProgress';
 import { RoundCardView } from '@/screens/play/RoundCard';
+import { CallerPanel } from '@/components/CallerPanel';
+import { RoundRow } from '@/components/RoundRow';
+import { VerifyPanel } from '@/components/VerifyPanel';
+import { SAMPLE_CLOSE, SAMPLE_DRAW_LOW, SAMPLE_VERIFY } from './roundSamples';
 import { claimView, SAMPLE_TX, sampleCard, sampleFigures, samplePending, sampleStored } from './ticketSamples';
 
 /** Searched for by scripts/check-bundle.mjs: present in development, absent from production bundles. */
@@ -245,6 +249,108 @@ function Sheet() {
               onDownload={() => undefined}
             />
           ))}
+        </div>
+      </Row>
+      <Row name="Round row: checking · drawn · open · unverified · error">
+        <div className="flex w-full flex-col gap-2">
+          <RoundRow round="14" testId="cat-row-checking" />
+          <RoundRow
+            round="13"
+            testId="cat-row-drawn"
+            data={{
+              round: '13',
+              status: 'drawn',
+              sales: { value: '48200000000', checked: false },
+              jackpot: { value: '4820000000000', checked: false },
+            }}
+          />
+          <RoundRow
+            round="12"
+            testId="cat-row-open"
+            data={{
+              round: '12',
+              status: 'open',
+              sales: { value: '48200000000', checked: true },
+              jackpot: { value: '4820000000000', checked: true },
+            }}
+          />
+          <RoundRow
+            round="11"
+            testId="cat-row-unverified"
+            data={{ round: '11', status: null, sales: { value: '0', checked: false } }}
+          />
+          <RoundRow
+            round="10"
+            testId="cat-row-error"
+            data={{
+              round: '10',
+              status: null,
+              error: "The indexer's copy does not match the chain.",
+              code: 'chain_mismatch',
+            }}
+          />
+        </div>
+      </Row>
+      <Row name="Verify: idle · running · done (match, mismatch, not checkable) · error">
+        <div className="flex w-full flex-col gap-2">
+          <VerifyPanel state="idle" onVerify={() => undefined} testId="cat-verify-idle" />
+          <VerifyPanel state="running" onVerify={() => undefined} testId="cat-verify-running" />
+          <VerifyPanel state="done" result={SAMPLE_VERIFY} onVerify={() => undefined} testId="cat-verify-done" />
+          <VerifyPanel
+            state="error"
+            error="The indexer cannot be reached."
+            onVerify={() => undefined}
+            testId="cat-verify-error"
+          />
+        </div>
+      </Row>
+      <Row name="Caller panel: not due · waits · due with reward · reward below fee · running">
+        <div className="flex w-full flex-col gap-2">
+          <CallerPanel
+            round="12"
+            due={{ kind: 'later', action: 'close', from: '13662' }}
+            reward="2410000000"
+            walletConnected
+            onPress={() => undefined}
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+            testId="cat-caller-later"
+          />
+          <CallerPanel
+            round="12"
+            due={{ kind: 'waits' }}
+            walletConnected
+            onPress={() => undefined}
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+            testId="cat-caller-waits"
+          />
+          <CallerPanel
+            round="12"
+            due={{ kind: 'due', action: 'close', from: '12000' }}
+            figures={SAMPLE_CLOSE}
+            walletConnected
+            onPress={() => undefined}
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+            testId="cat-caller-due"
+          />
+          <CallerPanel
+            round="12"
+            due={{ kind: 'due', action: 'draw', from: '12000' }}
+            figures={SAMPLE_DRAW_LOW}
+            walletConnected
+            onPress={() => undefined}
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+            testId="cat-caller-low"
+          />
+          <CallerPanel
+            round="12"
+            due={{ kind: 'due', action: 'void', from: '12000' }}
+            figures={{ ...SAMPLE_CLOSE, kind: 'void' }}
+            tx={{ step: 'signed' }}
+            walletConnected
+            onPress={() => undefined}
+            clock={{ virtualDaa: VDAA, observedAt: NOW }}
+            testId="cat-caller-running"
+          />
         </div>
       </Row>
       <Row name="Round card: loading · error · ready">

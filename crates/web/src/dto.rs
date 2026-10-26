@@ -509,8 +509,16 @@ pub enum RoundObjs {
     /// Drawn: a pool of round r (its numbers, round and m) and the instance's drawer. D =
     /// the pool's claim deadline - draw_window - claim_window (drawer check 19); the
     /// numbers from the proof must be the pool's, which `draw()` wrote after checking the
-    /// anchor on chain: `final`.
-    Drawn { pool: CovUtxo, drawer: CovUtxo },
+    /// anchor on chain: `final`. F5: the numbers bind the proof's X.hash only as far as the
+    /// numbers go (anyone can grind a 32-byte value giving the pool's numbers); with
+    /// `anchorBlock` (a public node's `getBlock(X.hash)`, as on the closed path) X.hash is bound
+    /// to the node's header and chain too, and a block that does not bind it is `anchor_invalid`.
+    Drawn {
+        pool: CovUtxo,
+        drawer: CovUtxo,
+        #[serde(rename = "anchorBlock", default, skip_serializing_if = "Option::is_none")]
+        anchor_block: Option<AnchorBlock>,
+    },
 }
 
 /// Spec J6: the winning numbers from the round's anchor proof.
@@ -547,7 +555,8 @@ pub struct WinningOut {
     pub d: Dec,
     /// The anchor block X (the seed source) and its DAA score, from the proof. On the
     /// closed path X.hash is bound to the node's header; on the drawn path the numbers are
-    /// bound (to the pool's) but X.hash is the proof's only.
+    /// bound (to the pool's) but X.hash is the proof's only, unless `anchorBlock` was given
+    /// (F5; `checkIndexerRound` reports it as `anchorBound`).
     pub anchor_hash: Hex,
     pub anchor_daa_score: Dec,
 }

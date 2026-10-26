@@ -488,7 +488,7 @@ fn roots_and_numbers_come_from_chain_objects() {
     // winningNumbers after the draw: a pool of the round + the live drawer; D from the
     // pool's claim deadline; the numbers must be the pool's.
     for (pool, pool_win) in &x.pools {
-        let w = win(RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone() }, &x.proof).unwrap();
+        let w = win(RoundObjs::Drawn { pool: pool.clone(), drawer: x.drawer.clone(), anchor_block: None }, &x.proof).unwrap();
         assert_eq!([w.winning.main.to_vec(), vec![w.winning.bonus]].concat(), pool_win.to_vec());
         assert_eq!(w.status, NumbersStatus::Final, "after the draw the numbers are the pool's: final");
         assert_eq!((w.round.clone(), w.m, w.d.clone()), (mk.round.to_string(), mk.m as u32, d.to_string()), "D from the pool equals D from the marker");
@@ -503,10 +503,10 @@ fn roots_and_numbers_come_from_chain_objects() {
     // D); now the node's anchor block binds X.hash.
     let e = win(closed.clone(), &other).unwrap_err();
     assert_eq!(e.code, Code::AnchorInvalid, "{e}");
-    let e = win(RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer.clone() }, &other).unwrap_err();
+    let e = win(RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer.clone(), anchor_block: None }, &other).unwrap_err();
     assert_eq!(e.code, Code::ChainMismatch, "{e}");
     // The drawer that has not drawn the pool's round (the round r drawer) is refused.
-    let e = win(RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer_before.clone() }, &x.proof).unwrap_err();
+    let e = win(RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer_before.clone(), anchor_block: None }, &x.proof).unwrap_err();
     assert_eq!(e.code, Code::ChainMismatch, "{e}");
     // The page's JSON has no field for a derived value.
     let j = serde_json::json!({"covenantId": cov, "from": {"closed": {"marker": x.marker, "controller": x.controller, "anchorBlock": x.anchor_block}}, "anchorProof": hex(&x.proof)});
@@ -755,7 +755,7 @@ fn closed_numbers_are_provisional_and_bound_to_the_nodes_block() {
     let real = x.pools[0].1;
     let mk = lottery::web::cases::marker(&web::convert::obj("m", &x.marker).unwrap(), &x.cov).unwrap();
     let win = |from: RoundObjs, proof: &[u8]| api::winning_numbers(&WinningInput { covenant_id: cov.clone(), from, anchor_proof: hex(proof) });
-    let drawn_from = RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer.clone() };
+    let drawn_from = RoundObjs::Drawn { pool: x.pools[0].0.clone(), drawer: x.drawer.clone(), anchor_block: None };
 
     // Honest: the same numbers on both paths, provisional before the draw, final after.
     let c = win(closed_with(&x, x.anchor_block.clone()), &x.proof).unwrap();
@@ -867,7 +867,7 @@ fn closed_numbers_are_provisional_and_bound_to_the_nodes_block() {
 fn calls_check_entries_not_liveness() {
     let x = drawn();
     let cov = hex(&x.cov.as_bytes());
-    let win = |pool: CovUtxo| api::winning_numbers(&WinningInput { covenant_id: cov.clone(), from: RoundObjs::Drawn { pool, drawer: x.drawer.clone() }, anchor_proof: hex(&x.proof) });
+    let win = |pool: CovUtxo| api::winning_numbers(&WinningInput { covenant_id: cov.clone(), from: RoundObjs::Drawn { pool, drawer: x.drawer.clone(), anchor_block: None }, anchor_proof: hex(&x.proof) });
     let mut other = x.pools[0].0.clone();
     other.utxo.covenant_id = Some("11".repeat(32));
     assert_eq!(win(other).unwrap_err().code, Code::ChainMismatch, "another instance's covenant ID");

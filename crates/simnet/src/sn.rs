@@ -1045,19 +1045,52 @@ pub async fn sn4() -> Result<Log, String> {
     .await
 }
 
-/// SN5: the grinding numbers of every SN round run, and the honest-candidate check.
-pub fn sn5(logs: &[Log]) -> Result<Vec<String>, String> {
+/// What one ground anchor shows about grinding (SN5). The grinder evaluates the template's own
+/// nonce first and stops there when it already meets the target (tries 1, the ground result is
+/// the honest one); otherwise it grinds to a hit, which then differs from the honest candidate
+/// (the target is a function of the numbers alone). `Ok(true)`: grinding changed the result;
+/// `Ok(false)`: the first candidate already met the target, nothing was ground; `Err`: a record
+/// that is neither.
+pub(crate) fn grind_outcome(g: &Grind) -> Result<bool, String> {
+    let same = g.honest.rank == g.won.rank && g.honest.bonus == g.won.bonus;
+    match (g.tries, same) {
+        (1, true) if g.nonce == g.honest_nonce && g.x == g.honest_x => Ok(false),
+        (t, false) if t > 1 => Ok(true),
+        _ => Err(format!(
+            "inconsistent grind record: {} tries, template nonce {} -> {}, ground nonce {} -> {}",
+            g.tries,
+            g.honest_nonce,
+            desc(&g.honest),
+            g.nonce,
+            desc(&g.won)
+        )),
+    }
+}
+
+/// SN5: the grinding numbers of every round run, and the honest-candidate check. With
+/// `require_grind` (the SN scenarios, whose jackpot targets make a first-candidate hit about one
+/// in 4 × 10^5) a round whose first candidate already met the target fails: that run shows
+/// nothing about grinding. Without it (the dev run, whose target is any prize tier) such a round
+/// is reported as "no grind needed", never as a failure.
+pub fn sn5(logs: &[Log], require_grind: bool) -> Result<Vec<String>, String> {
     let mut rows = vec![];
     let mut tries_total = 0u64;
     let mut exp_total = 0f64;
     for l in logs {
         let g = l.grind.as_ref().ok_or(format!("{}: no grind", l.id))?;
-        let different = g.honest.rank != g.won.rank || g.honest.bonus != g.won.bonus;
-        check(different, format!("SN5 {}: the ungrounded first candidate (template nonce {}) gives {} != the ground result {}", l.id, g.honest_nonce, desc(&g.honest), desc(&g.won)))?;
+        let ground = grind_outcome(g).map_err(|e| format!("CHECK FAILED: SN5 {}: {e}", l.id))?;
+        if ground {
+            check(true, format!("SN5 {}: the ungrounded first candidate (template nonce {}) gives {}, the ground result {} (after {} tries)", l.id, g.honest_nonce, desc(&g.honest), desc(&g.won), g.tries))?;
+        } else {
+            check(
+                !require_grind,
+                format!("SN5 {}: the template's first candidate (nonce {}) already gives the ground result {}: no grind needed", l.id, g.honest_nonce, desc(&g.won)),
+            )?;
+        }
         tries_total += g.tries;
         exp_total += g.expected;
         rows.push(format!(
-            "| {} | m = {}, D = {} | {} | {} | {:.0} | {:.3} | {:.2} | X `{}` nonce {} -> {} | `{}` nonce {} -> {} ({}) |",
+            "| {} | m = {}, D = {} | {} | {} | {:.0} | {:.3} | {:.2} | X `{}` nonce {} -> {} | `{}` nonce {} -> {} ({}{}) |",
             l.id,
             g.m,
             g.d,
@@ -1072,7 +1105,8 @@ pub fn sn5(logs: &[Log]) -> Result<Vec<String>, String> {
             g.honest_x,
             g.honest_nonce,
             desc(&g.honest),
-            g.honest_note
+            g.honest_note,
+            if ground { "" } else { "; no grind needed" }
         ));
     }
     println!("SN5: {} grinds, {tries_total} header hashes in total, expected {exp_total:.0}", logs.len());
@@ -1090,7 +1124,7 @@ pub fn print_report(logs: &[Log]) {
             println!("- ok: {c}");
         }
     }
-    match sn5(logs) {
+    match sn5(logs, false) {
         Ok(rows) => {
             println!("| SN | round | ground for | tries | expected 1/p | seconds | tries / expected | ground X | honest first candidate |");
             println!("|---|---|---|---|---|---|---|---|---|");
@@ -1099,5 +1133,62 @@ pub fn print_report(logs: &[Log]) {
             }
         }
         Err(e) => println!("SN5: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn g(tries: u64, honest: [u8; 32], won: [u8; 32], nonce: u64) -> Grind {
+        let n = |h: &[u8; 32]| game::seed_numbers(&[7; 32], 1, h, 3);
+        Grind {
+            d: 100,
+            m: 3,
+            tries,
+            secs: 0.0,
+            expected: 1425.0,
+            target: "t".into(),
+            x: Hash::from_bytes(won),
+            nonce,
+            won: n(&won),
+            honest_nonce: 5,
+            honest_x: Hash::from_bytes(honest),
+            honest: n(&honest),
+            honest_note: "n".into(),
+        }
+    }
+
+    /// The owner's dev run (2026-10-26): the template's first nonce already met the dev target,
+    /// so the grinder stopped at once (tries 1, the ground result the honest one) and SN5 printed
+    /// "CHECK FAILED ... gives X != the ground result X". Such a round is "no grind needed".
+    #[test]
+    fn a_first_candidate_that_already_wins_is_no_grind_not_a_failure() {
+        let one = g(1, [1; 32], [1; 32], 5);
+        assert_eq!(grind_outcome(&one), Ok(false));
+        let log = Log { id: "DEV", grind: Some(one), ..Default::default() };
+        let rows = sn5(std::slice::from_ref(&log), false).expect("the dev run never fails on it");
+        assert!(rows[0].contains("no grind needed"), "{}", rows[0]);
+        // The SN scenarios still require a real grind.
+        let e = sn5(std::slice::from_ref(&log), true).unwrap_err();
+        assert!(e.contains("already gives the ground result") && !e.contains("!="), "{e}");
+    }
+
+    #[test]
+    fn a_ground_result_differs_from_the_first_candidate() {
+        let ground = g(42, [1; 32], [2; 32], 46);
+        assert_ne!(ground.honest.rank * 100 + ground.honest.bonus as u32, ground.won.rank * 100 + ground.won.bonus as u32);
+        assert_eq!(grind_outcome(&ground), Ok(true));
+        let log = Log { id: "SN1", grind: Some(ground), ..Default::default() };
+        assert!(sn5(std::slice::from_ref(&log), true).is_ok());
+    }
+
+    #[test]
+    fn an_inconsistent_record_fails() {
+        // Ground for many tries yet equal to the first candidate, or one try that differs.
+        assert!(grind_outcome(&g(9, [1; 32], [1; 32], 13)).is_err());
+        assert!(grind_outcome(&g(1, [1; 32], [2; 32], 5)).is_err());
+        // One try with the same numbers but another nonce.
+        assert!(grind_outcome(&g(1, [1; 32], [1; 32], 6)).is_err());
     }
 }

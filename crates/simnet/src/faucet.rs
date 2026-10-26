@@ -60,7 +60,32 @@ pub type Spent = Arc<Mutex<(HashSet<Op>, usize)>>;
 /// closed, and nothing more, so the page sees a round closing with its marker live.
 pub struct DevRound {
     pub target: Option<([u8; 5], u8)>,
+    /// F5 (`POST /mine?to=deadline|anchor|void`, TEST-ONLY): mine instead, so the page's own S4
+    /// panel finds `close()`, `draw()` or the void due (`dev.rs`, `mine_to`).
+    pub mine: Option<MineTo>,
     pub reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
+/// F5 (TEST-ONLY dev tool): how far `POST /mine` mines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MineTo {
+    /// Past the open round's deadline T (its `close()` valid).
+    Deadline,
+    /// Past the closing round's D, and 60 blocks on (its anchor proof can be built).
+    Anchor,
+    /// Past the closing round's D + draw_window (only its void valid; about 864,000 blocks).
+    Void,
+}
+
+impl MineTo {
+    pub fn parse(q: &str) -> Result<MineTo, String> {
+        match q.split('&').find_map(|kv| kv.strip_prefix("to=")) {
+            Some("deadline") => Ok(MineTo::Deadline),
+            Some("anchor") => Ok(MineTo::Anchor),
+            Some("void") => Ok(MineTo::Void),
+            _ => Err("to=deadline, to=anchor or to=void is required".into()),
+        }
+    }
 }
 
 struct State {
@@ -71,7 +96,8 @@ struct State {
 }
 
 /// Start the faucet on `bind` (loopback only); runs until the task is dropped. With `rounds`, it
-/// also takes `POST /round?main=a,b,c,d,e&bonus=n` (F4, the e2e suite's deterministic draws).
+/// also takes `POST /round?main=a,b,c,d,e&bonus=n` (F4, the e2e suite's deterministic draws),
+/// `POST /close` (F4 review) and `POST /mine?to=deadline|anchor|void` (F5).
 pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet, spent: Spent, rounds: Option<tokio::sync::mpsc::Sender<DevRound>>) -> Result<tokio::task::JoinHandle<()>, String> {
     if !bind.ip().is_loopback() {
         return Err("--faucet-bind: the dev faucet binds to a loopback address only".into());
@@ -87,8 +113,9 @@ pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet, spent: S
             }
             let st = st.clone();
             tokio::spawn(async move {
-                // A dev round mines a whole round forward: minutes, not seconds.
-                let _ = tokio::time::timeout(Duration::from_secs(900), handle(s, st)).await;
+                // A dev round mines a whole round forward: minutes, not seconds (a void, F5: about
+                // 864,000 blocks, 15-40 minutes on this PC as the node's store grows).
+                let _ = tokio::time::timeout(Duration::from_secs(5_400), handle(s, st)).await;
             });
         }
     }))
@@ -141,12 +168,21 @@ async fn handle(mut s: tokio::net::TcpStream, st: Arc<State>) {
             },
             None => err("400 Bad Request", origin, "address= is required"),
         },
-        ("POST", Some(("/round", q))) | ("POST", Some(("/close", q))) => match (&st.rounds, if target.starts_with("/close") { Ok(None) } else { parse_round(q).map(Some) }) {
+        ("POST", Some(("/round", q))) | ("POST", Some(("/close", q))) | ("POST", Some(("/mine", q))) => match (
+            &st.rounds,
+            if target.starts_with("/close") {
+                Ok((None, None))
+            } else if target.starts_with("/mine") {
+                MineTo::parse(q).map(|m| (None, Some(m)))
+            } else {
+                parse_round(q).map(|t| (Some(t), None))
+            },
+        ) {
             (None, _) => err("404 Not Found", origin, "no dev rounds in this run"),
             (_, Err(e)) => err("400 Bad Request", origin, &e),
-            (Some(tx), Ok(target)) => {
+            (Some(tx), Ok((target, mine))) => {
                 let (back, rx) = tokio::sync::oneshot::channel();
-                if tx.send(DevRound { target, reply: back }).await.is_err() {
+                if tx.send(DevRound { target, mine, reply: back }).await.is_err() {
                     err("503 Service Unavailable", origin, "the dev loop stopped")
                 } else {
                     match rx.await {
@@ -221,6 +257,14 @@ mod tests {
     }
 
     /// F2/F3 review note: only the dev page's origin (or no browser at all) may ask for coins.
+    #[test]
+    fn mine_targets_parse() {
+        assert_eq!(MineTo::parse("to=deadline"), Ok(MineTo::Deadline));
+        assert_eq!(MineTo::parse("x=1&to=anchor"), Ok(MineTo::Anchor));
+        assert_eq!(MineTo::parse("to=void"), Ok(MineTo::Void));
+        assert!(MineTo::parse("").is_err() && MineTo::parse("to=draw").is_err());
+    }
+
     #[test]
     fn cross_origin_requests_are_refused() {
         let head = |o: &str| format!("POST /faucet?address=kaspasim:qq HTTP/1.1\r\nHost: 127.0.0.1:8791\r\n{o}\r\n");

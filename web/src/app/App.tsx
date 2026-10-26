@@ -4,6 +4,7 @@ import { captureReferral } from '@/referral/referral';
 import { Backup } from '@/screens/Backup';
 import { MyTickets } from '@/screens/MyTickets';
 import { Play } from '@/screens/Play';
+import { Rounds } from '@/screens/Rounds';
 import { Placeholder } from '@/screens/Placeholder';
 import { Wallet } from '@/screens/Wallet';
 import { useTheme } from '@/theme/useTheme';
@@ -48,7 +49,7 @@ function Screens({ ctx }: { ctx: Ctx }) {
       screen = <MyTickets />;
       break;
     case 'rounds':
-      screen = <Placeholder title="Rounds" testId="rounds" />;
+      screen = <Rounds />;
       break;
     case 'vault':
       screen = <Placeholder title="Vault" testId="vault" />;

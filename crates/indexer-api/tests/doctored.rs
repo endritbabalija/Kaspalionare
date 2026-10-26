@@ -178,3 +178,56 @@ fn buy_input(f: &Fixture, shard: web::dto::CovUtxo, purchases: String) -> web::d
         funds: web::dto::Funds { coins: vec![coin], change, fee_rate: 100 },
     }
 }
+
+/// F5 (J6 "Verify in this browser"): `verifyRound` names each lie as its own item. On the honest
+/// server no item is a mismatch (round 1's numbers match its pools); under each doctored mode the
+/// items the lie touches, and only those, are mismatches: every object's state (wrong_state), the
+/// one shard tree the doctor changed (wrong_tree, missing_purchase, extra_purchase), the winning
+/// numbers (wrong_winning, wrong_anchor_proof).
+#[tokio::test]
+async fn verify_names_each_lie_as_its_own_item() {
+    use web::rounds::{VerifyKind as K, VerifyResult as V, verify_round};
+    let f = fixture("verify");
+    let honest = doctored(&f, None);
+    for r in [1u32, 2, 3] {
+        let v = verify_round(NET, &round_input(&f, &honest, r).await).unwrap();
+        let shown: Vec<_> = v.items.iter().map(|x| (x.kind, x.result, x.shard)).collect();
+        println!("honest round {r}: {shown:?}");
+        assert!(v.consistent, "honest round {r}: {:?}", v.items.iter().filter(|x| x.result == V::Mismatch).collect::<Vec<_>>());
+        assert!(v.items.iter().any(|x| x.kind == K::Status && x.result == V::Match), "round {r}: the status is the chain's");
+        assert_eq!(v.items.iter().filter(|x| x.kind == K::Tree && x.result == V::Match).count(), 4, "round {r}: k = 4 trees rebuilt");
+        if r == 1 {
+            assert!(v.items.iter().any(|x| x.kind == K::Numbers && x.result == V::Match), "round 1's numbers recomputed from its proof");
+            assert!(v.items.iter().any(|x| x.kind == K::Anchor && x.result == V::NotCheckable), "no node block given: X.hash not checkable");
+        }
+    }
+    for m in ALL {
+        let a = doctored(&f, Some(m));
+        for r in [1u32, 2, 3] {
+            let bad = round_input(&f, &a, r).await;
+            let good = round_input(&f, &honest, r).await;
+            let lied = serde_json::to_string(&good.round).unwrap() != serde_json::to_string(&bad.round).unwrap() || good.purchases != bad.purchases || good.anchor_proof != bad.anchor_proof;
+            let v = verify_round(NET, &bad).unwrap();
+            let wrong: Vec<_> = v.items.iter().filter(|x| x.result == V::Mismatch).map(|x| (x.kind, x.shard)).collect();
+            println!("  {} round {r}: mismatches {wrong:?}", m.name());
+            if !lied {
+                assert!(wrong.is_empty(), "{} round {r}: an unchanged answer shows a mismatch", m.name());
+                continue;
+            }
+            assert!(!v.consistent);
+            match m {
+                Mode::WrongState => {
+                    assert!(wrong.iter().all(|(k, _)| *k == K::State), "{wrong:?}");
+                    assert_eq!(wrong.len(), bad.round.objects.len(), "every object's state");
+                }
+                Mode::WrongTree | Mode::MissingPurchase | Mode::ExtraPurchase => {
+                    assert_eq!(wrong.len(), 1, "{wrong:?}");
+                    assert_eq!(wrong[0].0, K::Tree);
+                    let n = wrong[0].1.unwrap() as usize;
+                    assert_ne!(good.purchases.as_ref().unwrap().shards[n], bad.purchases.as_ref().unwrap().shards[n], "the shard the doctor changed");
+                }
+                Mode::WrongWinning | Mode::WrongAnchorProof => assert_eq!(wrong, vec![(K::Numbers, None)], "{}", m.name()),
+            }
+        }
+    }
+}

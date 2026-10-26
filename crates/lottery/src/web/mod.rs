@@ -218,6 +218,9 @@ codes! {
     /// Front end F4 (S2, spec 7 "Claims"): a warning, not a refusal: the built claim's network fee
     /// is larger than its prize (D82: under load a small claim can cost several times P_MIN).
     FeeAbovePrize = 53, "fee_above_prize", "The network fee is larger than the prize.";
+    /// Front end F5 (S4, design 12 liveness note): a warning, not a refusal: the built `close()`
+    /// or `draw()`'s network fee is larger than its caller reward (C_close or C_draw).
+    FeeAboveReward = 54, "fee_above_reward", "The network fee is larger than the caller reward.";
 }
 
 impl fmt::Display for Code {

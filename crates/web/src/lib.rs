@@ -25,6 +25,9 @@
 //!   capped before parsing) and `checkIndexerInstance`, `checkIndexerObjects`,
 //!   `checkIndexerRound` (the API's copy against the chain; any difference is
 //!   `chain_mismatch`), with the response types in `indexer`;
+//! - S3/S4 (F5): `verifyRound` (J6, each check with its own result: match, mismatch, not
+//!   checkable) and `callerFigures` (the caller panel's rows of a built `close()`, `draw()` or
+//!   void, bound to it); `checkIndexerRound` also returns the round's facts and `anchorBound`;
 //! - the quick testnet wallet's key hook (`quickWalletNew`, `quickWalletImport`,
 //!   `quickWalletSign`), absent from a `mainnet` build.
 //!
@@ -52,6 +55,9 @@ pub mod node;
 pub mod node_client;
 #[cfg(not(feature = "mainnet"))]
 pub mod quick_wallet;
+/// S3 Rounds and S4 Run the round (spec 3, 4; F5): the round's facts, "Verify in this browser"
+/// item by item, and the caller panel's figures.
+pub mod rounds;
 pub mod safe_json;
 /// My tickets (spec S2; F4): the ticket card, the claim row and the deposit return, from Rust.
 pub mod tickets;

@@ -302,6 +302,57 @@ async fn advance(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templa
     Ok(serde_json::json!({ "drawn": drawn, "round": open.to_string(), "winning": { "main": &win[..5], "bonus": win[5] } }))
 }
 
+/// F5 (`POST /mine?to=…` on the dev faucet; TEST-ONLY, simnet only): mine until the page's own S4
+/// panel finds a transition due: past the open round's T (`close()`), past the closing round's D and
+/// 60 blocks on (`draw()`, its anchor proof buildable), or past its D + draw_window (the void; about
+/// 864,000 blocks, mined to a throwaway address so the dev wallet's coin list stays small, with the
+/// indexer catching up every 20,000 blocks). Nothing is built or submitted: the page does that.
+async fn mine_to(c: &KaspaRpcClient, x: &mut Indexer, starts: &Starts, to: crate::faucet::MineTo, pay: &kaspa_addresses::Address) -> Result<serde_json::Value, String> {
+    use crate::faucet::MineTo;
+    let t0 = Instant::now();
+    let (round, target) = match to {
+        MineTo::Deadline => {
+            let (r, t) = live_where(x, |s| matches!(s, State::Controller(_)))
+                .filter_map(|l| if let Some(State::Controller(cc)) = &l.state { Some((cc.round, cc.deadline)) } else { None })
+                .max()
+                .ok_or("no live controller")?;
+            (r, t as u64 + 5)
+        }
+        MineTo::Anchor | MineTo::Void => {
+            let mk = live_where(x, |s| matches!(s, State::Marker(_))).find_map(|l| if let Some(State::Marker(mk)) = &l.state { Some(mk.round) } else { None }).ok_or("no closing round (no live marker)")?;
+            let close = x.ix.round(mk).and_then(|r| r.close.clone()).ok_or(format!("round {mk} is not closed in the index"))?;
+            let so = live_where(x, |s| matches!(s, State::Controller(cc) if cc.round == mk + 1)).find_map(|l| if let Some(State::Controller(cc)) = &l.state { Some(cc.seed_offset) } else { None }).ok_or("no next controller")?;
+            let dw = live_where(x, |s| matches!(s, State::Drawer(_))).find_map(|l| if let Some(State::Drawer(dr)) = &l.state { Some(dr.draw_window) } else { None }).ok_or("no live drawer")?;
+            let d = lottery::game::anchor_daa(close.marker_daa as i64, so);
+            match to {
+                MineTo::Anchor => (mk, d as u64 + 60),
+                _ => (mk, lottery::game::void_lock(d, dw).ok_or("no void lock")? as u64 + 5),
+            }
+        }
+    };
+    let start = c.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+    println!("dev mine: {to:?} of round {round}: virtual DAA {start} -> past {target}");
+    loop {
+        let v = c.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+        if v > target {
+            break;
+        }
+        let n = (target + 1 - v).min(20_000);
+        mine(c, pay, n).await?;
+        catch_up(c, x).await?;
+        note_closes(x, starts);
+        if target - start > 50_000 {
+            println!("dev mine: virtual DAA {} of {target} ({:.0} s)", v + n, t0.elapsed().as_secs_f64());
+        }
+    }
+    mine(c, pay, 5).await?;
+    catch_up(c, x).await?;
+    note_closes(x, starts);
+    let v = c.get_server_info().await.map_err(|e| e.to_string())?.virtual_daa_score;
+    println!("dev mine: {to:?} of round {round} reached: virtual DAA {v} in {:.0} s", t0.elapsed().as_secs_f64());
+    Ok(serde_json::json!({ "to": format!("{to:?}").to_lowercase(), "round": round.to_string(), "target": target.to_string(), "virtualDaaScore": v.to_string() }))
+}
+
 // ------------------------------------------------------------------ self-check (as the page)
 
 /// GET `path` on the local API (HTTP/1.1, `Connection: close`): (status, body).
@@ -515,6 +566,16 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
             _ = &mut stop => { println!("dev: Ctrl-C; stopping"); break; }
             _ = tokio::time::sleep(Duration::from_millis(o.block_ms)) => {}
             Some(req) = round_rx.recv() => {
+                if let Some(to) = req.mine {
+                    // The void's blocks go to a throwaway address (its key dropped at once), not the dev wallet.
+                    let pay = if to == crate::faucet::MineTo::Void { Wallet::random().addr } else { w.addr.clone() };
+                    let r = mine_to(&c, &mut x, &starts, to, &pay).await;
+                    if let Err(e) = &r {
+                        eprintln!("dev mine: {e}");
+                    }
+                    let _ = req.reply.send(r);
+                    continue;
+                }
                 let target = req.target.map(|(main, bonus)| Combo::new(main, bonus));
                 match &target {
                     Some(tc) => println!("dev round: the page's combination {:?}+{} to win", tc.main, tc.bonus),

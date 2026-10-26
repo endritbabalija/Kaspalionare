@@ -163,7 +163,7 @@ async fn sn_cmd(id: &str) -> Result<(), String> {
     println!("{} PASS", r.id);
     let logs = vec![r];
     sn::print_report(&logs);
-    sn::sn5(&logs)?;
+    sn::sn5(&logs, true)?;
     if id == "sn5" {
         println!("SN5 PASS (grind of SN1)");
     }
