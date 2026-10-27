@@ -95,3 +95,18 @@ export function sompiOfKas(text: string): string | null {
   const frac = BigInt((m[2] ?? '').padEnd(8, '0'));
   return (whole * SOMPI_PER_KAS + frac).toString();
 }
+
+/** A DAA span as words at 10 per second, in its largest whole unit ("6048000" -> "7 days", "600" -> "1 minute"). */
+export function daaSpan(daa: number): string {
+  const s = daa / Number(DAA_PER_SECOND);
+  const unit = (n: number, w: string) => `${n.toLocaleString('en-US')} ${w}${n === 1 ? '' : 's'}`;
+  if (s >= 86_400 && s % 86_400 === 0) return unit(s / 86_400, 'day');
+  if (s >= 3600 && s % 3600 === 0) return unit(s / 3600, 'hour');
+  if (s >= 60 && s % 60 === 0) return unit(s / 60, 'minute');
+  return unit(s, 'second');
+}
+
+/** Basis points as a percentage ("50" -> "0.5 %", "7400" -> "74 %"). */
+export function percentOfBp(bp: number): string {
+  return `${(bp / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })} %`;
+}

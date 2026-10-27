@@ -27,6 +27,8 @@ import { SettleRows } from '@/components/SettleRows';
 import { VaultFigures } from '@/components/VaultFigures';
 import { VaultPositionCard } from '@/components/VaultPositionCard';
 import { WithdrawPanel } from '@/components/WithdrawPanel';
+import { MoneySplit } from '@/components/MoneySplit';
+import howModel from '@/screens/how/cabinet-model.json';
 import { SAMPLE_CLOSE, SAMPLE_DRAW_LOW, SAMPLE_VERIFY } from './roundSamples';
 import {
   SAMPLE_DEPOSIT,
@@ -454,6 +456,21 @@ function Sheet() {
             clock={CLOCK}
             walletConnected
             onRequest={() => undefined}
+          />
+        </div>
+      </Row>
+      <Row name="Money split (How it works)">
+        <div className="w-full">
+          <MoneySplit
+            testId="cat-split"
+            parts={[
+              { key: 'house', name: 'House vault', sompi: howModel.perTicket.H, fill: 'bg-teal' },
+              { key: 'tiers', name: 'Lower prizes', sompi: howModel.perTicket.Bsum, fill: 'bg-mint' },
+              { key: 'referral', name: 'Referral', sompi: howModel.perTicket.R, fill: 'bg-ink' },
+              { key: 'fee', name: 'Protocol fee', sompi: howModel.perTicket.F, fill: 'bg-amber' },
+              { key: 'close', name: 'close() caller', sompi: howModel.perTicket.C_close, fill: 'bg-graphite' },
+              { key: 'draw', name: 'draw() caller', sompi: howModel.perTicket.C_draw, fill: 'bg-control-line' },
+            ]}
           />
         </div>
       </Row>

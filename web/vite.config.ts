@@ -5,11 +5,11 @@
 //   simnet,node: the private simnet dev run) or `src/wasm/release` (feature node: testnet-10 only).
 //   A production build always uses the release package and refuses a non-testnet configuration.
 // - The strict Content-Security-Policy (spec 6.6) and the other response headers are HTTP headers from
-//   vercel.json, served by Vercel and by `vite preview` (siteHeaders); scripts/check-csp.mjs checks the page,
+//   vercel.json, served by Vercel and by `vite preview` (vercelHeaders); scripts/check-csp.mjs checks the page,
 //   its worker and the wasm glue under them.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
@@ -19,15 +19,39 @@ const root = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z
  * The site's HTTP response headers (spec 6.6), from vercel.json (the one copy: Vercel serves them in
  * production, `vite preview` serves the same ones locally, scripts/check-csp.mjs checks the built page under
  * them). The CSP is a header, not a meta tag, so it also governs the worker script (a worker gets the policy
- * of its own response) and can set frame-ancestors (F2/F3 review S6).
+ * of its own response) and can set frame-ancestors (F2/F3 review S6). Two rules (F6 part B): the site
+ * ("/((?!figures/).*)", frame-ancestors 'none') and the framed figures ("/figures/(.*)", their own CSP by hash,
+ * frame-ancestors 'self'). Each source is a regular expression over the path, as Vercel reads it; the rules do
+ * not overlap (src/screens/how/figure.test.ts), so the order never matters.
  */
-export function siteHeaders(): Record<string, string> {
+export function headerRules(): { match: RegExp; headers: Record<string, string> }[] {
   const v = JSON.parse(readFileSync(path.join(root, 'vercel.json'), 'utf8')) as {
     headers: { source: string; headers: { key: string; value: string }[] }[];
   };
-  const all = v.headers.find((h) => h.source === '/(.*)');
-  if (!all) throw new Error('vercel.json: no headers for /(.*)');
-  return Object.fromEntries(all.headers.map((h) => [h.key, h.value]));
+  return v.headers.map((r) => ({
+    match: new RegExp(`^${r.source}$`),
+    headers: Object.fromEntries(r.headers.map((h) => [h.key, h.value])),
+  }));
+}
+
+/** The headers vercel.json gives a request path (every matching rule, in order). */
+export function headersFor(pathname: string, rules = headerRules()): Record<string, string> {
+  return Object.assign({}, ...rules.filter((r) => r.match.test(pathname)).map((r) => r.headers));
+}
+
+/** `vite preview` serves vercel.json's headers per path, as Vercel does. */
+function vercelHeaders(): Plugin {
+  return {
+    name: 'kaspalionare-vercel-headers',
+    configurePreviewServer(server) {
+      const rules = headerRules();
+      server.middlewares.use((req, res, next) => {
+        const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+        for (const [k, v] of Object.entries(headersFor(pathname, rules))) res.setHeader(k, v);
+        next();
+      });
+    },
+  };
 }
 
 export default defineConfig(({ command, mode }) => {
@@ -44,7 +68,7 @@ export default defineConfig(({ command, mode }) => {
   if (wasm !== 'dev' && wasm !== 'release' && !(build && mainnetCheck && wasm === 'mainnet'))
     throw new Error(`VITE_WASM must be dev or release, not ${wasm}`);
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), vercelHeaders()],
     resolve: {
       alias: {
         '@wasm': path.join(root, 'src', 'wasm', wasm),
@@ -54,7 +78,7 @@ export default defineConfig(({ command, mode }) => {
     worker: { format: 'es' },
     build: { target: 'es2022', sourcemap: false },
     server: { port: 5173, strictPort: true, host: '127.0.0.1' },
-    preview: { port: 4173, strictPort: true, host: '127.0.0.1', headers: siteHeaders() },
+    preview: { port: 4173, strictPort: true, host: '127.0.0.1' },
     test: {
       environment: 'jsdom',
       include: ['src/**/*.test.{ts,tsx}'],

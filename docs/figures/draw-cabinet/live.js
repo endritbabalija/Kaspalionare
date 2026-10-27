@@ -15,7 +15,7 @@ const qa = (sel) => [...svg.querySelectorAll(sel)];
 const PHASES = [
   { id: "buy", t0: 0, t1: 6, say: "buy(): tickets into 16 shards; backers queue requests at the vault" },
   { id: "close", t0: 6, t1: 9, say: "close(): shards sealed, counts frozen" },
-  { id: "draw", t0: 9, t1: 19, say: "draw() with a test-only seed; vault settles, then backer requests convert" },
+  { id: "draw", t0: 9, t1: 19, say: "draw(): anchor block X's hash picks the numbers; the vault settles, then backer requests convert" },
   { id: "claim", t0: 19, t1: 24.5, say: "claim(): 16 proofs, prize paid" },
   { id: "settle", t0: 24.5, t1: 29, say: "settle(): each backer request takes its share of the record" },
   { id: "next", t0: 29, t1: 31.5, say: "next round" },
@@ -420,10 +420,10 @@ function say(t, sold, tq = t) {
   const req = REQ_T.findIndex((r) => tq >= r && tq < r + 1.3);
   const set = SETTLE_T.findIndex((s) => t >= s && t < s + 1.0);
   let text = "";
-  if (t < 6) text = req >= 0 ? requestText(req) : `round 7 · buy() · ${sold} tickets · ${fmt(sold)} KAS in 16 shards`;
+  if (t < 6) text = req >= 0 ? requestText(req) : `round ${M.round} · buy() · ${sold} tickets · ${fmt(sold * M.price)} KAS in ${M.k} shards`;
   else if (t < 7.25) text = "close() · deadline passed · lever pulled";
-  else if (t < 9) text = `close() · 16 shards sealed · caller +${fmt(M.amounts.C_close)} KAS`;
-  else if (t < 10.4) text = "draw() · TEST SEED · mixing";
+  else if (t < 9) text = `close() · ${M.k} shards sealed · caller +${fmt(M.amounts.C_close)} KAS`;
+  else if (t < 10.4) text = "draw() · anchor X · mixing";
   else if (t < 16.4) text = `draw() · ${drawn.length ? drawn.join(" ") : "…"}${bonusDrawn ? " + " + two(M.bonus) : ""}`;
   else if (t < 17.2) text = `draw() · h = ${M.h} · n2 = ${M.n2} · vault pays ${fmt(M.vault.J, 0)} + ${M.n2} × ${fmt(M.vault.G2, 0)} KAS`;
   else if (t < 18.2) text = `draw() · share price ${BK.price0.toFixed(4)} → ${BK.priceDraw.toFixed(4)} · deposits in`;
@@ -431,8 +431,8 @@ function say(t, sold, tq = t) {
   else if (t < 20.0) text = `claim() · ticket ${M.win.map(two).join(" ")} + ${two(M.bonus)}`;
   else if (t < 22.0) text = `claim() · proof ${Math.min(16, Math.floor((t - 20.0) / 0.12) + 1)} / 16 · h = ${M.holders.filter((i) => t >= 20.0 + i * 0.12 + 0.15).length}`;
   else if (t < 24.5) text = `claim() · floor(${fmt(M.vault.J)} / ${M.h}) = ${fmt(M.prize)} KAS paid`;
-  else if (t < 29) text = set >= 0 ? settleText(set) : t < SETTLE_T[0] ? "settle() · anyone may settle a request" : `record drained · R refunded · ${fmt(BK.pendingAfter, 0)} shares wait for round 8`;
-  else text = `round 8 opens · m = ${M.mNext} · J = ${fmt(M.vault.Jnext, 0)} KAS`;
+  else if (t < 29) text = set >= 0 ? settleText(set) : t < SETTLE_T[0] ? "settle() · anyone may settle a request" : `record drained · R refunded · ${fmt(BK.pendingAfter, 0)} shares wait for round ${M.round + 1}`;
+  else text = `round ${M.round + 1} opens · m = ${M.mNext} · J = ${fmt(M.vault.Jnext, 0)} KAS`;
   if (readout.textContent !== text) readout.textContent = text;
   const ph = phaseAt(t);
   if (ph !== lastPhase) {

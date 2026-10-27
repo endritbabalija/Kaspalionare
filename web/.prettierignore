@@ -9,3 +9,5 @@ test-results
 package-lock.json
 src/fonts
 src/test/fixtures
+public/figures
+src/screens/how/cabinet-model.json

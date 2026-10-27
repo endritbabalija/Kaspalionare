@@ -1,0 +1,24 @@
+/* The embedded figure (build --embed, How it works): the page's colour tokens (web/src/theme/tokens.css, spec 5) in
+   both themes. --kl-* are copies of the tokens of the same name; web/src/screens/how/figure.test.ts checks every one
+   against tokens.css. The drawing's own shading greys are tinted to the same hue; the Kaspa coins keep their teal. */
+.iso{--kl-ground:#0e1012;--kl-surface:#16191c;--kl-ink:#eceeea;--kl-graphite:#9aa1a8;--kl-rule:#2a2e33;--kl-rule-soft:#22262a;--kl-control-line:#3a3f44;--kl-link:#5cc8b8;--kl-amber:#e59a4e;
+  --anatomy-page:var(--kl-ground);--anatomy-card:var(--kl-surface);--anatomy-text:var(--kl-ink);--anatomy-strong:var(--kl-ink);--anatomy-muted:var(--kl-graphite);
+  --anatomy-paper:var(--kl-surface);--anatomy-face:#1c2024;--anatomy-top:#1d2125;
+  --anatomy-shade-0:#111316;--anatomy-shade-1:#14171a;--anatomy-shade-2:#171a1e;--anatomy-shade-3:#1a1e21;
+  --anatomy-hi:#d3d7d2;--anatomy-mid:#676d73;--anatomy-lo:var(--kl-control-line);--anatomy-faint:var(--kl-rule);
+  --anatomy-halo:#050607;--anatomy-dot:var(--kl-ink);--anatomy-red:var(--kl-amber)}
+.iso[data-theme="light"]{--kl-ground:#f6f6f3;--kl-surface:#ffffff;--kl-ink:#15171a;--kl-graphite:#565c63;--kl-rule:#dfe1dc;--kl-rule-soft:#ecedea;--kl-control-line:#c9ccc6;--kl-link:#0e7a70;--kl-amber:#a14f08;
+  --anatomy-page:var(--kl-ground);--anatomy-card:var(--kl-surface);--anatomy-text:var(--kl-ink);--anatomy-strong:var(--kl-ink);--anatomy-muted:var(--kl-graphite);
+  --anatomy-paper:var(--kl-surface);--anatomy-face:#ffffff;--anatomy-top:#ffffff;--anatomy-dot:var(--kl-ink);--anatomy-red:var(--kl-amber);
+  --anatomy-shade-0:#dbddd8;--anatomy-shade-1:#e4e6e1;--anatomy-shade-2:#ecedea;--anatomy-shade-3:#f3f4f1;
+  --anatomy-hi:#26292d;--anatomy-mid:#878c91;--anatomy-lo:#b3b7b1;--anatomy-faint:var(--kl-rule);
+  --anatomy-halo:#878c84}
+.iso .iso-figure,.iso[data-theme="light"] .iso-figure{--anatomy-lit:var(--kl-link);--dc-lamp-on:var(--kl-link);--dc-digit:var(--kl-link);--dc-glass:var(--kl-link)}
+/* the frame is the page's card: no page margins, the plate's border and radius as the page's cards */
+body{background:var(--kl-ground)}
+.iso-page{width:100%;margin:0;box-sizing:border-box}
+.iso-plate{border-radius:14px 14px 0 0;box-shadow:0 0 0 1px var(--kl-rule)}
+.iso-legend{margin:0;padding:14px 16px 16px;border-radius:0 0 14px 14px;background:var(--kl-surface);box-shadow:0 0 0 1px var(--kl-rule)}
+.iso-figure{margin:0}
+.iso-page{padding:1px}
+html{overflow:hidden}

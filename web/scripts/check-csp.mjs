@@ -9,7 +9,12 @@
 //   - the wasm glue runs under it: the worker instantiates the wasm (needs only 'wasm-unsafe-eval'), runs
 //     errorTable and start, and reaches the node client, which fails as a node error (node_unavailable), not
 //     as a stopped worker; no CSP report other than the two probes' own;
-//   - a page on another origin cannot frame it.
+//   - a page on another origin cannot frame it;
+//   - F6 part B: How it works frames the draw-cabinet figure (public/figures/): the figure file is served with its
+//     own CSP (vercel.json "/figures/(.*)": its inline script and styles by hash, frame-ancestors 'self') and
+//     X-Frame-Options SAMEORIGIN; in the page's sandboxed frame its script runs (the tour fills its callout, the
+//     frame is sized by the figure's message) with no CSP report; an inline script added to it is refused; a page
+//     on another origin cannot frame the figure either.
 // Needs src/wasm/release (npm run wasm:release or npm run build) and Playwright's Chromium (npm run e2e:install).
 // Ports: 4173 (preview) and 4174 (the framing page). Run: npm run check:csp.
 import { createServer } from 'node:http';
@@ -24,8 +29,12 @@ const out = path.join(WEB, 'dist-csp-check');
 const vite = path.join(WEB, 'node_modules', 'vite', 'bin', 'vite.js');
 // A wss:// URL nobody answers (a production build takes wss:// node URLs only: config.ts).
 const NODE_URL = 'wss://127.0.0.1:9';
-const want = JSON.parse(readFileSync(path.join(WEB, 'vercel.json'), 'utf8')).headers.find((h) => h.source === '/(.*)');
-const CSP = want.headers.find((h) => h.key === 'Content-Security-Policy').value;
+const vercel = JSON.parse(readFileSync(path.join(WEB, 'vercel.json'), 'utf8')).headers;
+const ruleOf = (source) =>
+  Object.fromEntries(vercel.find((h) => h.source === source).headers.map((h) => [h.key, h.value]));
+const CSP = ruleOf('/((?!figures/).*)')['Content-Security-Policy'];
+const FIGURE_CSP = ruleOf('/figures/(.*)')['Content-Security-Policy'];
+const FIGURE = '/figures/draw-cabinet-tour.html';
 
 let bad = 0;
 const check = (ok, what) => {
@@ -44,9 +53,10 @@ run(process.execPath, [vite, 'build', '--outDir', out, '--emptyOutDir'], {
   },
 });
 const preview = start('preview', process.execPath, [vite, 'preview', '--outDir', out], { cwd: WEB });
-const framer = createServer((_q, r) => {
+const framer = createServer((q, r) => {
   r.setHeader('content-type', 'text/html');
-  r.end('<!doctype html><iframe id="f" src="http://127.0.0.1:4173/"></iframe>');
+  const src = q.url === '/figure' ? `http://127.0.0.1:4173${FIGURE}` : 'http://127.0.0.1:4173/';
+  r.end(`<!doctype html><iframe id="f" src="${src}"></iframe>`);
 }).listen(4174, '127.0.0.1');
 const browser = await chromium.launch();
 try {
@@ -127,6 +137,69 @@ try {
   const framed = fp.frames().find((f) => f.url().startsWith('http://127.0.0.1:4173'));
   const root = framed ? await framed.$('#root').catch(() => null) : null;
   check(root === null, 'a page on another origin cannot frame the site');
+
+  // F6 part B: the framed figure on How it works.
+  const fres = await fetch(`http://127.0.0.1:4173${FIGURE}`);
+  check(
+    fres.headers.get('content-security-policy') === FIGURE_CSP,
+    "the figure is served with vercel.json's figure CSP",
+  );
+  check(
+    /frame-ancestors 'self'/.test(FIGURE_CSP) && /script-src 'sha256-/.test(FIGURE_CSP),
+    "the figure CSP: script by hash, frame-ancestors 'self'",
+  );
+  check(fres.headers.get('x-frame-options') === 'SAMEORIGIN', 'the figure: X-Frame-Options SAMEORIGIN');
+  const how = await browser.newPage();
+  const howReports = [];
+  how.on('console', (m) => {
+    if (/Content Security Policy|Refused to/i.test(m.text())) howReports.push(m.text());
+  });
+  await how.goto('http://127.0.0.1:4173/#/how');
+  const frameEl = how.getByTestId('how-figure-frame');
+  await frameEl.scrollIntoViewIfNeeded();
+  await how
+    .waitForFunction(
+      () => document.querySelector('[data-testid="how-figure-frame"]')?.getAttribute('data-state') === 'sized',
+      null,
+      { timeout: 30_000 },
+    )
+    .catch(() => undefined);
+  check(
+    (await frameEl.getAttribute('data-state')) === 'sized',
+    'the figure ran in its sandboxed frame and posted its height',
+  );
+  const fig = how.frames().find((f) => f.url().endsWith(FIGURE));
+  const title = fig
+    ? await fig
+        .locator('[data-callout] [data-callout-title]')
+        .textContent({ timeout: 10_000 })
+        .catch(() => '')
+    : '';
+  check(Boolean(title), `the figure's tour runs under its CSP (callout: ${title})`);
+  const figInline = fig
+    ? await fig.evaluate(
+        () =>
+          new Promise((resolve) => {
+            document.addEventListener('securitypolicyviolation', (e) => resolve(e.effectiveDirective), { once: true });
+            const el = document.createElement('script');
+            el.textContent = 'window.__inline = 1';
+            document.head.append(el);
+            setTimeout(() => resolve('none'), 2000);
+          }),
+      )
+    : 'no frame';
+  check(String(figInline).startsWith('script-src'), `the figure refuses an inline script (${figInline})`);
+  const howOther = howReports.filter((t) => !/script-src/.test(t));
+  check(
+    howOther.length === 0,
+    `How it works and its figure: no CSP report but the probe's own${howOther.length ? `: ${howOther.join(' | ')}` : ''}`,
+  );
+  const fp2 = await browser.newPage();
+  await fp2.goto('http://127.0.0.1:4174/figure');
+  await fp2.waitForTimeout(1500);
+  const framedFig = fp2.frames().find((f) => f.url().startsWith('http://127.0.0.1:4173'));
+  const plate = framedFig ? await framedFig.$('.iso-plate').catch(() => null) : null;
+  check(plate === null, 'a page on another origin cannot frame the figure');
 } finally {
   await browser.close();
   framer.close();

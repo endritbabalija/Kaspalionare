@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { clock, countdown, daaToMs, groupDigits, kas2, kasExact, shortHash, sompiExact, sompiOfKas } from './format';
+import {
+  clock,
+  countdown,
+  daaSpan,
+  daaToMs,
+  groupDigits,
+  kas2,
+  kasExact,
+  percentOfBp,
+  shortHash,
+  sompiExact,
+  sompiOfKas,
+} from './format';
 
 describe('amounts', () => {
   it('prints KAS with two decimals, rounded half up', () => {
@@ -65,5 +77,21 @@ describe('hashes', () => {
     expect(shortHash('9f3c0a1122334455667788b71e21')).toBe('9f3c0a…b71e21');
     expect(shortHash('kaspatest:qqdasdj3abcdefghijklmnopphyfvu')).toBe('kaspatest:qqdasd…phyfvu');
     expect(shortHash('abc')).toBe('abc');
+  });
+});
+
+describe('spans and shares (How it works)', () => {
+  it('names a DAA span in its largest whole unit at 10 per second', () => {
+    expect(daaSpan(6_048_000)).toBe('7 days');
+    expect(daaSpan(864_000)).toBe('1 day');
+    expect(daaSpan(36_000)).toBe('1 hour');
+    expect(daaSpan(600)).toBe('1 minute');
+    expect(daaSpan(1_200)).toBe('2 minutes');
+    expect(daaSpan(15)).toBe('1.5 seconds');
+  });
+  it('prints basis points as a percentage', () => {
+    expect(percentOfBp(50)).toBe('0.5 %');
+    expect(percentOfBp(7400)).toBe('74 %');
+    expect(percentOfBp(1)).toBe('0.01 %');
   });
 });

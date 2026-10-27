@@ -1,18 +1,83 @@
 // Draw cabinet: the Kaspa L1 lottery as a televised draw machine.
-// node build.mjs [--light]  → draw-cabinet.html / draw-cabinet-light.html
-import { readFileSync, writeFileSync } from "node:fs";
+// node build.mjs [--tour] [--light] [--embed]   one variant; node build.mjs --all   every variant:
+//   draw-cabinet{,-light}.html, draw-cabinet-tour{,-light}.html here (standalone, the kit's colours), and
+//   web/public/figures/draw-cabinet-tour{,-light}.html (--embed: How it works, the page's colour tokens, no page
+//   margins, its height posted to the page; also writes the figure's CSP hashes into web/vercel.json).
+// The drawing kit is committed in tools/anatomy-kit/ (MIT, from the anatomy skill; README there), so this builds
+// from a clean clone with Node alone. The example round is web/src/screens/how/cabinet-model.json, written by the
+// Rust lottery code (crates/lottery/tests/f6_figure.rs); this file only converts its units for display.
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as k from "../../../.claude/skills/anatomy/kit/iso-kit.mjs";
-import * as G from "../../../.claude/skills/anatomy/kit/lathe.mjs";
-import { tubePieces, tubeSvg } from "../../../.claude/skills/anatomy/kit/tube.mjs";
-import { kitScript } from "../../../.claude/skills/anatomy/scripts/inline-kit.mjs";
-import { MODEL } from "./model.mjs";
+import * as k from "../../../tools/anatomy-kit/iso-kit.mjs";
+import * as G from "../../../tools/anatomy-kit/lathe.mjs";
+import { tubePieces, tubeSvg } from "../../../tools/anatomy-kit/tube.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const KIT = join(HERE, "..", "..", "..", ".claude", "skills", "anatomy", "kit");
+const ROOT = join(HERE, "..", "..", "..");
+const KIT = join(ROOT, "tools", "anatomy-kit");
+const WEB = join(ROOT, "web");
+if (process.argv.includes("--all")) {
+  for (const flags of [[], ["--light"], ["--tour"], ["--tour", "--light"], ["--tour", "--embed"], ["--tour", "--light", "--embed"]])
+    execFileSync(process.execPath, [fileURLToPath(import.meta.url), ...flags], { stdio: "inherit" });
+  process.exit(0);
+}
 const THEME = process.argv.includes("--light") ? "light" : "dark";
 const TOUR = process.argv.includes("--tour");
+const EMBED = process.argv.includes("--embed");
+const kitScript = () => readFileSync(join(KIT, "iso-kit.mjs"), "utf8").replace(/^export /gm, "");
+
+// ---------------------------------------------------------------- the example round (from the Rust lottery code)
+const MODEL_FILE = join(WEB, "src", "screens", "how", "cabinet-model.json");
+const MODEL_TEXT = readFileSync(MODEL_FILE, "utf8").replace(/\r\n/g, "\n");
+const MODEL_SHA256 = createHash("sha256").update(MODEL_TEXT).digest("hex");
+const R = JSON.parse(MODEL_TEXT);
+const kasOf = (sompi) => Number(sompi) / 1e8; // display: sompi to KAS
+const sharesOf = (n) => Number(n); // vault share counts (all below 2^53)
+const MODEL = {
+  round: R.round,
+  k: R.k,
+  m: R.m,
+  mNext: R.mNext,
+  counts: R.counts,
+  sold: R.sold,
+  price: kasOf(R.price),
+  shares: R.shares,
+  amounts: { F: kasOf(R.amounts.F), R: kasOf(R.amounts.R), C_close: kasOf(R.amounts.C_close), C_draw: kasOf(R.amounts.C_draw), B: R.amounts.B.map(kasOf), H: kasOf(R.amounts.H), b: kasOf(R.amounts.b) },
+  vault: Object.fromEntries(Object.entries(R.vault).map(([key, v]) => [key, kasOf(v)])),
+  backers: {
+    S0: sharesOf(R.backers.S0),
+    S1: sharesOf(R.backers.S1),
+    price0: Number(R.backers.price0),
+    priceDraw: Number(R.backers.priceDraw),
+    price1: Number(R.backers.price1),
+    D: kasOf(R.backers.D),
+    W: sharesOf(R.backers.W),
+    mint: sharesOf(R.backers.mint),
+    wc: sharesOf(R.backers.wc),
+    out: kasOf(R.backers.out),
+    pendingAfter: sharesOf(R.backers.pendingAfter),
+    requests: R.backers.settled.map((q) => ({ kind: q.kind, amount: q.kind === "deposit" ? kasOf(q.amount) : sharesOf(q.amount) })),
+    settled: R.backers.settled.map((q) =>
+      q.kind === "deposit"
+        ? { kind: q.kind, mode: q.mode, amount: kasOf(q.amount), shares: sharesOf(q.shares) }
+        : { kind: q.kind, mode: q.mode, amount: sharesOf(q.amount), conv: sharesOf(q.conv), pay: kasOf(q.pay), left: sharesOf(q.left) },
+    ),
+    drained: R.backers.drained,
+    delayDaa: R.constants.vaultRequestDelayDaa,
+  },
+  seedOffset: R.constants.seedOffsetDaa,
+  win: R.win,
+  bonus: R.bonus,
+  holders: R.holders,
+  h: R.h,
+  n2: R.n2,
+  prize: kasOf(R.prize),
+};
+const pct = (bp) => `${(bp / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })} %`;
+const SPLIT = `fee ${pct(MODEL.shares.F)}, referral ${pct(MODEL.shares.R)}, callers ${pct(MODEL.shares.C)} each, prize tiers ${pct(MODEL.shares.T.reduce((a, b) => a + b, 0))}, house ${pct(MODEL.shares.H)}`;
 
 const W = 760;
 const H = 590;
@@ -626,10 +691,10 @@ for (const [id, L] of Object.entries(LEVERS)) {
   put([RX + 10, L.y, L.z], disc(G.frameOf([RX + 7.6, L.y, L.z], [1, 0, 0], [0, 1, 0], [0, 0, 1]), 3.4, 5.4, 3.6, { tone: "hi" }), 40, `lever.${id}.cap`);
 }
 {
-  // TEST SEED plaque and seed dial beside the draw lever
+  // ANCHOR X plaque and seed dial beside the draw lever: the seed is the anchor block's hash (M7)
   const pm = planeMatrix([RX + 1.02, 58, 58], SIDE_EX, DOWN);
   const plaque = box(RX, 32, 48, RX + 1, 58, 59, { tone: "lo" }, { r: 0.4 }) +
-    `<g transform="${pm}"><rect class="iso-line" data-tone="faint" x="1.2" y="1.2" width="23.6" height="8.6" rx="0.8"/>${k.faceTextSvg("", "TEST SEED", { size: 3.4, tone: "mid", anchor: "middle" }).replace("<text", '<text x="13" y="6.9"')}</g>` +
+    `<g transform="${pm}"><rect class="iso-line" data-tone="faint" x="1.2" y="1.2" width="23.6" height="8.6" rx="0.8"/>${k.faceTextSvg("", "ANCHOR X", { size: 3.4, tone: "mid", anchor: "middle" }).replace("<text", '<text x="13" y="6.9"')}</g>` +
     screws([[RX + 1, 33.4, 53.5], [RX + 1, 56.6, 53.5]], 0.4);
   put([RX + 1, 45, 53], plaque, 1, "seed.plaque");
   const SF = G.frameOf([RX, 45, 72], [1, 0, 0], [0, 1, 0], [0, 0, 1]);
@@ -659,7 +724,7 @@ const svg = k.figureSvg({
   width: W,
   height: H,
   label:
-    "An isometric lottery draw machine on a bench. On its deck: a coin terminal that sells tickets, a rack of 16 ticket slots with a seal bar, a large glass globe of 30 numbered balls and a small bonus globe, joined by chutes to a result rail. On the right side are two pull levers, close() and draw(), with a dial and plaque marked TEST SEED. On the front: five prize trays with lamps, a claim reader with 16 proof pins, a boost-pot drawer and a vault door with a sight glass that shows the KAS level and a red liability line.",
+    "An isometric lottery draw machine on a bench. On its deck: a coin terminal that sells tickets, a rack of 16 ticket slots with a seal bar, a large glass globe of 30 numbered balls and a small bonus globe, joined by chutes to a result rail. On the right side are two pull levers, close() and draw(), with a seed dial and a plaque marked ANCHOR X. On the front: five prize trays with lamps, a claim reader with 16 proof pins, a boost-pot drawer and a vault door with a sight glass that shows the KAS level and a red liability line.",
   body: [
     ...back,
     ...items.map((it) => `<g class="it" data-name="${it.name}">${it.svg}</g>`),
@@ -677,6 +742,7 @@ const DATA = {
   V,
   KS,
   model: MODEL,
+  modelSha256: MODEL_SHA256,
   globe: { c: GLOBE.c, r: GLOBE.r, rest: mainRest, ballR: BALL_R, port: mainGlobe.port, art: ballArt(BALL_R), plain: ballBody(BALL_R) },
   bonus: { c: BONUS.c, r: BONUS.r, rest: bonusRest, ballR: BBALL_R, port: bonusGlobe.port, art: ballArt(BBALL_R), plain: ballBody(BBALL_R) },
   rail: { gateZ: ZD + 11 - BALL_R, slots: SLOTS, bonusSlot: BONUS_SLOT, entry: ENTRY, y: RAIL.y, z: RAIL_BALL_Z, mainEnd: mainChute[mainChute.length - 1], bonusEnd: bonusChute[bonusChute.length - 1] },
@@ -722,17 +788,17 @@ if (TOUR) {
     {
       id: "buy", title: "buy()", t: [0, 5.9], tq: "zero", hold: 2.2, side: "right", anchor: [TERM.x + 15.1, TERM.y + 17.5, TERM.z + TERM.h + 1.6],
       pts: [...cube(TERM.x, TERM.y, ZD, TERM.x + TERM.w, TERM.y + TERM.d, ZD + TERM.h + 4), ...cube(RACK.x0, RACK.y0, ZD, rackEnd, RACK.y1, RACK.top + 6)],
-      text: `Each 1 KAS coin splits by fixed shares: fee 5 %, referral 10 %, callers 0.5 % each, prize tiers 10 %, house 74 %. Its ticket drops into one of 16 shard tubes.`,
+      text: `Each ${fk(MODEL.price, 2)} KAS coin splits by fixed shares: ${SPLIT}. Its ticket drops into one of ${MODEL.k} shard tubes.`,
     },
     {
       id: "backers", title: "Backers queue requests", t: [5.9, 5.9], tq: "run", hold: 1.6, side: "left", anchor: [CLOCK.c[0], FY, CLOCK.c[1]],
       pts: [...cube(28, FY, 22, 104, FY + 14, 92), [70, 112, 70]],
-      text: `Backers own the vault through shares. Deposits wait in the glass hopper, withdrawal cards in the rack. Each request spends the vault, so the next waits for the 600-DAA clock.`,
+      text: `Backers own the vault through shares. Deposits wait in the glass hopper, withdrawal cards in the rack. Each request spends the vault, so the next waits for the ${MB.delayDaa}-DAA clock.`,
     },
     {
       id: "close", title: "close()", t: [5.9, 6.6], tq: "after", hold: 1.2, side: "right", anchor: [RX + 7.6, LEVERS.close.y, LEVERS.close.z], // the pivot hub: the ball moves
       pts: leverBox(LEVERS.close.y),
-      text: `After the deadline anyone pulls the lever. close() spends all 16 shards in one transaction, and the caller is paid ${fk(MODEL.amounts.C_close, 2)} KAS.`,
+      text: `After the deadline anyone pulls the lever. close() spends all ${MODEL.k} shards in one transaction, and the caller is paid ${fk(MODEL.amounts.C_close, 2)} KAS.`,
     },
     {
       id: "seal", title: "Counts frozen", t: [6.6, 9.0], tq: "after", hold: 1.2, side: "left", anchor: [(RACK.x0 + rackEnd) / 2, RACK.y1, RACK.top + 1],
@@ -742,7 +808,7 @@ if (TOUR) {
     {
       id: "draw", title: "draw()", t: [9.0, 10.4], tq: "after", hold: 1.4, side: "right", anchor: [RX + 3, 45, 72],
       pts: [...leverBox(LEVERS.draw.y), ...cube(RX, 38, 64, RX + 4, 52, 80)],
-      text: `Anyone pulls the second lever. This prototype reads a clearly marked TEST-ONLY seed; a real seed source is parked.`,
+      text: `Anyone pulls the second lever once anchor block X exists, the first chain block ${MODEL.seedOffset} DAA after close(). X's hash picks the numbers. Open item: X's miner sees them first and could withhold X.`,
     },
     {
       id: "balls", title: "Five balls and a bonus", t: [10.4, 16.3], tq: "after", hold: 1.6, side: "right", anchor: [SLOTS[2], RAIL.y, RAIL.z + 2],
@@ -757,7 +823,7 @@ if (TOUR) {
     {
       id: "convert", title: "Backers convert, capped", t: [17.6, 19.0], tq: "after", rate: 0.7, hold: 2.6, side: "left", anchor: [(SIGHT.x0 + SIGHT.x1) / 2, FY, lZ],
       pts: cube(28, FY, 14, DOOR.x1, FY + 22, 92),
-      text: `Only now do requests convert, at the new share price ${MB.price0.toFixed(4)} → ${MB.priceDraw.toFixed(4)}. Withdrawals stop at the red line: the vault keeps L = ${fk(MODEL.vault.Lnext, 0)} KAS for the next round.`,
+      text: `Only now do requests convert, at the new share price ${MB.price0.toFixed(4)} → ${MB.priceDraw.toFixed(4)}. Withdrawals stop at the line on the sight glass: the vault keeps L = ${fk(MODEL.vault.Lnext, 0)} KAS for the next round.`,
     },
     {
       id: "claim", title: "claim()", t: [19.0, 24.5], tq: "after", hold: 1.6, side: "top", anchor: [READER.x + READER.w / 2, READER.y + READER.d / 2, READER.z + READER.h],
@@ -767,10 +833,10 @@ if (TOUR) {
     {
       id: "settle", title: "settle()", t: [24.5, 29.0], tq: "after", hold: 1.4, side: "right", anchor: [(RECORD.x0 + RECORD.x1) / 2, FY + 5 + RECORD.depth, RECORD.z1],
       pts: [...cube(RECORD.x0, FY, RECORD.z0, RECORD.x1, FY + 5 + RECORD.depth + 2, RECORD.z1), ...cube(BACKER_CUP[0] - 9, BACKER_CUP[1] - 9, 0, BACKER_CUP[0] + 9, BACKER_CUP[1] + 9, 5)],
-      text: `draw() wrote the conversion once into this record. Anyone calls settle(): each request takes its share, the last takes the rest, and ${fk(MB.pendingAfter)} shares wait for round 8.`,
+      text: `draw() wrote the conversion once into this record. Anyone calls settle(): each request takes its share, the last takes the rest, and ${fk(MB.pendingAfter)} shares wait for round ${MODEL.round + 1}.`,
     },
     {
-      id: "next", title: "Round 8 opens", t: [29.0, 31.5], tq: "after", hold: 2.2, side: "right", full: true, anchor: null,
+      id: "next", title: `Round ${MODEL.round + 1} opens`, t: [29.0, 31.5], tq: "after", hold: 2.2, side: "right", full: true, anchor: null,
       text: `The rack empties and a new round starts with m = ${MODEL.mNext} and a fixed jackpot of ${fk(MODEL.vault.Jnext, 0)} KAS. Rounds are strictly ordered.`,
     },
   ];
@@ -785,37 +851,68 @@ const LIVE = readFileSync(join(HERE, "live.js"), "utf8").replace("__DATA__", JSO
 const fk = (n, d = 0) => n.toLocaleString("en-US", { maximumFractionDigits: d });
 const MB = MODEL.backers;
 const CAPTION =
-  `One round of the Kaspa L1 lottery as a draw machine with no operator (an example round; every amount follows the covenants' arithmetic). ` +
-  `buy(): each 1 KAS coin splits by fixed shares (fee 5 %, referral 10 %, callers 0.5 % each, prize tiers 10 %, house 74 %) and its ticket lands in one of 16 shard tubes. ` +
+  `One round of the Kaspa L1 lottery as a draw machine with no operator (an example round with invented sales; every amount is computed by the protocol's Rust code). ` +
+  `buy(): each ${fk(MODEL.price, 2)} KAS coin splits by fixed shares (${SPLIT}) and its ticket lands in one of ${MODEL.k} shard tubes. ` +
   `close(): anyone pulls the lever after the deadline; the seal bar freezes all 16 counts before the seed exists, and the puller is paid. ` +
-  `draw(): anyone pulls again; this prototype draws from a TEST-ONLY seed, five main balls from 30 and a bonus from m = ${MODEL.m}. ` +
-  `The vault pays the jackpot (${fk(MODEL.vault.J, 2)} KAS) and two held second prizes (${fk(MODEL.vault.G2, 2)} each) into their trays. ` +
-  `claim(): the reader checks one proof per shard, all 16, so the holdings count h = 2 cannot be under-reported, and pays floor(J / 2) = ${fk(MODEL.prize, 2)} KAS. ` +
-  `Backers own the vault through shares and use the window in its door. Each request spends the vault, so the next must wait until the clock has run 600 DAA; deposits wait in the glass hopper and withdrawal cards in the rack, irrevocably. ` +
+  `draw(): anyone pulls again once anchor block X exists, the first chain block ${MODEL.seedOffset} DAA after close(); X's hash picks five main balls from 30 and a bonus from m = ${MODEL.m}. X's miner sees the result first and could withhold X and try again: an open item before any real-money version. ` +
+  `The vault pays the jackpot (${fk(MODEL.vault.J, 2)} KAS) and ${MODEL.n2} held second prizes (${fk(MODEL.vault.G2, 2)} each) into their trays. ` +
+  `claim(): the reader checks one proof per shard, all ${MODEL.k}, so the holdings count h = ${MODEL.h} cannot be under-reported, and pays floor(J / ${MODEL.h}) = ${fk(MODEL.prize, 2)} KAS. ` +
+  `Backers own the vault through shares and use the window in its door. Each request spends the vault, so the next must wait until the clock has run ${MB.delayDaa} DAA; deposits wait in the glass hopper and withdrawal cards in the rack, irrevocably. ` +
   `draw() converts them only after the round's own prizes are booked, at the new share price (${MB.price0.toFixed(4)} → ${MB.priceDraw.toFixed(4)} here, because the jackpot was hit). ` +
-  `Withdrawals are capped so the vault keeps the next round's liability L = ${fk(MODEL.vault.Lnext, 2)} KAS (the red line): ${fk(MB.wc)} of ${fk(MB.W)} shares convert and ${fk(MB.pendingAfter)} stay pending, pro rata, for round 8. ` +
+  `Withdrawals are capped so the vault keeps the next round's liability L = ${fk(MODEL.vault.Lnext, 2)} KAS (the line on the sight glass): ${fk(MB.wc)} of ${fk(MB.W)} shares convert and ${fk(MB.pendingAfter)} stay pending, pro rata, for round ${MODEL.round + 1}. ` +
   `The conversion is written once into a settlement record (the drawer); settle(), callable by anyone, pays each request its share of what remains, and the last one takes the rest. ` +
   `Prize trays, left to right: jackpot, second, 4 + bonus, 4, 3 + bonus. Coin heights are not to scale.`;
 
 const TOUR_OVERLAY = `<svg class="dc-lead" aria-hidden="true"><line data-lead/><circle data-lead-dot r="3"/></svg><div class="dc-callout" aria-hidden="true" data-callout><span class="dc-callout-step" data-callout-step></span><strong data-callout-title></strong><span data-callout-text></span><span class="dc-callout-bar"><i data-callout-bar></i></span></div><div class="dc-dots" aria-hidden="true" data-dots></div>`;
 const body =
-  `<style>${CSS}${TOUR ? readFileSync(join(HERE, "tour.css"), "utf8") : ""}</style>` +
+  `<style>${CSS}${TOUR ? readFileSync(join(HERE, "tour.css"), "utf8") : ""}${EMBED ? readFileSync(join(HERE, "embed.css"), "utf8") : ""}</style>` +
   k.plateHtml({
     fig: "Fig 1",
     title: "Kaspa draw cabinet",
     hint: TOUR ? "Space pause · ← → step" : "Click or → next call · ← back",
-    readout: "round 7 · open",
+    readout: `round ${MODEL.round} · open`,
     keys: [
       { mark: "lit", label: "What the current call moves: coins, tickets, the seal, balls, proof pins" },
       { mark: "raised", label: "Covenant-held parts: shard rack, globes, prize trays, vault" },
       { mark: "red", label: "Liability line L on the vault's sight glass" },
-      { mark: "flat", label: "Backers' window on the vault door: share price, 600-DAA clock, deposit hopper, withdrawal cards, record drawer" },
+      { mark: "flat", label: `Backers' window on the vault door: share price, ${MB.delayDaa}-DAA clock, deposit hopper, withdrawal cards, record drawer` },
     ],
-    caption: CAPTION,
+    caption: EMBED ? undefined : CAPTION,
     body: `<div class="iso-stage dc-stage" tabindex="0" role="group" aria-label="${TOUR ? "Guided tour of the lottery draw cabinet. Space pauses or resumes; the arrow keys step through the calls." : "Lottery draw cabinet. Click, Space or the right arrow moves to the next protocol call; the left arrow goes back."}">${svg}${TOUR ? TOUR_OVERLAY : ""}<span class="dc-sr" role="status" aria-live="polite" data-status></span></div>`,
   });
 
 const name = `draw-cabinet${TOUR ? "-tour" : ""}${THEME === "light" ? "-light" : ""}.html`;
-const page = k.pageHtml({ title: "Draw cabinet", theme: THEME, body, script: kitScript() + latheScript + LIVE, width: 820 });
-writeFileSync(join(HERE, name), page);
-console.log("wrote", name, `${(page.length / 1024).toFixed(0)} KB`, `${items.length} items`, `scale ${KS.toFixed(3)}`);
+// Embedded (How it works): the figure posts its height to the page that frames it (the frame is sandboxed, so the
+// page cannot read it), and nothing else; the page accepts the message from that frame only.
+const POST_HEIGHT = `{const host=document.querySelector(".iso-page");const post=()=>parent.postMessage({figure:"draw-cabinet",height:Math.ceil(host.getBoundingClientRect().height)},"*");new ResizeObserver(post).observe(host);post();}
+`;
+// LF only, whatever the checkout's line endings: the CSP hashes cover these bytes (and .gitattributes keeps them).
+const page = k.pageHtml({ title: "Draw cabinet", theme: THEME, body, script: kitScript() + latheScript + LIVE + (EMBED ? POST_HEIGHT : ""), width: 820 }).replace(/\r\n/g, "\n");
+const out = EMBED ? join(WEB, "public", "figures") : HERE;
+mkdirSync(out, { recursive: true });
+writeFileSync(join(out, name), page);
+console.log("wrote", join(out, name), `${(page.length / 1024).toFixed(0)} KB`, `${items.length} items`, `scale ${KS.toFixed(3)}`);
+
+// The embedded figure's own CSP (web/vercel.json, rule "/figures/(.*)"): its inline module script and its two
+// style elements by hash; style attributes (stroke widths, display) inline; nothing else, no network, framed by the
+// site only. Every embedded variant's hashes are listed, so the dark and light files both pass.
+if (EMBED) {
+  const sha = (text) => `'sha256-${createHash("sha256").update(text, "utf8").digest("base64")}'`;
+  // the style elements come before the one module script (whose kit source mentions both tags in strings)
+  const at0 = page.indexOf('<script type="module">');
+  const inner = (tag, text) => [...text.matchAll(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "g"))].map((m) => m[1]);
+  const vercelPath = join(WEB, "vercel.json");
+  const text = readFileSync(vercelPath, "utf8");
+  const rule = JSON.parse(text).headers.find((h) => h.source === "/figures/(.*)");
+  if (!rule) throw new Error("web/vercel.json has no /figures/(.*) rule");
+  const csp = rule.headers.find((h) => h.key === "Content-Security-Policy");
+  const keep = (dir, now) => {
+    const was = (csp.value.match(new RegExp(`${dir} ([^;]*)`)) || [, ""])[1].split(" ").filter((x) => x.startsWith("'sha256-"));
+    return [...new Set([...(THEME === "light" ? was : []), ...now])].join(" ");
+  };
+  const scripts = keep("script-src", inner("script", page.slice(at0)).slice(0, 1).map(sha));
+  const styles = keep("style-src-elem", inner("style", page.slice(0, at0)).map(sha));
+  const value = `default-src 'none'; script-src ${scripts}; style-src-elem ${styles}; style-src-attr 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`;
+  writeFileSync(vercelPath, text.replace(JSON.stringify(csp.value), JSON.stringify(value)));
+  console.log("web/vercel.json: the figure's CSP hashes", value.match(/sha256-/g).length);
+}

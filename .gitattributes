@@ -9,3 +9,6 @@ crates/lottery/tests/fixtures/f1_digests.txt -text
 crates/web/tests/fixtures/w1_api.txt -text
 # F1 review: the verify-call digests (crates/web/tests/api.rs and w1_wasm.rs compare against them).
 crates/web/tests/fixtures/w1_verify.txt -text
+# Front end F6 part B: the framed figures. Their inline script and style elements are pinned by hash in
+# web/vercel.json (the figure CSP), so the committed bytes must reach every checkout and Vercel unchanged.
+web/public/figures/*.html -text

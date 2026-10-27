@@ -5,7 +5,7 @@ import { Backup } from '@/screens/Backup';
 import { MyTickets } from '@/screens/MyTickets';
 import { Play } from '@/screens/Play';
 import { Rounds } from '@/screens/Rounds';
-import { Placeholder } from '@/screens/Placeholder';
+import { HowItWorks } from '@/screens/HowItWorks';
 import { Vault } from '@/screens/Vault';
 import { Wallet } from '@/screens/Wallet';
 import { useTheme } from '@/theme/useTheme';
@@ -39,7 +39,7 @@ function Screens({ ctx }: { ctx: Ctx }) {
   const config = ctx.config;
   const wallet = useWallet();
   const route = useRoute();
-  const { choice, setChoice } = useTheme();
+  const { choice, theme, setChoice } = useTheme();
 
   let screen;
   switch (route) {
@@ -56,7 +56,7 @@ function Screens({ ctx }: { ctx: Ctx }) {
       screen = <Vault />;
       break;
     case 'how':
-      screen = <Placeholder title="How it works" testId="how" />;
+      screen = <HowItWorks theme={theme} />;
       break;
     case 'backup':
       screen = <Backup />;

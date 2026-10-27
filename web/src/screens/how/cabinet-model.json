@@ -1,0 +1,198 @@
+{
+  "about": "The How it works example round. Inputs invented; every amount computed by the lottery code. Written by crates/lottery/tests/f6_figure.rs (write_figure_model); do not edit.",
+  "amounts": {
+    "B": [
+      "1648000000",
+      "1236000000",
+      "1236000000",
+      "0",
+      "0"
+    ],
+    "Bsum": "4120000000",
+    "C_close": "206000000",
+    "C_draw": "206000000",
+    "F": "2060000000",
+    "H": "30488000000",
+    "R": "2600000000",
+    "b": "1520000000"
+  },
+  "backers": {
+    "D": "5000000000000",
+    "S0": "775000000000000",
+    "S1": "95640617013876",
+    "W": "689000000000000",
+    "drained": true,
+    "mint": "5309693843029",
+    "out": "644734985735495",
+    "pendingAfter": "4330923170847",
+    "price0": "1.03225806",
+    "price1": "0.94167387",
+    "priceDraw": "0.94167387",
+    "refund": false,
+    "settled": [
+      {
+        "amount": "3000000000000",
+        "kind": "deposit",
+        "mode": "DepositConvert",
+        "shares": "3185816305817"
+      },
+      {
+        "amount": "19000000000000",
+        "conv": "18880569607770",
+        "kind": "withdraw",
+        "left": "119430392230",
+        "mode": "Pay",
+        "pay": "17779339229280"
+      },
+      {
+        "amount": "2000000000000",
+        "kind": "deposit",
+        "mode": "DepositConvert",
+        "shares": "2123877537212"
+      },
+      {
+        "amount": "670000000000000",
+        "conv": "665788507221383",
+        "kind": "withdraw",
+        "left": "4211492778617",
+        "mode": "Pay",
+        "pay": "626955646506215"
+      }
+    ],
+    "slack": "644734985735495",
+    "wc": "684669076829153"
+  },
+  "bonus": 8,
+  "constants": {
+    "bMax": 4,
+    "claimWindowDaa": 6048000,
+    "combinations": 142506,
+    "drawWindowDaa": 864000,
+    "mRef": "10000000",
+    "marginMin": 15000,
+    "minDeposit": "1000000000",
+    "pMin": "5000000",
+    "returnAfterDaa": 12096000,
+    "seedOffsetDaa": 600,
+    "vaultRequestDelayDaa": 600,
+    "wMinValue": "1000000000"
+  },
+  "counts": [
+    27,
+    24,
+    26,
+    25,
+    29,
+    23,
+    26,
+    28,
+    24,
+    25,
+    27,
+    26,
+    25,
+    24,
+    26,
+    27
+  ],
+  "deposit": "13000000",
+  "h": 2,
+  "holders": [
+    2,
+    10
+  ],
+  "k": 16,
+  "m": 10,
+  "mNext": 12,
+  "n2": 2,
+  "perTicket": {
+    "B": [
+      "4000000",
+      "3000000",
+      "3000000",
+      "0",
+      "0"
+    ],
+    "Bsum": "10000000",
+    "C_close": "500000",
+    "C_draw": "500000",
+    "F": "5000000",
+    "H": "74000000",
+    "R": "10000000",
+    "b": "0"
+  },
+  "pools": [
+    {
+      "slice": "68856109220151",
+      "tier": 0,
+      "value": "68856109220151"
+    },
+    {
+      "slice": "688561092201",
+      "tier": 1,
+      "value": "1377122184402"
+    },
+    {
+      "slice": "13184000",
+      "tier": 2,
+      "value": "1648000000"
+    },
+    {
+      "slice": "1098666",
+      "tier": 3,
+      "value": "1236000000"
+    },
+    {
+      "slice": "412000",
+      "tier": 4,
+      "value": "1236000000"
+    }
+  ],
+  "price": "100000000",
+  "prize": "34428054610075",
+  "referrals": 260,
+  "round": 7,
+  "sales": "41200000000",
+  "seed": {
+    "anchorHash": "0bd66d7a9b7f93070d7f42115c12024f8f3b45a3b5c395f8e9043b3c91f3a3e7",
+    "covenant": "da4fcb958efb23c44901b2e91bd4239e582d10a4dfc744708f4d3218f3e6c808",
+    "rank": 122080
+  },
+  "shares": {
+    "C": 50,
+    "D": 50,
+    "F": 500,
+    "H": 7400,
+    "R": 1000,
+    "T": [
+      400,
+      300,
+      300,
+      0,
+      0
+    ]
+  },
+  "sold": 412,
+  "units": "Amounts in sompi (1 KAS = 100,000,000 sompi) and vault shares as decimal strings; shares of the price in basis points",
+  "vault": {
+    "G2": "688561092201",
+    "G2next": "811385503242",
+    "J": "68856109220151",
+    "JboostNext": "1520000000",
+    "Jnext": "81138550324290",
+    "L": "75053159049960",
+    "Lnext": "90062270859952",
+    "V": "800000000000000",
+    "after": "729797256595447",
+    "boostAfter": "1520000000",
+    "final": "90062270859952",
+    "jBase": "80000000000000"
+  },
+  "win": [
+    1,
+    11,
+    13,
+    19,
+    30
+  ]
+}
