@@ -56,6 +56,11 @@ fn main() {
         Some("mine") => rt.block_on(mine_cmd(n(100))),
         Some("smoke") => rt.block_on(smoke::run(n(0))),
         Some("dev") => dev_opts(&args[1..]).and_then(|o| rt.block_on(dev::run(o))),
+        // F6 part C: the dev setup, then the indexer API's one-process mode checked against it.
+        Some("follow-check") => dev_opts(&args[1..]).and_then(|mut o| {
+            o.follow_check = true;
+            rt.block_on(dev::run(o))
+        }),
         Some(id @ ("sn1" | "sn2" | "sn3" | "sn4" | "sn5" | "all")) => rt.block_on(sn_cmd(id)),
         _ => usage(),
     };
@@ -72,6 +77,7 @@ fn dev_opts(a: &[String]) -> Result<dev::Opts, String> {
         faucet_bind: "127.0.0.1:8791".parse().expect("bind"),
         run_for: None,
         block_ms: 200,
+        follow_check: false,
     };
     let mut it = a.iter();
     while let Some(f) = it.next() {

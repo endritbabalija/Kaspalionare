@@ -58,6 +58,9 @@ pub struct Opts {
     pub faucet_bind: std::net::SocketAddr,
     pub run_for: Option<Duration>,
     pub block_ms: u64,
+    /// F6 part C (`simnet follow-check`): after the setup, check the indexer API's
+    /// one-process mode against this node (`follow_check`), then stop.
+    pub follow_check: bool,
 }
 
 /// The dev run's fixed node port (F3): Borsh wRPC on 127.0.0.1:18610 (not a rusty-kaspa default).
@@ -455,6 +458,182 @@ async fn self_check(c: &KaspaRpcClient, api: std::net::SocketAddr, cov: Hash, me
     Ok(())
 }
 
+// ------------------------------------------------- F6 part C: the one-process mode, checked
+
+/// A free loopback port (bound and released).
+fn free_port() -> Result<std::net::SocketAddr, String> {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    l.local_addr().map_err(|e| e.to_string())
+}
+
+async fn wait_api(addr: std::net::SocketAddr, secs: u64) -> Result<(), String> {
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        if http_get(addr, "/v1/status").await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(format!("{addr}: no answer within {secs} s"))
+}
+
+fn log_lines_of(body: &str) -> Result<String, String> {
+    Ok(web::indexer::parse_status(body).map_err(|e| e.to_string())?.log_lines)
+}
+
+/// The follower of `indexer-api --node` on `fdir`, started and waited for until its index
+/// has `want_lines` log lines: (its address, its stop sender, its task).
+async fn start_follower(
+    fdir: PathBuf,
+    cov: Hash,
+    node_url: String,
+    start: Option<Hash>,
+    want_lines: String,
+) -> Result<(std::net::SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<Result<(), String>>), String> {
+    use indexer_api::follow::{FollowOpts, run_following};
+    let bind = free_port()?;
+    let mut cfg = indexer_api::Config::new(fdir, cov);
+    cfg.bind = bind;
+    cfg.poll = Duration::from_millis(200);
+    cfg.per_client = None;
+    let fo = FollowOpts { node: Some(node_url), start, every: Duration::from_millis(500) };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let h = tokio::spawn(run_following(cfg, fo, async move {
+        let _ = rx.await;
+    }));
+    wait_api(bind, 60).await?;
+    let t0 = Instant::now();
+    loop {
+        let (_, b) = http_get(bind, "/v1/status").await?;
+        if log_lines_of(&b)? == want_lines {
+            break;
+        }
+        if t0.elapsed() > Duration::from_secs(60) {
+            return Err(format!("the follower did not catch up: {b}"));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    Ok((bind, tx, h))
+}
+
+const FOLLOW_PATHS: [&str; 13] = [
+    "/v1/instance",
+    "/v1/rounds",
+    "/v1/rounds/1",
+    "/v1/rounds/2",
+    "/v1/rounds/3",
+    "/v1/rounds/1/purchases",
+    "/v1/rounds/2/purchases",
+    "/v1/rounds/3/purchases",
+    "/v1/rounds/3/shards/0",
+    "/v1/rounds/1/anchor-proof",
+    "/v1/rounds/2/anchor-proof",
+    "/v1/vault",
+    "/v1/pools",
+];
+
+/// Every `FOLLOW_PATHS` answer of `bind` equals the dev API's, and is a 200.
+async fn same_answers(dev_api: std::net::SocketAddr, bind: std::net::SocketAddr, label: &str) -> Result<(), String> {
+    for p in FOLLOW_PATHS {
+        let (sa, a) = http_get(dev_api, p).await?;
+        let (sb, b) = http_get(bind, p).await?;
+        if (sa, &a) != (sb, &b) {
+            return Err(format!("{label}: {p}: dev API {sa} {} / follower {sb} {}", &a[..a.len().min(200)], &b[..b.len().min(200)]));
+        }
+        if sa != 200 {
+            return Err(format!("{label}: {p}: status {sa}: {a}"));
+        }
+    }
+    Ok(())
+}
+
+/// `n` concurrent GETs of round 2's anchor proof (bodies).
+async fn concurrent_proofs(bind: std::net::SocketAddr, n: usize) -> Result<Vec<String>, String> {
+    let hs: Vec<_> = (0..n).map(|_| tokio::spawn(async move { http_get(bind, "/v1/rounds/2/anchor-proof").await })).collect();
+    let mut out = vec![];
+    for h in hs {
+        let (s, b) = h.await.map_err(|e| e.to_string())??;
+        if s != 200 {
+            return Err(format!("concurrent request: {s} {b}"));
+        }
+        out.push(b);
+    }
+    Ok(out)
+}
+
+/// The F6 part C check of `indexer-api --node` (`indexer_api::follow`) on this private node,
+/// against the dev run's own API (its indexer driven by the dev loop, its proofs from
+/// `NodeAnchor`):
+/// 1. a fresh store holding only the bundle, started at the node's genesis: the follower
+///    catches up and every endpoint answers byte for byte as the dev API does, the closing
+///    round's anchor proof (built from the node) included; `/health` is 200;
+/// 2. eight concurrent anchor-proof requests get the same proof;
+/// 3. stopped by its signal and started again on the same store with no `--start`: it
+///    resumes from its log and still answers the same;
+/// 4. negative controls: the same store served without a node has no proof for the closing
+///    round (`anchor_unavailable`), so the proof above came from the node; and the follower's
+///    network guard refuses this simnet node for a testnet-10 instance.
+async fn follow_check(node_url: &str, dev_dir: &std::path::Path, cov: Hash, start: Hash, dev_api: std::net::SocketAddr) -> Result<(), String> {
+    let ok = |what: &str| println!("FOLLOW-CHECK ok   {what}");
+    let fdir = dev_root().join(format!("follow-{}", lottery::store::to_hex(&cov.as_bytes())));
+    let _ = std::fs::remove_dir_all(&fdir);
+    std::fs::create_dir_all(&fdir).map_err(|e| e.to_string())?;
+    std::fs::copy(dev_dir.join("bundle.json"), fdir.join("bundle.json")).map_err(|e| e.to_string())?;
+    let (_, dev_status) = http_get(dev_api, "/v1/status").await?;
+    let want = log_lines_of(&dev_status)?;
+
+    // 1.
+    let (bind, stop, h) = start_follower(fdir.clone(), cov, node_url.to_string(), Some(start), want.clone()).await?;
+    ok(&format!("a fresh store started at the node's genesis caught up ({want} log lines) on {bind}"));
+    same_answers(dev_api, bind, "fresh").await?;
+    let (_, proof) = http_get(bind, "/v1/rounds/2/anchor-proof").await?;
+    let p = web::indexer::parse_anchor_proof(&proof).map_err(|e| e.to_string())?;
+    if p.source != web::indexer::ProofSource::Node {
+        return Err(format!("round 2's proof is not from the node: {proof}"));
+    }
+    ok(&format!("{} endpoints byte for byte as the dev API; round 2's anchor proof built from the node ({} bytes)", FOLLOW_PATHS.len(), p.anchor_proof.len() / 2));
+    let (hs, hb) = http_get(bind, "/health").await?;
+    if hs != 200 || !hb.contains("\"ok\":true") || !hb.contains("\"following\":true") {
+        return Err(format!("/health: {hs} {hb}"));
+    }
+    ok("/health 200, following the node");
+    // 2.
+    let many = concurrent_proofs(bind, 8).await?;
+    if many.iter().any(|b| *b != proof) {
+        return Err("concurrent anchor-proof requests disagree".into());
+    }
+    ok("8 concurrent anchor-proof requests: the same proof");
+    // 3.
+    let _ = stop.send(());
+    h.await.map_err(|e| e.to_string())??;
+    let lines_file = std::fs::read_to_string(fdir.join("index-log.jsonl")).map_err(|e| e.to_string())?.lines().count();
+    ok(&format!("stopped by its signal; the store's log has {lines_file} lines (header included)"));
+    let (bind2, stop2, h2) = start_follower(fdir.clone(), cov, node_url.to_string(), None, want.clone()).await?;
+    same_answers(dev_api, bind2, "restarted").await?;
+    ok("restarted on the same store without --start: resumed from its log, the same answers");
+    let _ = stop2.send(());
+    h2.await.map_err(|e| e.to_string())??;
+    // 4.
+    let bind3 = free_port()?;
+    let mut cfg = indexer_api::Config::new(fdir.clone(), cov);
+    cfg.bind = bind3;
+    let plain = tokio::spawn(indexer_api::run(cfg));
+    wait_api(bind3, 30).await?;
+    let (s3, b3) = http_get(bind3, "/v1/rounds/2/anchor-proof").await?;
+    plain.abort();
+    if s3 != 404 || !b3.contains("anchor_unavailable") {
+        return Err(format!("negative control: the store-only server answered {s3} {b3}"));
+    }
+    ok("negative control: the same store without a node has no proof for the closing round (anchor_unavailable)");
+    match indexer_api::follow::connect(Some(node_url), web::convert::Net::Testnet10).await {
+        Err(e) if e.contains("reports network simnet") => ok(&format!("negative control: a testnet-10 instance refuses this node ({e})")),
+        Err(e) => return Err(format!("network guard: unexpected error {e}")),
+        Ok(_) => return Err("network guard: a testnet-10 instance accepted a simnet node".into()),
+    }
+    println!("FOLLOW-CHECK: all checks passed");
+    Ok(())
+}
+
 pub async fn run(o: Opts) -> Result<(), String> {
     let node = Node::start_on(Some(o.node_port))?;
     let r = run_on(&node, &o).await;
@@ -531,6 +710,8 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
     let mut acfg = indexer_api::Config::new(dir.clone(), cov);
     acfg.bind = o.api_bind;
     acfg.poll = Duration::from_millis(300);
+    // Every dev and e2e page shares 127.0.0.1: no per-client limit on the private dev run.
+    acfg.per_client = None;
     let starts: Starts = Default::default();
     note_closes(&x, &starts);
     acfg.anchor = Some(Arc::new(NodeAnchor { c: c.clone(), starts: starts.clone() }));
@@ -559,6 +740,13 @@ async fn run_on(node: &Node, o: &Opts) -> Result<(), String> {
     println!("dev: ready in {:.0} s: {}", t0.elapsed().as_secs_f64(), info);
     println!("dev: {} checks passed in round 1 ({} transactions)", log.checks.len(), log.txs.len());
     sn::print_report(&[log]);
+    if o.follow_check {
+        let r = follow_check(&node.url, &dir, cov, start, o.api_bind).await;
+        api.abort();
+        faucet.abort();
+        let _ = c.disconnect().await;
+        return r;
+    }
 
     // ---- 6. keep the chain moving and the index following.
     let until = o.run_for.map(|d| Instant::now() + d);

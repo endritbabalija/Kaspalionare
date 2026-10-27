@@ -1,0 +1,10 @@
+# The build context is the repository root; only the Rust workspace and the covenant sources are needed.
+**
+!crates/
+!covenants/
+crates/target/
+crates/**/target/
+**/node_modules/
+**/.env
+**/*.key
+**/*.pem

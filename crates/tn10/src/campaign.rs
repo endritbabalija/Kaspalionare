@@ -48,7 +48,7 @@ use lottery::game::{D_IDLE, SettleMode, VAULT_REQ_DELAY, anchor_daa, w_min, wc_w
 use lottery::genesis::GenesisCase;
 use lottery::index::{Accepted, Event, Live, Role, State, classify, parse_settle, refresh_obj};
 use lottery::ledger::Ledger;
-use lottery::params::{SetParamsCase, admin_hash, blake2b, xonly};
+use lottery::params::{ADMIN_SK, SetParamsCase, admin_hash, blake2b, xonly};
 use lottery::state::{Payout, ShardState};
 use lottery::store::{self, Campaign, CheckJson, CheckStatus, ClaimStore, Funding, Payer, StepJson, TxRef, Wallet};
 use lottery::vault::{DepositCase, SettleCase, WithdrawCase};
@@ -685,6 +685,137 @@ impl Net for Local {
     }
 }
 
+// ------------------------------------------------------------- genesis knobs (F6 part C)
+
+/// The genesis knobs C1 applies (F6 part C: the beta instance). The default is the M8
+/// campaign's (spec 8 A2): 10-minute rounds, m(1) = 3 in [2, 50], J(1) 10 KAS, V0 100 KAS,
+/// the rest the library's defaults (`GenesisCase::new_with`: seed_offset `SEED_OFFSET`,
+/// draw_window `DRAW_WINDOW` = VOID_MIN, claim_window `CLAIM_WINDOW`, s_C = s_D = 50).
+#[derive(Clone, Debug)]
+pub struct GenesisKnobs {
+    /// A name for the report ("m8", "fast", "steady").
+    pub profile: String,
+    pub round_len: i64,
+    pub d_min: i64,
+    /// Round 1's sales: T(1) = the DAA at genesis + this.
+    pub first_sales: i64,
+    pub m: i64,
+    pub m_min: i64,
+    pub m_max: i64,
+    pub j1: i64,
+    pub v0: i64,
+    pub s_c: Option<i64>,
+    pub s_d: Option<i64>,
+    pub seed_offset: Option<i64>,
+    pub draw_window: Option<i64>,
+    pub claim_window: Option<i64>,
+    /// The protocol fee address (controller and params); `None`: the funding key's.
+    pub fee_address: Option<Payout>,
+}
+
+impl Default for GenesisKnobs {
+    fn default() -> Self {
+        Self {
+            profile: "m8".into(),
+            round_len: ROUND_LEN,
+            d_min: ROUND_LEN,
+            first_sales: ROUND_LEN + 100,
+            m: 3,
+            m_min: 2,
+            m_max: 50,
+            j1: J1,
+            v0: V0,
+            s_c: None,
+            s_d: None,
+            seed_offset: None,
+            draw_window: None,
+            claim_window: None,
+            fee_address: None,
+        }
+    }
+}
+
+/// 1 hour and 24 hours of DAA at 10 BPS.
+pub const HOUR_DAA: i64 = 36_000;
+pub const DAY_DAA: i64 = 24 * HOUR_DAA;
+
+impl GenesisKnobs {
+    /// The beta profiles (F6 part C, docs/launch/beta-plan.md): the floors for every window
+    /// (seed_offset the design's 600, draw_window = VOID_MIN, claim_window = CLAIM_WINDOW),
+    /// m(1) = 3 in [2, M_DRAW], and the round length: `fast` one hour, `steady` one day, with
+    /// d_min half of it (the next deadline stays on the clock when the close comes within half a
+    /// round of T).
+    pub fn beta(profile: &str) -> R<Self> {
+        let len = match profile {
+            "fast" => HOUR_DAA,
+            "steady" => DAY_DAA,
+            "m8" => return Ok(Self::default()),
+            p => return Err(format!("--profile {p}: fast, steady or m8")),
+        };
+        Ok(Self {
+            profile: profile.into(),
+            round_len: len,
+            // T' = max(T + round_len, close + d_min): a close within half a round keeps the clock time.
+            d_min: len / 2,
+            first_sales: len,
+            seed_offset: Some(lottery::game::SEED_OFFSET),
+            draw_window: Some(lottery::game::VOID_MIN),
+            claim_window: Some(lottery::game::CLAIM_WINDOW),
+            ..Self::default()
+        })
+    }
+
+    /// Apply to a genesis case whose round 1 ends at `t1` (C1 sets the funding, owner and
+    /// admin hash itself). The caller runs `validate()`.
+    pub fn apply(&self, g: &mut GenesisCase, t1: i64, fee: &Payout) {
+        let fee = self.fee_address.as_ref().unwrap_or(fee);
+        {
+            let c = &mut g.controller;
+            c.m = self.m;
+            c.m_min = self.m_min;
+            c.m_max = self.m_max;
+            c.deadline = t1;
+            c.round_len = self.round_len;
+            c.d_min = self.d_min;
+            c.fee_class = fee.class();
+            c.fee_key = fee.key33();
+            if let Some(v) = self.s_c {
+                c.s_c = v;
+            }
+            if let Some(v) = self.s_d {
+                c.s_d = v;
+            }
+            if let Some(v) = self.seed_offset {
+                c.seed_offset = v;
+            }
+        }
+        if let Some(v) = self.draw_window {
+            g.drawer.draw_window = v;
+        }
+        if let Some(v) = self.claim_window {
+            g.drawer.claim_window = v;
+        }
+        g.params.next_fee_class = fee.class();
+        g.params.next_fee_key = fee.key33();
+        for s in &mut g.shards {
+            s.m = self.m;
+            s.deadline = t1;
+        }
+        g.set_vault(self.v0);
+        g.set_jackpot(self.j1);
+    }
+}
+
+/// The admin key guard (F1 re-review N5, F6 part C): never the public default `ADMIN_SK`
+/// (`lottery::params`, a key in the repository: anyone could call `set_params()`), checked on
+/// the key and on its hash.
+pub fn admin_guard(admin_sk: &[u8; 32]) -> R<()> {
+    if *admin_sk == ADMIN_SK || admin_hash(admin_sk) == admin_hash(&ADMIN_SK) {
+        return Err("the admin key is the public default ADMIN_SK (lottery::params): refusing; run `tn10 admin-keygen`".into());
+    }
+    Ok(())
+}
+
 // --------------------------------------------------------------------------------- runner
 
 #[derive(Clone, Debug)]
@@ -703,11 +834,13 @@ pub struct Opts {
     /// PENDING A5 amendment: a deposit (sompi) in C6's first round so the carried
     /// withdrawals can settle FINAL (0 = the approved A5 without it).
     pub c6_deposit: u64,
+    /// C1's genesis knobs (F6 part C).
+    pub genesis: GenesisKnobs,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Self { until: "C7".into(), soak: SoakMode::B, budget: 2_000 * KAS, buys: 75, plain_buys: 40, c5b_buys: 20, c6_deposit: 0 }
+        Self { until: "C7".into(), soak: SoakMode::B, budget: 2_000 * KAS, buys: 75, plain_buys: 40, c5b_buys: 20, c6_deposit: 0, genesis: GenesisKnobs::default() }
     }
 }
 
@@ -735,6 +868,8 @@ pub struct Runner<N: Net> {
     rate: u64,
     /// The claim modes seen (C4/C6 "partial" and "last" claims).
     modes: Vec<String>,
+    /// The admin key of genesis (`set_params()`); `None`: the funding key (the M8 campaign).
+    admin_sk: Option<[u8; 32]>,
 }
 
 impl<N: Net> Runner<N> {
@@ -753,7 +888,14 @@ impl<N: Net> Runner<N> {
             opts,
             rate: 100,
             modes: vec![],
+            admin_sk: None,
         }
+    }
+
+    /// A separate admin key for genesis (F6 part C: the beta's, from `TN10_ADMIN_KEY`).
+    pub fn with_admin(mut self, sk: [u8; 32]) -> Self {
+        self.admin_sk = Some(sk);
+        self
     }
 
     fn cov(&self) -> R<Hash> {
@@ -1727,31 +1869,16 @@ impl<N: Net> Runner<N> {
         if self.c.cov.is_none() {
             let fund = self.funds_raw().await?.into_iter().next().ok_or("no funds")?;
             let daa = self.net.daa().await?;
-            let t1 = daa as i64 + ROUND_LEN + 100;
+            let knobs = self.opts.genesis.clone();
+            let t1 = daa as i64 + knobs.first_sales;
             let spk = spk_of(&self.sk);
             let mut g = GenesisCase::new_with(K, vec![(fund.outpoint, UtxoEntry::new(fund.value, spk, fund.daa, false, None))], &self.t);
             g.funding_sk = self.sk;
             g.set_owner(&self.me);
-            {
-                let c = &mut g.controller;
-                c.m = 3;
-                c.m_min = 2;
-                c.m_max = 50;
-                c.deadline = t1;
-                c.round_len = ROUND_LEN;
-                c.d_min = ROUND_LEN;
-                c.fee_class = self.me.class();
-                c.fee_key = self.me.key33();
-            }
-            g.params.admin_hash = admin_hash(&self.sk);
-            g.params.next_fee_class = self.me.class();
-            g.params.next_fee_key = self.me.key33();
-            for s in &mut g.shards {
-                s.m = 3;
-                s.deadline = t1;
-            }
-            g.set_vault(V0);
-            g.set_jackpot(J1);
+            knobs.apply(&mut g, t1, &self.me);
+            let admin = self.admin_sk.unwrap_or(self.sk);
+            admin_guard(&admin)?;
+            g.params.admin_hash = admin_hash(&admin);
             let f = fees::with_fee(self.rate, |fee| {
                 g.fee = fee;
                 g.validate()?;
@@ -1767,8 +1894,31 @@ impl<N: Net> Runner<N> {
             indexer::write_atomic(&dir.join("bundle-genesis.json"), &store::write(&b, store::BUNDLE)?)?;
             let start = Hash::from_bytes(store::from_hex(&self.var("start_hash")?)?.try_into().map_err(|_| "start")?);
             let sd: u64 = self.var("start_daa")?.parse().map_err(|e| format!("{e}"))?;
-            self.x = Some(Indexer::open(Some(&dir), v.templates.clone(), cov, Some(v.genesis_states), start, sd)?);
+            self.x = Some(Indexer::open(Some(&dir), v.templates.clone(), cov, Some(v.genesis_states.clone()), start, sd)?);
             self.check("C1", "covenant ID recomputed (bundle::verify before submission)", v.cov == cov, format!("{cov}")).await?;
+            let bundle_admin = v.genesis_states.iter().find_map(|s| if let State::Params(p) = s { Some(p.admin_hash) } else { None });
+            self.check(
+                "C1",
+                "the bundle's admin hash is the configured admin key's, not the public default key's",
+                bundle_admin == Some(admin_hash(&admin)) && bundle_admin != Some(admin_hash(&ADMIN_SK)),
+                format!("admin hash {}", bundle_admin.map(|h| hex(&h)).unwrap_or_default()),
+            )
+            .await?;
+            let locked: u64 = f.tx.outputs.iter().filter(|o| o.covenant.is_some()).map(|o| o.value).sum();
+            let ctl = &g.controller;
+            self.set_var("genesis_locked", locked);
+            self.set_var("genesis_fee", g.fee);
+            self.check(
+                "C1",
+                &format!("genesis knobs ({})", knobs.profile),
+                true,
+                format!(
+                    "T(1) = {t1}; round_len {} / d_min {} DAA; m {} in [{}, {}]; J(1) {} G2(1) {} L(1) {}; V0 {}; price {} deposit {}; s_C {} s_D {} s_R {} s_F {}; seed_offset {}; draw_window {}; claim_window {}; margin {}; reserve {}; locked in genesis outputs {}; fee {}",
+                    ctl.round_len, ctl.d_min, ctl.m, ctl.m_min, ctl.m_max, kas(ctl.jackpot as u64), kas(ctl.g2 as u64), kas(ctl.liability as u64), kas(ctl.v_rec as u64),
+                    kas(ctl.price as u64), kas(ctl.d as u64), ctl.s_c, ctl.s_d, ctl.s_r, ctl.s_f, ctl.seed_offset, g.drawer.draw_window, g.drawer.claim_window, ctl.margin, kas(ctl.reserve as u64), kas(locked), kas(g.fee)
+                ),
+            )
+            .await?;
             self.send_wait("C1", "C1/genesis", &f).await?;
         }
         let cov = self.cov()?;
@@ -2425,6 +2575,45 @@ pub fn status(root: &Path, cov: Option<Hash>, mode: SoakMode) -> R<()> {
 
 #[cfg(test)]
 mod tests {
+    /// F6 part C: every beta profile passes genesis `validate()` (the floors: claim window
+    /// >= 7 days, draw_window >= VOID_MIN, the windows within D_RET, margin >= 1.5, the edge
+    /// and whale rules, L(1) under the vault cap) and keeps the windows at their floors.
+    #[test]
+    fn beta_profiles_pass_genesis_validation() {
+        let t = Templates::get(b_max());
+        for p in ["fast", "steady", "m8"] {
+            let k = GenesisKnobs::beta(p).unwrap();
+            let mut g = GenesisCase::new_with(K, vec![], &t);
+            k.apply(&mut g, 2_000_000, &Payout::Schnorr([7; 32]));
+            g.params.admin_hash = admin_hash(&[0x55; 32]);
+            g.validate().unwrap_or_else(|e| panic!("{p}: {e}"));
+            if p != "m8" {
+                assert_eq!((g.drawer.claim_window, g.drawer.draw_window, g.controller.seed_offset), (lottery::game::CLAIM_WINDOW, lottery::game::VOID_MIN, lottery::game::SEED_OFFSET), "{p}");
+            }
+        }
+        assert_eq!(GenesisKnobs::beta("fast").unwrap().round_len, 36_000);
+        assert_eq!(GenesisKnobs::beta("steady").unwrap().round_len, 864_000);
+        assert!(GenesisKnobs::beta("hourly").is_err());
+        // Negative controls: a claim window one DAA below the floor, a draw window below VOID_MIN.
+        let mut k = GenesisKnobs::beta("fast").unwrap();
+        k.claim_window = Some(lottery::game::CLAIM_WINDOW - 1);
+        let mut g = GenesisCase::new_with(K, vec![], &t);
+        k.apply(&mut g, 2_000_000, &Payout::Schnorr([7; 32]));
+        assert!(g.validate().unwrap_err().contains("CLAIM_WINDOW"));
+        let mut k = GenesisKnobs::beta("fast").unwrap();
+        k.draw_window = Some(lottery::game::VOID_MIN - 1);
+        let mut g = GenesisCase::new_with(K, vec![], &t);
+        k.apply(&mut g, 2_000_000, &Payout::Schnorr([7; 32]));
+        assert!(g.validate().unwrap_err().contains("VOID_MIN"));
+    }
+
+    /// The admin guard refuses the public default key (and accepts another).
+    #[test]
+    fn admin_guard_refuses_the_public_default_key() {
+        assert!(admin_guard(&ADMIN_SK).unwrap_err().contains("ADMIN_SK"));
+        assert!(admin_guard(&[0x55; 32]).is_ok());
+    }
+
     use super::*;
     use lottery::close::close_deadline;
 

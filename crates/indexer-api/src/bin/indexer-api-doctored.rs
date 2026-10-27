@@ -32,6 +32,8 @@ fn main() {
         std::process::exit(2);
     }
     cfg.doctor = Some(m);
+    // Loopback only, used by the e2e suite's pages: no per-client limit.
+    cfg.per_client = None;
     eprintln!("{}: TEST-ONLY doctored indexer API, mode {}: every response may lie", indexer_api::doctor::MARKER, m.name());
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
     if let Err(e) = rt.block_on(indexer_api::run(cfg)) {

@@ -255,6 +255,33 @@ fn purchases_hex(p: &[[u8; 6]]) -> String {
 
 // ------------------------------------------------------------------------------ handlers
 
+/// `GET /health` (F6 part C): 200 when the store's log applies and, in the one-process mode,
+/// the node was read within the staleness limit; else 503. For a supervisor or an uptime
+/// check; not part of the page's v1 contract.
+pub async fn health(State(st): State<AppState>) -> Response {
+    let s = st.snapshot();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let (follow_ok, follow_why, ago) = match &st.follow {
+        Some(f) => f.state_at(now),
+        None => (true, None, None),
+    };
+    let ok = s.error.is_none() && follow_ok;
+    let v = serde_json::json!({
+        "ok": ok,
+        "network": s.net.name(),
+        "covenantId": hex(&s.cov.as_bytes()),
+        "logLines": s.log_lines.to_string(),
+        "rounds": s.rounds.len().to_string(),
+        "lastChainDaaScore": s.last_chain.map(|(_, d)| d.to_string()),
+        "storeError": s.error,
+        "following": st.follow.is_some(),
+        "nodeReadMsAgo": ago.map(|a| a.to_string()),
+        "nodeError": follow_why,
+    });
+    let b = serde_json::to_vec(&v).unwrap_or_default();
+    body(if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, b)
+}
+
 pub async fn status(State(st): State<AppState>) -> Response {
     let s = st.snapshot();
     json(

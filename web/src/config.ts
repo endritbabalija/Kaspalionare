@@ -79,8 +79,9 @@ export function readConfig(env: ConfigEnv, dev: boolean): { config: Config } | {
   if (faucetLink && !httpsOrigin(faucetLink)) problems.push('VITE_FAUCET_LINK is not an https:// URL');
   const explorerUrl = nonEmpty(env.VITE_EXPLORER_URL);
   if (explorerUrl && !httpsOrigin(explorerUrl)) problems.push('VITE_EXPLORER_URL is not an https:// URL');
-  // A built page connects to a testnet-10 node over TLS only: its CSP allows wss: (vercel.json), and a URL the
-  // CSP refuses leaves the node client waiting forever (found by check-csp.mjs).
+  // A built page connects to a testnet-10 node over TLS only: its CSP allows wss:// to the resolver's domains or
+  // to VITE_NODE_URL's origin only (vercel.json, scripts/csp.mjs, F6 part C), and a URL the CSP refuses leaves
+  // the node client waiting (found by check-csp.mjs).
   const nodeUrl = nonEmpty(env.VITE_NODE_URL);
   if (nodeUrl && network === 'testnet-10' && !dev && !nodeUrl.startsWith('wss://'))
     problems.push('VITE_NODE_URL is not wss://');

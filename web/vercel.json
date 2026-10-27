@@ -1,16 +1,33 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "node scripts/vercel-prebuilt.mjs install",
+  "buildCommand": "node scripts/vercel-prebuilt.mjs build",
+  "outputDirectory": "dist",
   "headers": [
     {
       "source": "/((?!figures/).*)",
       "headers": [
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https: wss:; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          "value": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://indexer.invalid https://*.kaspa.stream wss://*.kaspa.stream https://*.kaspa.red wss://*.kaspa.red https://*.kaspa.green wss://*.kaspa.green https://*.kaspa.blue wss://*.kaspa.blue; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         },
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "no-referrer" },
-        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin" }
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin"
+        }
       ]
     },
     {
@@ -20,9 +37,18 @@
           "key": "Content-Security-Policy",
           "value": "default-src 'none'; script-src 'sha256-Q+M+odouN31gIQN7pSoK4pYUlxRciZB7+j59zwGc+wo='; style-src-elem 'sha256-5wPRJj3pkGlmSRwrZzS8EODZJMzkqN+jQbQfYKzDnO8=' 'sha256-iotnIz5pGrlNtoFDVxDBu2nLUi2oYphQp9k9f19DqcM='; style-src-attr 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
         },
-        { "key": "X-Frame-Options", "value": "SAMEORIGIN" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "no-referrer" }
+        {
+          "key": "X-Frame-Options",
+          "value": "SAMEORIGIN"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        }
       ]
     }
   ]

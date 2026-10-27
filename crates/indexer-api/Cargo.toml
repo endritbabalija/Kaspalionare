@@ -53,6 +53,15 @@ hyper-util = { version = "0.1.21", features = ["tokio", "server", "service"] }
 tower-http = { version = "=0.6.11", features = ["cors"] }
 tokio = { version = "1.42.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs"] }
 percent-encoding = "2.3.2"
+# F6 part C: the one-process mode (`--node`): the M8 indexer (`tn10/src/indexer.rs`) following a
+# node and the anchor-proof builder (`tn10/src/anchor.rs`), compiled in by `#[path]` as the simnet
+# dev run does; the rusty-kaspa v2.1.0 wRPC client and the KIP-21 hashing they use.
+kaspa-txscript.workspace = true
+kaspa-seq-commit.workspace = true
+kaspa-smt = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "01b532e8b553523216471682649693af92f0fd16" }
 
 [dev-dependencies]
 # The fixture game of the tests (lottery's own test chain, `lottery/tests/common`, compiled

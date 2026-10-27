@@ -10,6 +10,10 @@
 //     errorTable and start, and reaches the node client, which fails as a node error (node_unavailable), not
 //     as a stopped worker; no CSP report other than the two probes' own;
 //   - a page on another origin cannot frame it;
+//   - F6 part C: connect-src is narrowed to the indexer and the resolver's domains (scripts/csp.mjs): no
+//     scheme-wide source; in the page and in the worker an https fetch and a wss socket to an unlisted host are
+//     refused (connect-src), while a fetch to a listed resolver host and to the indexer origin is not refused by
+//     the CSP (the resolver request is a real read-only GET to the public testnet-10 resolver);
 //   - F6 part B: How it works frames the draw-cabinet figure (public/figures/): the figure file is served with its
 //     own CSP (vercel.json "/figures/(.*)": its inline script and styles by hash, frame-ancestors 'self') and
 //     X-Frame-Options SAMEORIGIN; in the page's sandboxed frame its script runs (the tour fills its callout, the
@@ -21,20 +25,28 @@ import { createServer } from 'node:http';
 import { readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { WEB, run, start } from './lib.mjs';
+import { broadSources, directives } from './csp.mjs';
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(WEB, '.playwright-browsers');
 const { chromium } = await import('@playwright/test');
 
 const out = path.join(WEB, 'dist-csp-check');
 const vite = path.join(WEB, 'node_modules', 'vite', 'bin', 'vite.js');
-// A wss:// URL nobody answers (a production build takes wss:// node URLs only: config.ts).
-const NODE_URL = 'wss://127.0.0.1:9';
+// A wss:// URL nobody answers (a production build takes wss:// node URLs only: config.ts). F6 part C: inside the
+// narrowed connect-src (a made-up name under a resolver domain, port 443), so the node client's failure is the
+// network's, not the CSP's.
+const NODE_URL = 'wss://kl-csp-check-unused.kaspa.blue/kaspa/testnet-10/wrpc/borsh';
 const vercel = JSON.parse(readFileSync(path.join(WEB, 'vercel.json'), 'utf8')).headers;
 const ruleOf = (source) =>
   Object.fromEntries(vercel.find((h) => h.source === source).headers.map((h) => [h.key, h.value]));
 const CSP = ruleOf('/((?!figures/).*)')['Content-Security-Policy'];
 const FIGURE_CSP = ruleOf('/figures/(.*)')['Content-Security-Policy'];
 const FIGURE = '/figures/draw-cabinet-tour.html';
+// F6 part C: the indexer origin vercel.json allows (the one https source without a wildcard); the check page is
+// built against it, so the probe of the allowed indexer origin tests the policy that ships.
+const CONNECT = directives(CSP).find(([n]) => n === 'connect-src')?.[1] ?? [];
+const INDEXER = CONNECT.find((x) => x.startsWith('https://') && !x.includes('*')) ?? 'https://indexer.invalid';
+const RESOLVER = CONNECT.includes('https://*.kaspa.stream');
 
 let bad = 0;
 const check = (ok, what) => {
@@ -47,7 +59,7 @@ run(process.execPath, [vite, 'build', '--outDir', out, '--emptyOutDir'], {
   cwd: WEB,
   env: {
     ...process.env,
-    VITE_INDEXER_URL: 'https://indexer.invalid/v1/',
+    VITE_INDEXER_URL: `${INDEXER}/v1/`,
     VITE_COVENANT_ID: '00'.repeat(32),
     VITE_NODE_URL: NODE_URL,
   },
@@ -126,7 +138,48 @@ try {
   );
   const inPage = await socketIn(page);
   check(inPage === 'connect-src' || inPage === 'threw SecurityError', `the page enforces it too (${inPage})`);
-  const other = reports.filter((t) => !/connect-src|script-src/.test(t));
+  // F6 part C: the narrowed connect-src.
+  const connectSrc = CONNECT;
+  check(
+    connectSrc.length > 1 && broadSources(connectSrc).length === 0,
+    `connect-src names its hosts, no scheme-wide source (${connectSrc.join(' ')})`,
+  );
+  const connectIn = (where, kind, url) =>
+    where.evaluate(
+      ([kind, url]) =>
+        new Promise((resolve) => {
+          const host = new URL(url).host;
+          self.addEventListener('securitypolicyviolation', (e) => {
+            if (String(e.blockedURI).includes(host)) resolve(e.effectiveDirective);
+          });
+          try {
+            if (kind === 'ws') new WebSocket(url).close();
+            else fetch(url, { mode: 'cors', credentials: 'omit' }).catch(() => undefined);
+          } catch (e) {
+            resolve(`threw ${e instanceof Error ? e.name : String(e)}`);
+          }
+          setTimeout(() => resolve('none'), 4000);
+        }),
+      [kind, url],
+    );
+  const refused = (r) => r === 'connect-src' || r === 'threw SecurityError';
+  for (const [name, where] of [
+    ['page', page],
+    ['worker', worker],
+  ]) {
+    const a = await connectIn(where, 'fetch', 'https://example.com/');
+    check(refused(a), `${name}: an https fetch to an unlisted host is refused (${a})`);
+    const b = await connectIn(where, 'ws', 'wss://example.com/');
+    check(refused(b), `${name}: a wss socket to an unlisted host is refused (${b})`);
+    if (RESOLVER) {
+      const c = await connectIn(where, 'fetch', 'https://eric.kaspa.stream/v2/kaspa/testnet-10/tls/wrpc/borsh');
+      check(c === 'none', `${name}: a fetch to a resolver host is allowed by the CSP (${c})`);
+    }
+    const d = await connectIn(where, 'fetch', `${INDEXER}/v1/status`);
+    check(d === 'none', `${name}: a fetch to the indexer origin is allowed by the CSP (${d})`);
+  }
+  // The probes' own reports: their directives, and the console's wording of a refused fetch to the probe host.
+  const other = reports.filter((t) => !/connect-src|script-src|https:\/\/example\.com\//.test(t));
   check(
     other.length === 0,
     `no CSP report but the probes' own (${reports.length} report(s))${other.length ? `: ${other.join(' | ')}` : ''}`,

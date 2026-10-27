@@ -15,3 +15,5 @@ test-results/
 # Vite and TypeScript caches
 *.tsbuildinfo
 .vite/
+# Vercel CLI (F6 part C): the linked project and vercel build's output (.vercel/output), never committed
+.vercel/

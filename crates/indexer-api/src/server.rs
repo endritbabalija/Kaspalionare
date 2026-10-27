@@ -11,6 +11,10 @@
 //!   the page enforces); at most `max_requests` requests run at once (`busy` above that);
 //!   each request has a deadline (`timeout`); each connection has a header-read timeout
 //!   and a total lifetime; at most `max_connections` connections are open.
+//! - **Per-client limits** (F6 part C, `limits`): a token bucket per client address (the
+//!   peer, or behind a local reverse proxy its `X-Forwarded-For`); over it, `busy`.
+//! - **Health** (F6 part C): `GET /health`, 200 or 503, for a process supervisor or an uptime
+//!   check; outside `/v1/` (the page never reads it).
 //! - **No keys, no transactions, no writes.** The only inputs are the store directory and
 //!   the bundle file, read-only.
 
@@ -31,6 +35,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use web::indexer::ApiErrorCode;
 
 use crate::config::Config;
+use crate::limits::{ClientIp, ClientLimiter, Peer, client_of};
 use crate::routes;
 use crate::store::{Follower, Snapshot};
 
@@ -41,6 +46,59 @@ pub trait AnchorProvider: Send + Sync + 'static {
     fn proof(&self, round: i64, d: u64, marker_daa: u64) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + '_>>;
 }
 
+/// The follower's liveness in the one-process mode (`follow`): the last successful poll of
+/// the node, and the last error since.
+pub struct FollowHealth {
+    last_ok_ms: std::sync::atomic::AtomicU64,
+    last_daa: std::sync::atomic::AtomicU64,
+    error: std::sync::Mutex<Option<String>>,
+    /// The last error is one a retry cannot fix (a pruned or unknown resume block, an index error).
+    fatal: std::sync::atomic::AtomicBool,
+    started_ms: u64,
+    stale: Duration,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+impl FollowHealth {
+    pub fn new(stale: Duration) -> Self {
+        FollowHealth { last_ok_ms: 0.into(), last_daa: 0.into(), error: Default::default(), fatal: false.into(), started_ms: now_ms(), stale }
+    }
+    pub fn ok(&self, daa: u64) {
+        self.last_ok_ms.store(now_ms(), std::sync::atomic::Ordering::SeqCst);
+        self.last_daa.store(daa, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut e) = self.error.lock() {
+            *e = None;
+        }
+        self.fatal.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// A failed poll; `fatal`: retrying cannot fix it (`/health` is 503 at once, not only
+    /// after the staleness limit).
+    pub fn err(&self, e: String, fatal: bool) {
+        if let Ok(mut g) = self.error.lock() {
+            *g = Some(e);
+        }
+        self.fatal.store(fatal, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// (healthy, the reason when not, ms since the last good poll).
+    pub fn state_at(&self, now: u64) -> (bool, Option<String>, Option<u64>) {
+        let last = self.last_ok_ms.load(std::sync::atomic::Ordering::SeqCst);
+        let ago = (last > 0).then(|| now.saturating_sub(last));
+        let err = self.error.lock().ok().and_then(|g| g.clone());
+        let since = ago.unwrap_or(now.saturating_sub(self.started_ms));
+        if self.fatal.load(std::sync::atomic::Ordering::SeqCst) {
+            return (false, Some(format!("the follower cannot continue without a fix: {}", err.unwrap_or_default())), ago);
+        }
+        if since > self.stale.as_millis() as u64 {
+            let why = err.unwrap_or_else(|| "no successful poll yet".into());
+            return (false, Some(format!("the node was last read {} s ago: {why}", since / 1000)), ago);
+        }
+        (true, err, ago)
+    }
+}
+
 /// What every handler reads.
 #[derive(Clone)]
 pub struct AppState {
@@ -48,6 +106,11 @@ pub struct AppState {
     pub anchor: Option<Arc<dyn AnchorProvider>>,
     busy: Arc<Semaphore>,
     timeout: Duration,
+    /// Per-client token buckets (`None`: off).
+    pub limiter: Option<Arc<ClientLimiter>>,
+    pub client_ip: ClientIp,
+    /// The one-process mode's follower (`None` in the store-only mode).
+    pub follow: Option<Arc<FollowHealth>>,
     /// TEST-ONLY (feature `doctored`): the wrong answers to serve.
     #[cfg(feature = "doctored")]
     pub doctor: Option<crate::doctor::Mode>,
@@ -60,6 +123,9 @@ impl AppState {
             anchor: cfg.anchor.clone(),
             busy: Arc::new(Semaphore::new(cfg.max_requests)),
             timeout: cfg.request_timeout,
+            limiter: cfg.per_client.map(|(burst, rate)| Arc::new(ClientLimiter::new(burst, rate))),
+            client_ip: cfg.client_ip,
+            follow: None,
             #[cfg(feature = "doctored")]
             doctor: cfg.doctor,
         }
@@ -81,6 +147,16 @@ impl AppState {
 async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
     if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return routes::error(ApiErrorCode::MethodNotAllowed, format!("{} is not served: the indexer API is read-only", req.method()));
+    }
+    if let Some(l) = &st.limiter {
+        let peer = req.extensions().get::<Peer>().copied();
+        if let Some(ip) = client_of(peer, req.headers(), st.client_ip) {
+            if !l.allow(ip) {
+                let mut r = routes::error(ApiErrorCode::Busy, "too many requests from this client; retry in a second");
+                r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+                return r;
+            }
+        }
     }
     let Ok(_permit) = st.busy.clone().try_acquire_owned() else {
         return routes::error(ApiErrorCode::Busy, "too many requests at once");
@@ -107,6 +183,7 @@ pub fn router(st: AppState, origins: &[String]) -> Result<Router, String> {
     };
     let cors = CorsLayer::new().allow_origin(allow).allow_methods([Method::GET, Method::HEAD]).max_age(Duration::from_secs(86_400));
     Ok(Router::new()
+        .route("/health", get(routes::health))
         .route("/v1/status", get(routes::status))
         .route("/v1/instance", get(routes::instance))
         .route("/v1/rounds", get(routes::rounds))
@@ -160,7 +237,7 @@ pub async fn serve(listener: tokio::net::TcpListener, router: Router, cfg: &Conf
     let conns = Arc::new(Semaphore::new(cfg.max_connections));
     let (header_timeout, lifetime) = (cfg.header_timeout, cfg.connection_lifetime);
     loop {
-        let (stream, _peer): (tokio::net::TcpStream, SocketAddr) = match listener.accept().await {
+        let (stream, peer): (tokio::net::TcpStream, SocketAddr) = match listener.accept().await {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("indexer-api: accept: {e}");
@@ -172,7 +249,7 @@ pub async fn serve(listener: tokio::net::TcpListener, router: Router, cfg: &Conf
             drop(stream);
             continue;
         };
-        let svc = TowerToHyperService::new(router.clone());
+        let svc = TowerToHyperService::new(router.clone().layer(axum::Extension(Peer(peer))));
         tokio::spawn(async move {
             let conn = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
@@ -185,7 +262,21 @@ pub async fn serve(listener: tokio::net::TcpListener, router: Router, cfg: &Conf
     }
 }
 
-/// Open the store, bind and serve (the binaries' and an embedding process's entry point).
+/// The binary's entry point: the one-process mode with `--node` (`follow`), else the
+/// store-only server (`run`).
+pub async fn main_with(cfg: Config) -> Result<(), String> {
+    match cfg.follow.clone() {
+        Some(fo) => crate::follow::run_following(cfg, fo, crate::follow::shutdown_signal()).await,
+        None => {
+            tokio::select! {
+                r = run(cfg) => r,
+                _ = crate::follow::shutdown_signal() => { println!("indexer-api: stop signal; exiting"); Ok(()) }
+            }
+        }
+    }
+}
+
+/// Open the store, bind and serve (the store-only binary's and an embedding process's entry point).
 pub async fn run(cfg: Config) -> Result<(), String> {
     let st = open(&cfg)?;
     let s = st.snapshot();

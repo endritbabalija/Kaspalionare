@@ -1,0 +1,20 @@
+# Caddy in front of the indexer API (docs/launch/indexer-server.md): HTTPS with an automatic certificate,
+# GET only, small requests, access logs. Replace api.example.com with the API's domain (its DNS A record points
+# at this server; ports 80 and 443 open). Per-client limits and CORS are done by indexer-api itself
+# (stock Caddy has no rate limiter).
+api.example.com {
+	encode zstd gzip
+	@write not method GET HEAD OPTIONS
+	respond @write 405
+	request_body {
+		max_size 1KB
+	}
+	reverse_proxy 127.0.0.1:8790 {
+		# indexer-api keys its per-client limit on this (INDEXER_API_CLIENT_IP=forwarded).
+		header_up X-Forwarded-For {remote_host}
+	}
+	log {
+		output stdout
+		format console
+	}
+}

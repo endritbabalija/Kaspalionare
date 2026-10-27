@@ -1,0 +1,28 @@
+# The indexer API and Caddy on one Linux server (docs/launch/indexer-server.md, option "Docker").
+# Host networking, so Caddy reaches the API on 127.0.0.1 and the API sees a loopback peer (its per-client limit
+# then trusts Caddy's X-Forwarded-For). Start: `docker compose up -d`; logs: `docker compose logs -f`;
+# stop: `docker compose down` (the API finishes its current batch and stops; the store stays in ./data).
+services:
+  indexer-api:
+    build:
+      context: ../../..
+      dockerfile: crates/indexer-api/deploy/Dockerfile
+      target: run
+    image: kaspalionare-indexer
+    network_mode: host
+    env_file: indexer-api.env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+  caddy:
+    image: caddy:2
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+volumes:
+  caddy-data:
+  caddy-config:

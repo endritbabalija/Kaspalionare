@@ -23,6 +23,8 @@ use secp256k1::{Keypair, SECP256K1, SecretKey};
 
 const KEY_VAR: &str = "TN10_PRIVATE_KEY";
 const URL_VAR: &str = "TN10_WRPC_URL";
+/// F6 part C: the beta instance's admin key (`set_params()`), separate from the funding key.
+const ADMIN_VAR: &str = "TN10_ADMIN_KEY";
 
 fn env_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.env")
@@ -205,7 +207,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: tn10 <keygen | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--out <file>] | bundle-verify <file> | masses | wallet-probe <serve [--port n] | selftest> | send <kaspatest:address> <KAS> [--parts n]>
+const USAGE: &str = "usage: tn10 <keygen | admin-keygen | beta genesis --profile <fast|steady> [--fee-address <kaspatest:...>] [--jackpot <KAS>] [--vault <KAS>] [--s-c <bp>] [--s-d <bp>] (--dry-run | --submit) | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--beta] [--out <file>] | bundle-verify <file> | masses | wallet-probe <serve [--port n] | selftest> | send <kaspatest:address> <KAS> [--parts n]>
 probe cases: all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62 (conflict-m6 is not part of all)";
 
 /// The value after `--name` in `args`.
@@ -481,11 +483,13 @@ async fn node_check(args: &[String]) -> Result<(), String> {
 /// `bundle [--out <file>]`: the current campaign's bundle with the index's live UTXOs.
 async fn bundle_cmd(args: &[String]) -> Result<(), String> {
     let env = load_env();
-    let root = indexer::data_root();
+    // F6 part C: `--beta` for the beta instance (`tn10-data/beta/`, written by `beta genesis`).
+    let root = if has(args, "--beta") { indexer::data_root().join("beta") } else { indexer::data_root() };
     let cov = hash_arg(std::fs::read_to_string(root.join("current")).map_err(|_| "no current campaign".to_string())?.trim())?;
-    let dir = indexer::instance_dir(cov);
+    let dir = root.join(encode_hex(&cov.as_bytes()));
     let g = bundle::read(&dir.join("bundle-genesis.json"))?;
     let v = lottery::bundle::verify(&g)?;
+    admin_not_default(&v.genesis_states)?;
     let c: lottery::store::Campaign = lottery::store::read(&std::fs::read_to_string(dir.join("campaign.json")).map_err(|e| e.to_string())?, lottery::store::CAMPAIGN)?;
     let start = hash_arg(c.vars.get("start_hash").ok_or("start_hash")?)?;
     let mut x = indexer::Indexer::open(Some(&dir), v.templates.clone(), cov, Some(v.genesis_states), start, 0)?;
@@ -552,14 +556,30 @@ fn masses_cmd() -> Result<(), String> {
     Ok(())
 }
 
+/// F1 re-review N5, F6 part C: a launch bundle whose admin hash is the public default key's
+/// (`lottery::params::ADMIN_SK`, in the repository: the probe instances of `cases.rs` and
+/// `wallet_probe.rs`) is refused, so no such instance gets announced.
+fn admin_not_default(genesis: &[lottery::index::State]) -> Result<String, String> {
+    let h = genesis
+        .iter()
+        .find_map(|s| if let lottery::index::State::Params(p) = s { Some(p.admin_hash) } else { None })
+        .ok_or("the bundle has no params state")?;
+    if h == lottery::params::admin_hash(&lottery::params::ADMIN_SK) {
+        return Err("the bundle's admin hash is the public default key's (ADMIN_SK, in the repository): anyone could call set_params(); this instance must not be launched".into());
+    }
+    Ok(format!("admin hash {}: not the public default key's", encode_hex(&h)))
+}
+
 async fn bundle_verify_cmd(args: &[String]) -> Result<(), String> {
     let env = load_env();
     let path = PathBuf::from(args.first().ok_or("bundle-verify <file>")?);
     let b = bundle::read(&path)?;
+    let line = admin_not_default(&lottery::bundle::verify(&b)?.genesis_states)?;
     let (mut l, _) = live(&env).await?;
     for line in bundle::verify_against(&mut l, &b).await? {
         println!("{line}");
     }
+    println!("{line}");
     println!("bundle-verify {}: PASS", path.display());
     Ok(())
 }
@@ -599,11 +619,145 @@ async fn send_cmd(args: &[String]) -> Result<(), String> {
     wallet_probe::send(&mut ctx, to, kas, parts).await
 }
 
+/// `admin-keygen` (F6 part C): a fresh admin key for the beta instance, appended to the
+/// git-ignored `.env` as TN10_ADMIN_KEY. Never printed: only its admin hash (what genesis
+/// stores and the launch bundle shows) and its x-only public key.
+fn admin_keygen() -> Result<(), String> {
+    let env = load_env();
+    if env.contains_key(ADMIN_VAR) {
+        return Err(format!("{ADMIN_VAR} already exists in .env; refusing to overwrite"));
+    }
+    let (sk, _) = SECP256K1.generate_keypair(&mut secp256k1::rand::thread_rng());
+    let b = sk.secret_bytes();
+    campaign::admin_guard(&b)?;
+    if env.get(KEY_VAR).is_some_and(|k| decode_hex(k).ok().as_deref() == Some(&b[..])) {
+        return Err("the new admin key equals the funding key; run again".into());
+    }
+    let path = env_path();
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("# testnet-10 beta admin key (set_params); generated by `tn10 admin-keygen`; never share\n");
+    text.push_str(&format!("{ADMIN_VAR}={}\n", encode_hex(&b)));
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    println!("Wrote {ADMIN_VAR} to {} (git-ignored). The key is not printed.", path.display());
+    println!("admin hash (genesis params, the launch bundle): {}", encode_hex(&lottery::params::admin_hash(&b)));
+    println!("admin x-only public key: {}", encode_hex(&lottery::params::xonly(&b)));
+    Ok(())
+}
+
+/// The admin key from `.env` (TN10_ADMIN_KEY): present, not the public default, not the
+/// funding key.
+fn admin_key(env: &BTreeMap<String, String>, funding: &Keypair) -> Result<[u8; 32], String> {
+    let hex = env.get(ADMIN_VAR).ok_or(format!("{ADMIN_VAR} not set; run `tn10 admin-keygen` first"))?;
+    let b: [u8; 32] = decode_hex(hex)?.try_into().map_err(|_| format!("{ADMIN_VAR}: not 32 bytes"))?;
+    SecretKey::from_slice(&b).map_err(|e| format!("bad {ADMIN_VAR}: {e}"))?;
+    campaign::admin_guard(&b)?;
+    if b == funding.secret_bytes() {
+        return Err(format!("{ADMIN_VAR} equals {KEY_VAR}: the admin key must be its own key; run `tn10 admin-keygen` after removing it"));
+    }
+    Ok(b)
+}
+
+/// `beta genesis` (F6 part C, docs/launch/beta-plan.md): C0 and C1 of the campaign with the
+/// beta's knobs and the separate admin key; nothing after genesis (no attack checks, no
+/// soak). `--dry-run`: the local ledger and engine (`campaign::Local`), nothing submitted,
+/// files in `tn10-data/beta-dry-run/`. Without it, `--submit` is required and the instance
+/// goes to `tn10-data/beta/`.
+async fn beta_cmd(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("genesis") {
+        return Err("usage: tn10 beta genesis --profile <fast|steady> [--fee-address kaspatest:...] [--jackpot <KAS>] [--vault <KAS>] [--s-c <bp>] [--s-d <bp>] (--dry-run | --submit)".into());
+    }
+    let env = load_env();
+    let kp = keypair(&env)?;
+    let admin = admin_key(&env, &kp)?;
+    let mut o = campaign::Opts { until: "C1".into(), ..Default::default() };
+    let mut k = campaign::GenesisKnobs::beta(flag(args, "--profile").ok_or("--profile <fast|steady> required")?)?;
+    if let Some(a) = flag(args, "--fee-address") {
+        let addr = Address::try_from(a).map_err(|e| format!("--fee-address {a}: {e}"))?;
+        net::check_testnet(&addr)?;
+        if addr.version != Version::PubKey {
+            return Err("--fee-address: a Schnorr (kaspatest:q...) address only".into());
+        }
+        let key: [u8; 32] = addr.payload.as_slice().try_into().map_err(|_| "--fee-address: payload is not 32 bytes")?;
+        k.fee_address = Some(lottery::state::Payout::Schnorr(key));
+    }
+    let kas_arg = |name: &str| -> Result<Option<i64>, String> { flag(args, name).map(|v| v.parse::<i64>().map(|x| x * campaign::KAS as i64).map_err(|e| format!("{name}: {e}"))).transpose() };
+    let bp_arg = |name: &str| -> Result<Option<i64>, String> { flag(args, name).map(|v| v.parse::<i64>().map_err(|e| format!("{name}: {e}"))).transpose() };
+    if let Some(j) = kas_arg("--jackpot")? {
+        k.j1 = j;
+    }
+    if let Some(v) = kas_arg("--vault")? {
+        k.v0 = v;
+    }
+    k.s_c = bp_arg("--s-c")?.or(k.s_c);
+    k.s_d = bp_arg("--s-d")?.or(k.s_d);
+    // Genesis locks V0 + J's backing + the reserves; the balance check asks for that plus a margin.
+    o.budget = (k.v0 + k.j1) as u64 + 100 * campaign::KAS;
+    o.genesis = k;
+    let root = indexer::data_root();
+    if has(args, "--dry-run") {
+        let rate = match net::connect(env.get(URL_VAR).cloned()).await {
+            Ok(c) => {
+                let r = fees::estimate(&c).await;
+                let _ = c.disconnect().await;
+                r?
+            }
+            Err(e) => {
+                println!("dry run: no node ({e}); fee rate = the 100 sompi/gram floor");
+                fees::round_rate(0.0)?
+            }
+        };
+        let spk = kaspa_txscript::pay_to_address_script(&address(&kp));
+        // `Local` funds four equal UTXOs; genesis spends the largest one, so each covers the budget.
+        let local = campaign::Local::new(spk, 4 * o.budget, 1_000_000, rate);
+        let dry_root = root.join("beta-dry-run");
+        let _ = std::fs::remove_dir_all(&dry_root);
+        let mut r = campaign::Runner::new(local, dry_root, kp.secret_bytes(), o).with_admin(admin);
+        let res = r.run().await;
+        println!("dry run: {} submissions ({} refused); nothing was sent to any node", r.net.submitted, r.net.refused);
+        if let Some(dir) = r.x.as_ref().and_then(|x| x.dir().map(|d| d.to_path_buf())) {
+            println!("dry run files: {}", dir.display());
+            page_config(&dir)?;
+        }
+        return res;
+    }
+    if !has(args, "--submit") {
+        return Err("a live genesis needs --submit (and the owner's go-ahead); use --dry-run to rehearse".into());
+    }
+    let root = root.join("beta");
+    if root.join("current").exists() {
+        return Err(format!("a beta instance exists ({}); refusing a second genesis", root.join("current").display()));
+    }
+    let (l, kp) = live(&env).await?;
+    let mut r = campaign::Runner::new(l, root, kp.secret_bytes(), o).with_admin(admin);
+    r.run().await?;
+    if let Some(dir) = r.x.as_ref().and_then(|x| x.dir().map(|d| d.to_path_buf())) {
+        println!("instance files (copy this directory to the indexer server's store): {}", dir.display());
+        page_config(&dir)?;
+    }
+    Ok(())
+}
+
+/// The page's build values for an instance directory (web/.env.production): the covenant ID and
+/// the blake2b-256 of the `bundle.json` the indexer serves at /v1/instance (`web::indexer::bundle_hash`).
+fn page_config(dir: &std::path::Path) -> Result<(), String> {
+    let bytes = std::fs::read(dir.join("bundle.json")).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let h = blake2b_simd::Params::new().hash_length(32).hash(&bytes);
+    let cov = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    println!("web/.env.production: VITE_COVENANT_ID={cov}");
+    println!("web/.env.production: VITE_BUNDLE_HASH={}", encode_hex(h.as_bytes()));
+    Ok(())
+}
+
 async fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
     let res = match args.first().map(String::as_str) {
         Some("keygen") => keygen(),
+        Some("admin-keygen") => admin_keygen(),
+        Some("beta") => beta_cmd(rest).await,
         Some("info") => info().await,
         Some("anchor-check") => anchor_check(args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0)).await,
         Some("probe") => run_probes(args.get(1).map(String::as_str).unwrap_or("all")).await,

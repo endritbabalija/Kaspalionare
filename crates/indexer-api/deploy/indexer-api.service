@@ -1,0 +1,34 @@
+# systemd unit for the indexer API (docs/launch/indexer-server.md, option "binary + systemd").
+# Install: copy the binary to /usr/local/bin/indexer-api, this file to /etc/systemd/system/, the settings to
+# /etc/kaspalionare/indexer-api.env (indexer-api.env.example; INDEXER_API_STORE=/var/lib/kaspalionare), then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now indexer-api
+# Logs: journalctl -u indexer-api -f. A stop sends SIGTERM: the API finishes the current batch and exits; a start
+# resumes from the store's log.
+[Unit]
+Description=Kaspalionare indexer API (testnet-10, read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kaspalionare/indexer-api.env
+ExecStart=/usr/local/bin/indexer-api
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+DynamicUser=yes
+StateDirectory=kaspalionare
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
