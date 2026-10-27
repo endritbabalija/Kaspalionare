@@ -344,7 +344,7 @@ function Sheet() {
           <CallerPanel
             round="12"
             due={{ kind: 'due', action: 'void', from: '12000' }}
-            figures={{ ...SAMPLE_CLOSE, kind: 'void' }}
+            figures={{ ...SAMPLE_CLOSE, kind: 'void', reserve: '0', reserves: 0, reserveBackWithDraw: false }}
             tx={{ step: 'signed' }}
             walletConnected
             onPress={() => undefined}

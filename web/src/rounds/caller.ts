@@ -7,8 +7,11 @@
 // time), `assemble` checks what came back, only then the node gets it; a lost answer is settled from the chain
 // (the same signed transaction again; its caller output live means it went through). The draw's anchor proof
 // is the indexer's (spec 6.1 fallback), used only once `checkIndexerRound` has bound it to the node's block and
-// to D; the purchases only once they rebuild the marker's frozen roots. `draw()` checks the anchor on chain.
-import type { BuiltTx, CallerFigures, CloseInput, DrawInput } from '@wasm/web.js';
+// to D; the purchases only once they rebuild the marker's frozen roots. `draw()` checks the anchor on chain. A void
+// takes no purchases (on chain it uses none; F5 review S5). A draw or void absorbs the expired pools of earlier
+// rounds (design 7.3; F5 review S1): the indexer's `GET /v1/pools` only says which outpoints to read; each is read
+// from the node and `absorbablePools` (Rust) keeps those past their claim deadline, oldest first, A_MAX of them.
+import type { BuiltTx, CallerFigures, CloseInput, CovUtxo, DrawInput } from '@wasm/web.js';
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { coinsFor } from '@/play/buyFlow';
@@ -76,6 +79,39 @@ function one(d: DetailData, role: 'controller' | 'params' | 'marker' | 'drawer' 
   return o.object;
 }
 
+/**
+ * The expired pools a draw or void of the marker's round absorbs: the indexer's list of live pools read from the
+ * node by outpoint, then `absorbablePools`. Without the list (an indexer that does not serve it, or is down) the
+ * transition absorbs none: they wait for a later draw.
+ */
+export async function expiredPools(
+  ctx: Ctx,
+  o: { marker: CovUtxo; controller: CovUtxo; drawer: CovUtxo; void: boolean },
+): Promise<CovUtxo[]> {
+  let objects;
+  try {
+    objects = (await ctx.indexer.pools()).objects;
+  } catch (e) {
+    console.info(`expired pools: none listed (${String(e)})`);
+    return [];
+  }
+  if (!objects.length) return [];
+  const utxos = unwrap(await ctx.lottery.call('nodeEntries', objects));
+  const now = unwrap(await ctx.lottery.call('nodeInfo')).virtualDaaScore;
+  const a = unwrap(
+    await ctx.lottery.call('absorbablePools', {
+      covenantId: ctx.config.covenantId,
+      ...o,
+      virtualDaaScore: now,
+      objects,
+      utxos,
+    }),
+  );
+  if (a.more || a.skipped)
+    console.info(`expired pools: ${a.pools.length} absorbed, ${a.more} left, ${a.skipped} skipped`);
+  return a.pools;
+}
+
 /** Build the due transition of round `d` from its live, checked objects; the panel's rows bound to it. */
 export async function prepareCaller(env: CallerEnv, d: DetailData, action: CallerAction): Promise<PreparedCaller> {
   const { ctx } = env;
@@ -116,8 +152,8 @@ export async function prepareCaller(env: CallerEnv, d: DetailData, action: Calle
     );
     return { action, round: r, built, figures };
   }
-  // draw() or the void: the purchases (and the anchor proof) checked against the chain first.
-  const purchases = await ctx.indexer.purchases(r);
+  // draw(): the purchases and the anchor proof checked against the chain first. The void: neither.
+  const purchases = action === 'draw' ? await ctx.indexer.purchases(r) : undefined;
   const { round, utxos } = await liveRound(ctx, d.api);
   const proof = action === 'draw' ? ((await ctx.indexer.anchorProof(r)) ?? undefined) : undefined;
   if (action === 'draw' && !proof)
@@ -135,21 +171,24 @@ export async function prepareCaller(env: CallerEnv, d: DetailData, action: Calle
       anchorBlock,
     }),
   );
-  if (!checked.purchases)
+  if (action === 'draw' && !checked.purchases)
     throw new PageError('chain_mismatch', `round ${r}: its purchases are not checked against its roots`);
   if (proof && !(checked.winning && checked.anchorBound)) {
     throw new PageError('anchor_invalid', `round ${r}: the anchor proof is not bound to the node's block`);
   }
   const next = String(BigInt(r) + 1n);
   const ch = { ...d, checked };
+  const drawer = one(ch, 'drawer');
+  const marker = one(ch, 'marker', r);
+  const controller = one(ch, 'controller', next);
   const input: DrawInput = {
     covenantId,
-    drawer: one(ch, 'drawer'),
-    marker: one(ch, 'marker', r),
+    drawer,
+    marker,
     vault: one(ch, 'vault'),
-    controller: one(ch, 'controller', next),
-    absorbed: [],
-    purchases: checked.purchases,
+    controller,
+    absorbed: await expiredPools(ctx, { marker, controller, drawer, void: action === 'void' }),
+    purchases: action === 'draw' ? (checked.purchases ?? []) : [],
     anchorProof: proof?.anchorProof,
     funds: await funds(env),
   };
@@ -160,6 +199,8 @@ export async function prepareCaller(env: CallerEnv, d: DetailData, action: Calle
       controller: input.controller,
       marker: input.marker,
       drawer: input.drawer,
+      vault: input.vault,
+      absorbed: input.absorbed,
       built,
     }),
   );

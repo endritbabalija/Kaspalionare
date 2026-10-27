@@ -211,7 +211,7 @@ fn caller_figures_are_bound_to_the_built_transaction() {
     let sales: i64 = ss.iter().map(|s| s.sales).sum();
     let paid: i64 = ss.iter().map(|s| s.ref_paid).sum();
     let c_close = game::round_amounts(sales, paid, &game::Shares::of(&ct)).c_close;
-    let input = CallerFiguresInput { covenant_id: ci.covenant_id.clone(), controller: ci.controller.clone(), shards: ci.shards.clone(), marker: None, drawer: None, built: built.clone() };
+    let input = CallerFiguresInput { covenant_id: ci.covenant_id.clone(), controller: ci.controller.clone(), shards: ci.shards.clone(), marker: None, drawer: None, vault: None, absorbed: vec![], built: built.clone() };
     let f = figures(&input).unwrap();
     println!("close: {f:?}");
     assert_eq!((f.kind, f.reserves, f.reward.clone(), f.reserve.clone()), (CallerKind::Close, 1, c_close.to_string(), ct.reserve.to_string()));
@@ -240,7 +240,7 @@ fn caller_figures_are_bound_to_the_built_transaction() {
         let Input::Draw(di) = &inp else { unreachable!() };
         let built = inp.run().unwrap();
         let mk = lottery::web::cases::marker(&obj("m", &di.marker).unwrap(), &cov_of(&di.marker)).unwrap();
-        let input = CallerFiguresInput { covenant_id: di.covenant_id.clone(), controller: di.controller.clone(), shards: vec![], marker: Some(di.marker.clone()), drawer: Some(di.drawer.clone()), built };
+        let input = CallerFiguresInput { covenant_id: di.covenant_id.clone(), controller: di.controller.clone(), shards: vec![], marker: Some(di.marker.clone()), drawer: Some(di.drawer.clone()), vault: Some(di.vault.clone()), absorbed: vec![], built };
         let f = figures(&input).unwrap();
         println!("{name}: {f:?}");
         assert_eq!((f.kind, f.reserves, f.reward.clone()), (kind, 0, game::draw_amounts(&mk).c_draw.to_string()));
@@ -267,7 +267,7 @@ fn caller_figures_are_bound_to_the_built_transaction() {
         funds: Funds { coins: x.coins.clone(), change: addr(&wallet), fee_rate: RATE },
     };
     let built = api::build_draw(N, &di).unwrap();
-    let input = CallerFiguresInput { covenant_id: di.covenant_id.clone(), controller: di.controller.clone(), shards: vec![], marker: Some(di.marker.clone()), drawer: Some(di.drawer.clone()), built };
+    let input = CallerFiguresInput { covenant_id: di.covenant_id.clone(), controller: di.controller.clone(), shards: vec![], marker: Some(di.marker.clone()), drawer: Some(di.drawer.clone()), vault: Some(di.vault.clone()), absorbed: vec![], built };
     let f = figures(&input).unwrap();
     println!("draw with winners: {f:?}");
     let pool = lottery::web::cases::pool(&obj("p", &x.pools[0].0).unwrap(), &x.cov).unwrap();

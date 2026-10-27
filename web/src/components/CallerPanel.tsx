@@ -1,8 +1,10 @@
 // Caller panel (spec 3 S4, 4 "Caller panel": not due, due with reward, reward below fee; 7; design 12 liveness
 // note): what is due on this round and from when (clock and DAA), and, once built with the connected wallet,
 // the rows of the very transaction a press signs (`callerFigures`, bound to it): the reward C_close or C_draw,
-// the reserves the caller posts and when they come back, any reserve refunded now, the network fee and the
-// total leaving the wallet. A fee above the reward is a warning row, not a refusal. Then the progress.
+// the reserves the caller posts and when they come back (the marker's with draw(); the new pools' from their
+// claim deadline, when a later draw absorbs them; a settlement record's with the settlements), the expired pools
+// it absorbs, any reserve refunded now, the network fee and the total leaving the wallet. A fee above the reward
+// is a warning row, not a refusal. Then the progress.
 import type { CallerFigures } from '@wasm/web.js';
 import { messageOf } from '@/lib/errors';
 import type { CallerAction, Due } from '@/rounds/caller';
@@ -107,13 +109,26 @@ export function CallerPanel(p: CallerPanelProps) {
               <Pending estimating={p.estimating} testId={`${id}-reserve`} />
             )}
           </FigureRow>
-          {f && f.reserves > 0 && (
+          {f?.reserveBackWithDraw && (
             <FigureRow name="Back" testId={`${id}-back-row`} part>
-              {f.reserveBackFrom ? (
-                time(f.reserveBackFrom, `${id}-back`)
-              ) : (
-                <span data-testid={`${id}-back`}>With draw()</span>
-              )}
+              <span data-testid={`${id}-back`}>With draw()</span>
+            </FigureRow>
+          )}
+          {f?.reserveBackFrom && (
+            <FigureRow name="Back" testId={`${id}-back-row`} part>
+              {time(f.reserveBackFrom, `${id}-back`)}
+            </FigureRow>
+          )}
+          {f?.record && (
+            <FigureRow name="Record back" testId={`${id}-record-back-row`} part>
+              <span data-testid={`${id}-record-back`}>With settlement</span>
+            </FigureRow>
+          )}
+          {f && f.absorbed > 0 && (
+            <FigureRow name="Expired pools" testId={`${id}-absorbed-row`}>
+              <span data-testid={`${id}-absorbed`} data-value={f.absorbed} className="font-mono">
+                {f.absorbed}
+              </span>
             </FigureRow>
           )}
           {f && f.refund !== '0' && (

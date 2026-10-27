@@ -29,7 +29,7 @@ use tsify::Tsify;
 use crate::api::{cov_of, unsigned_of};
 use crate::convert::{self, Net, dec, hex, unhex};
 use crate::dto::{BuiltTx, CovUtxo, Dec, Hex, Utxo, WinningOut};
-use crate::indexer::{self, ApiRound, Classified, RoundCheckInput};
+use crate::indexer::{self, ApiObject, ApiRound, Classified, RoundCheckInput};
 use crate::views::RoleName;
 
 // ------------------------------------------------------------------------------ facts
@@ -90,6 +90,26 @@ pub struct RoundFacts {
     pub reserve: Option<Fact>,
     /// The round's live prize pools (drawn), as the node holds them.
     pub pools: Vec<PoolFact>,
+    /// F5 review S4: the transaction of the round's `close()`, read from a live object only it
+    /// creates: the round's marker, or round r + 1's controller before the draw (drawn = 0).
+    pub close_tx: Option<TxFact>,
+    /// F5 review S4: the transaction of the round's `draw()` or void, read from a live object only
+    /// it creates: the drawer of round r + 1 (the drawer moves on with the next draw). A pool or
+    /// the record does not fix it: a claim or a settlement re-creates them in its own transaction.
+    pub draw_tx: Option<TxFact>,
+}
+
+/// A transaction ID read from the outpoint of a live object that only that transaction creates.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TxFact {
+    pub transaction_id: Hex,
+    pub source: Outpoint,
+}
+
+fn tx_fact(c: &CovUtxo) -> TxFact {
+    let source = Outpoint::of(&c.utxo);
+    TxFact { transaction_id: source.transaction_id.clone(), source }
 }
 
 /// A live prize pool: its tier, the slice one winning combination is owed, and what is left in it.
@@ -166,6 +186,17 @@ pub(crate) fn facts(r: i64, c: &Classified) -> Result<RoundFacts> {
                 }
             }
         }
+    }
+    // The close's and the draw's transactions (S4): only from objects that transaction alone creates.
+    if let Some((mo, _)) = &c.marker {
+        f.close_tx = Some(tx_fact(mo));
+    } else if let Some((co, _)) = c.controller.as_ref().filter(|(_, ct)| ct.round == r + 1 && ct.drawn == 0) {
+        f.close_tx = Some(tx_fact(co));
+    }
+    if let Some((dro, _)) = c.drawer.as_ref().filter(|(_, dr)| dr.round == r + 1) {
+        f.draw_tx = Some(tx_fact(dro));
+    } else if let Some((co, _)) = c.controller.as_ref().filter(|(_, ct)| ct.round == r + 1 && ct.drawn == 1) {
+        f.draw_tx = Some(tx_fact(co));
     }
     // Closing: the marker, round r + 1's controller and the drawer.
     if let Some((mo, mk)) = &c.marker {
@@ -502,6 +533,98 @@ fn root_list(field: &[u8], chain_k: i64, k: usize) -> Vec<Option<[u8; 32]>> {
     field.chunks_exact(32).take(k).map(|c| c.try_into().ok()).collect()
 }
 
+// ------------------------------------------------------------------------------ expired pools (S4, F5 review S1)
+
+/// `absorbablePools`: the expired pools a `draw()` (or void) of the marker's round may absorb,
+/// from candidate objects (the indexer's `GET /v1/pools`, which only says where to look) and the
+/// node's entries for their outpoints.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AbsorbInput {
+    pub covenant_id: Hex,
+    /// The round's marker, round r + 1's controller and the drawer: the objects the transition
+    /// spends (D, the void lock and R come from them).
+    pub marker: CovUtxo,
+    pub controller: CovUtxo,
+    pub drawer: CovUtxo,
+    /// Void (true) or draw.
+    pub void: bool,
+    /// The node's virtual DAA score: only a pool whose claim deadline is below it is absorbed
+    /// (the transaction's lock time is at least every absorbed deadline).
+    pub virtual_daa_score: Dec,
+    pub objects: Vec<ApiObject>,
+    /// The node's entries for the objects' outpoints (an object without one is spent: skipped).
+    pub utxos: Vec<Utxo>,
+}
+
+/// The pools to absorb, in input order (`draw.rs` inputs 4..), at most A_MAX.
+#[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Absorbable {
+    pub pools: Vec<CovUtxo>,
+    /// Expired pools found beyond A_MAX (a later draw absorbs them).
+    pub more: u32,
+    /// Candidates left out: not live on the node, or not an absorbable pool of this instance (the
+    /// indexer's word is never used; a wrong candidate costs nothing but its place). For logs.
+    pub skipped: u32,
+}
+
+/// Spec S4, design 7.3 ("any prize pools past their deadline"), drawer.sil check 18 and pool.sil
+/// `absorb_leg`: a candidate is absorbed when its node entry and state bytes rebuild a pool of
+/// this instance (`check_object`), of an earlier round than the marker's, with its claim
+/// deadline below the node's virtual DAA score and, for a draw, below the void lock (so the
+/// draw's lock time max(D, deadlines) stays a draw's), its R the controller's (check 15 takes
+/// Q = value - R with the controller's R) and its value at least R. Oldest deadline first (then
+/// round, tier, outpoint); at most A_MAX; each outpoint once.
+pub fn absorbable_pools(net: Net, i: &AbsorbInput) -> Result<Absorbable> {
+    use lottery::web::cases;
+    let cov = cov_of(&i.covenant_id)?;
+    if i.objects.len() > indexer::OBJECTS_MAX as usize || i.utxos.len() > 2 * indexer::OBJECTS_MAX as usize {
+        return Err(Error::new(Code::InputRange, format!("{} objects, {} UTXOs", i.objects.len(), i.utxos.len())));
+    }
+    let mk = cases::marker(&convert::obj("marker", &i.marker)?, &cov)?;
+    let co = convert::obj("controller", &i.controller)?;
+    let ct = cases::controller(&co, &cov)?;
+    let dr = cases::drawer(&convert::obj("drawer", &i.drawer)?, &cov)?;
+    verify::check_controller(&ct)?;
+    verify::check_drawer(&dr)?;
+    if ct.round != mk.round + 1 || dr.round != mk.round {
+        return Err(Error::new(Code::ChainMismatch, "the controller and drawer are not the marker's round's"));
+    }
+    let now = convert::dec_i64("virtualDaaScore", &i.virtual_daa_score)?;
+    let mdaa = convert::dec_i64("marker.blockDaaScore", &i.marker.utxo.block_daa_score)?;
+    let d = game::anchor_daa(mdaa, ct.seed_offset);
+    let void_from = game::void_lock(d, dr.draw_window).ok_or_else(|| Error::new(Code::InputRange, "no void lock"))?;
+    let below = if i.void { now } else { now.min(void_from) };
+    let mut found: Vec<(i64, i64, u8, String, u32, CovUtxo)> = vec![];
+    let mut skipped = 0u32;
+    for o in &i.objects {
+        let ok = indexer::check_object(net, &cov, o, &i.utxos).ok().and_then(|(c, s)| match s {
+            lottery::index::State::Pool(p) => Some((c.object, p)),
+            _ => None,
+        });
+        let Some((obj, p)) = ok else {
+            skipped += 1;
+            continue;
+        };
+        let value = convert::dec("pool.amount", &obj.utxo.amount)?;
+        let fits = verify::check_pool(&p).is_ok()
+            && p.round < mk.round
+            && p.deadline < below
+            && p.reserve == ct.reserve
+            && u64::try_from(p.reserve).is_ok_and(|r| value >= r);
+        let key = (obj.utxo.transaction_id.to_ascii_lowercase(), obj.utxo.index);
+        if !fits || found.iter().any(|f| (f.3.as_str(), f.4) == (key.0.as_str(), key.1)) {
+            skipped += u32::from(!fits);
+            continue;
+        }
+        found.push((p.deadline, p.round, p.tier, key.0, key.1, obj));
+    }
+    found.sort_by(|a, b| (a.0, a.1, a.2, &a.3, a.4).cmp(&(b.0, b.1, b.2, &b.3, b.4)));
+    let more = found.len().saturating_sub(game::A_MAX) as u32;
+    Ok(Absorbable { pools: found.into_iter().take(game::A_MAX).map(|f| f.5).collect(), more, skipped })
+}
+
 // ------------------------------------------------------------------------------ caller figures (S4)
 
 /// The transition a caller panel builds.
@@ -524,11 +647,17 @@ pub struct CallerFiguresInput {
     /// close: the round's k shards.
     #[serde(default)]
     pub shards: Vec<CovUtxo>,
-    /// draw and void: the round's marker and the drawer.
+    /// draw and void: the round's marker, the drawer and the vault (whether a settlement
+    /// record is posted: anything pending in it, spec M5 A5 C3).
     #[serde(default)]
     pub marker: Option<CovUtxo>,
     #[serde(default)]
     pub drawer: Option<CovUtxo>,
+    #[serde(default)]
+    pub vault: Option<CovUtxo>,
+    /// draw and void: the expired pools it absorbs (`absorbablePools`), in input order.
+    #[serde(default)]
+    pub absorbed: Vec<CovUtxo>,
     pub built: BuiltTx,
 }
 
@@ -537,7 +666,8 @@ pub struct CallerFiguresInput {
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallerFigures {
-    /// close, draw or void (a void: `draw()` with the empty anchor, its lock time at D + draw_window).
+    /// close, draw or void (a void: `draw()` with the empty anchor, its lock time at
+    /// max(D + draw_window, the absorbed deadlines); a draw's at max(D, the absorbed deadlines)).
     pub kind: CallerKind,
     pub round: Dec,
     /// C_close or C_draw.
@@ -549,9 +679,17 @@ pub struct CallerFigures {
     pub reserves: u32,
     /// close: the marker's R comes back with the round's `draw()` or void.
     pub reserve_back_with_draw: bool,
-    /// draw: the pools' R come back when a later `draw()` absorbs them, from their claim deadline
-    /// (DAA score).
+    /// draw: how many new prize pools it creates (one R each), and from when their R come back:
+    /// a later `draw()` absorbs them from their claim deadline (DAA score; F5 review S1: the
+    /// page's draws absorb expired pools, oldest first, A_MAX at a time).
+    pub pools: u32,
     pub reserve_back_from: Option<Dec>,
+    /// draw or void: a settlement record is posted (one R), back to this wallet once the
+    /// round's settlements drain it (record.sil).
+    pub record: bool,
+    /// draw or void: the expired pools absorbed (their prize money to the boost pot, their R to
+    /// their funders).
+    pub absorbed: u32,
     /// Reserves paid back to this wallet in this transaction (it funded the marker or an absorbed pool).
     pub refund: Dec,
     /// The caller output (the last output: the reward, the change and nothing else).
@@ -572,18 +710,26 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
     use lottery::web::cases;
     let cov = cov_of(&i.covenant_id)?;
     let u = unsigned_of(net, &i.built)?;
-    let spent = |c: &CovUtxo| -> Result<()> {
+    let input_at = |c: &CovUtxo| -> Result<usize> {
         let o = convert::obj("object", c)?;
-        let found = u.tx.inputs.iter().zip(&u.entries).any(|(inp, e)| inp.previous_outpoint == o.outpoint && *e == o.entry);
-        if found { Ok(()) } else { Err(bound("a given object is not an input of the transaction")) }
+        u.tx.inputs
+            .iter()
+            .zip(&u.entries)
+            .position(|(inp, e)| inp.previous_outpoint == o.outpoint && *e == o.entry)
+            .ok_or_else(|| bound("a given object is not an input of the transaction"))
     };
+    let spent = |c: &CovUtxo| input_at(c).map(|_| ());
     let co = convert::obj("controller", &i.controller)?;
     let ct = cases::controller(&co, &cov)?;
     verify::check_controller(&ct)?;
     spent(&i.controller)?;
     let r_res = u64::try_from(ct.reserve).map_err(|_| bound("a negative reserve"))?;
-    let (kind, round, reward, back_from) = match (&i.marker, &i.drawer) {
+    let n_cov = u.tx.outputs.iter().filter(|o| o.covenant.is_some()).count() as u64;
+    let (kind, round, reward, back_from, rec) = match (&i.marker, &i.drawer) {
         (None, None) => {
+            if i.vault.is_some() || !i.absorbed.is_empty() {
+                return Err(bound("close: a vault or absorbed pools given"));
+            }
             // close(): the reward from the controller and all k shards (design 7.2).
             if i.shards.len() != ct.k as usize || i.shards.is_empty() || i.shards.len() > K_MAX {
                 return Err(bound("close: not the controller's k shards"));
@@ -607,7 +753,7 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
             if sh.s_h() < 0 || ref_paid > sales {
                 return Err(bound("close: shares or referrals out of range"));
             }
-            (CallerKind::Close, ct.round, game::round_amounts(sales, ref_paid, &sh).c_close, None)
+            (CallerKind::Close, ct.round, game::round_amounts(sales, ref_paid, &sh).c_close, None, false)
         }
         (Some(m), Some(d)) => {
             // draw() or void: C_draw from the marker (design 7.3; D96: a void pays it too).
@@ -621,14 +767,44 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
             if ct.round != mk.round + 1 || dr.round != mk.round {
                 return Err(bound("draw: the controller and drawer are not the marker's round's"));
             }
+            let vt = i.vault.as_ref().ok_or_else(|| bound("draw: the vault is not given"))?;
+            let vs = cases::vault(&convert::obj("vault", vt)?, &cov)?;
+            verify::check_vault(&vs)?;
+            spent(vt)?;
+            let rec = vs.pend_dep > 0 || vs.pend_wsh > 0;
+            // The absorbed pools: inputs 4.. in the given order (drawer.sil check 18).
+            if i.absorbed.len() > game::A_MAX {
+                return Err(bound("draw: more absorbed pools than A_MAX"));
+            }
+            let mut last_deadline: Option<i64> = None;
+            for (n, a) in i.absorbed.iter().enumerate() {
+                let p = cases::pool(&convert::obj("absorbed", a)?, &cov)?;
+                verify::check_pool(&p)?;
+                if input_at(a)? != 4 + n || p.round >= mk.round {
+                    return Err(bound("draw: an absorbed pool not at its input, or not of an earlier round"));
+                }
+                last_deadline = Some(last_deadline.map_or(p.deadline, |x| x.max(p.deadline)));
+            }
+            // Every covenant input is named: drawer, marker, vault, controller and the absorbed
+            // pools; the rest are the wallet's coins (the inputs it signs).
+            if u.tx.inputs.len() != 4 + i.absorbed.len() + u.sign.len() {
+                return Err(bound("draw: the transaction spends covenant inputs not given"));
+            }
             let cd = c_draw(&mk).ok_or_else(|| bound("draw: the marker's shares are out of range"))?;
             let dd = game::anchor_daa(mo.entry.block_daa_score as i64, ct.seed_offset);
             let void_from = game::void_lock(dd, dr.draw_window).ok_or_else(|| bound("draw: no void lock"))?;
-            // A void's lock time is D + draw_window; a draw's is below it (its anchor must lie
-            // within the opcode window, D97).
-            let void = u.tx.lock_time >= void_from as u64;
+            // The kind from the lock time (draw.rs `fix_lock_time`): a draw's is max(D, the
+            // absorbed deadlines), a void's max(D + draw_window, the absorbed deadlines). Where
+            // both are the same (an absorbed deadline at or past the void lock) the lock time does
+            // not fix the kind: refused.
+            let with = |x: i64| last_deadline.map_or(x, |l| l.max(x)) as u64;
+            let void = match (u.tx.lock_time == with(void_from), u.tx.lock_time == with(dd)) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => return Err(bound("draw: the lock time is not one draw's or one void's")),
+            };
             let cdl = game::claim_deadline(dd, dr.draw_window, dr.claim_window).ok_or_else(|| bound("draw: no claim deadline"))?;
-            (if void { CallerKind::Void } else { CallerKind::Draw }, mk.round, cd, (!void).then_some(cdl))
+            (if void { CallerKind::Void } else { CallerKind::Draw }, mk.round, cd, (!void).then_some(cdl), rec)
         }
         _ => return Err(bound("a draw needs both its marker and the drawer")),
     };
@@ -652,14 +828,19 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
         return Err(bound("the caller output is not funding - n R - fee + reward"));
     }
     let n = (posted / r_res as i128) as u64;
+    // close: the marker's R (n = 1). draw and void: one R per new pool and one for the record,
+    // which with drawer', vault' and controller' are the covenant outputs (n_cov = 3 + np + rec,
+    // spec M5 A5 check 13); a void creates no pool.
+    let pools = n.checked_sub(rec as u64);
     let n_ok = match kind {
         CallerKind::Close => n == 1,
-        CallerKind::Draw => n <= 7,
-        CallerKind::Void => n == 0,
+        CallerKind::Draw => pools.is_some_and(|p| p <= 7) && n_cov == 3 + n,
+        CallerKind::Void => pools == Some(0) && n_cov == 3 + n,
     };
     if !n_ok {
-        return Err(bound(&format!("{n} reserves posted for a {kind:?}")));
+        return Err(bound(&format!("{n} reserves posted for a {kind:?} ({n_cov} covenant outputs, record {rec})")));
     }
+    let pools = if kind == CallerKind::Close { 0 } else { pools.unwrap_or(0) };
     // Cross-check with the summary the page shows (`unsigned_of` already rebuilt it from the tx).
     let back = dec("summary.walletBack", &i.built.summary.wallet_back)?;
     if dec("summary.walletIn", &i.built.summary.wallet_in)? != wallet_in || back != caller.value + refund {
@@ -674,7 +855,10 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
         reserve: (n * r_res).to_string(),
         reserves: n as u32,
         reserve_back_with_draw: kind == CallerKind::Close,
-        reserve_back_from: back_from.filter(|_| n > 0).map(|x| x.to_string()),
+        pools: pools as u32,
+        reserve_back_from: back_from.filter(|_| pools > 0).map(|x| x.to_string()),
+        record: rec,
+        absorbed: i.absorbed.len() as u32,
         refund: refund.to_string(),
         caller_output: last as u32,
         total: total.to_string(),

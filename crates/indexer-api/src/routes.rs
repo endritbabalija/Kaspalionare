@@ -420,6 +420,28 @@ pub async fn vault(State(st): State<AppState>) -> Response {
     json(LIMITS.objects, &ApiObjects { owner: None, objects })
 }
 
+/// The most live pools `GET /v1/pools` lists (the oldest claim deadlines first): far more than
+/// one `draw()` absorbs (A_MAX = 7), so a page always finds the oldest expired ones.
+pub const POOLS_MAX: usize = 256;
+
+/// `GET /v1/pools` (F5 review S1): the instance's live prize pools, oldest claim deadline first
+/// (then round and tier), at most `POOLS_MAX`. A page's `draw()` reads each from a node by its
+/// outpoint and absorbs those past their deadline (`absorbablePools`); this list only says where
+/// to look.
+pub async fn pools(State(st): State<AppState>) -> Response {
+    let s = st.snapshot();
+    let mut v: Vec<(i64, i64, u8, &LiveObj)> = live_of(&s, Role::Pool)
+        .filter_map(|l| match &l.state {
+            St::Pool(p) => Some((p.deadline, p.round, p.tier, l)),
+            _ => None,
+        })
+        .collect();
+    v.sort_by_key(|x| (x.0, x.1, x.2));
+    let mut objects: Vec<ApiObject> = v.into_iter().take(POOLS_MAX).map(|x| obj(x.3)).collect();
+    doctor!(st, objects, &mut objects);
+    json(LIMITS.objects, &ApiObjects { owner: None, objects })
+}
+
 fn owned(st: &AppState, q: Option<String>, role: Role) -> Response {
     let s = st.snapshot();
     let (addr, owner) = match query_param(q, "owner").and_then(|a| payout_of(s.net, "owner", &a).map(|p| (a, p))) {

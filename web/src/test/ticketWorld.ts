@@ -102,7 +102,9 @@ export class Sim {
   }
 }
 
-export type Api = Partial<Record<'tickets' | 'round' | 'purchases' | 'status', (...a: unknown[]) => Promise<unknown>>>;
+export type Api = Partial<
+  Record<'tickets' | 'round' | 'purchases' | 'status' | 'anchorProof' | 'pools', (...a: unknown[]) => Promise<unknown>>
+>;
 
 /** A context on `sim`; `indexer` answers what the test gives (else indexer_unavailable); `calls` overrides wasm calls. */
 export function ctxOf(
@@ -149,7 +151,14 @@ export function ctxOf(
   return {
     config: { covenantId: sim.cov, network: 'testnet-10' } as Ctx['config'],
     lottery: { call } as unknown as LotteryClient,
-    indexer: { tickets: down, round: down, purchases: down, status: down, ...indexer } as unknown as Ctx['indexer'],
+    indexer: {
+      tickets: down,
+      round: down,
+      purchases: down,
+      status: down,
+      pools: down,
+      ...indexer,
+    } as unknown as Ctx['indexer'],
   };
 }
 

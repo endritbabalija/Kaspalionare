@@ -190,6 +190,70 @@ pub fn calls() -> Result<Vec<(String, Call, Unsigned)>> {
     Ok(out)
 }
 
+/// Front end F5 review (S1, S5): draws and voids of round 2 with holdings (so the purchases
+/// matter to a draw and the trees are not empty) and expired pools of round 1 absorbed
+/// (`DrawCase::absorb`: lower tiers, deadlines before D, distinct funders), as page calls:
+/// a draw absorbing 3, a draw absorbing A_MAX, a void absorbing 2, a void absorbing none, and a
+/// draw absorbing 1 that writes a settlement record (a pending deposit).
+/// `expected` is `web::build::draw` of the fixture case (the native builder) with the absorbed
+/// pools at inputs 4.. in the case's order. Not part of `calls()`, whose digests are golden.
+pub fn draw_calls() -> Result<Vec<(String, Call, Unsigned)>> {
+    let mut out = vec![];
+    for (name, void, a) in [("draw absorbing 3", false, 3usize), ("draw absorbing A_MAX", false, crate::game::A_MAX), ("void absorbing 2", true, 2), ("void with purchases", true, 0), ("draw with a record", false, 1)] {
+        let mut c = DrawCase::at_round(4, 2);
+        if !void {
+            // X.hash is the hash of a header committing to X's fields (as `crates/web` tests/common
+            // `drawn`), so a page test can bind it to that header as a node would report it; set
+            // before the holdings, which depend on the seed.
+            let fields = AnchorProof::from_sim(&c.chain(), c.d() as u64).x;
+            c.x_hash = crate::anchor::header_committing_to(&fields, 1).hash.as_bytes();
+        }
+        c.set_sales(157 * KAS as i64, 5 * KAS as i64);
+        c.hold_jackpot(1, 1);
+        let b = c.other_bonus(0);
+        c.hold(2, b, 2);
+        c.hold_at(3, 7, 1, 3);
+        c.absorb(a);
+        for p in &mut c.absorbed {
+            // `absorb` fills the roots with 0x21, the fixture wallet key's byte: the page fixtures' guard
+            // against that key would trip on them.
+            p.state.roots = vec![0x5a; 32 * crate::state::K_MAX];
+        }
+        if name.ends_with("record") {
+            // A pending deposit: the draw writes the settlement record (spec M5 A5 C3).
+            c.vault.pend_dep = 100 * KAS as i64;
+        }
+        c.set_void(void);
+        if !void {
+            let p = AnchorProof::from_sim(&c.chain(), c.d() as u64);
+            if p.x_hash() != c.x_hash {
+                return Err(Error::new(Code::AnchorInvalid, "X's fields moved with the case"));
+            }
+            c.proof = Some(p);
+        }
+        let n = 4 + c.absorbed.len() as u32;
+        let f = wallet_funds(&fd(&c.funding), n, c.fee);
+        let u = build::draw(&c, &ops(n), &f)?;
+        let mut states = vec![State::Drawer(c.drawer.clone()), State::Marker(c.marker.clone()), State::Vault(c.vault.clone()), State::Controller(c.controller.clone())];
+        states.extend(c.absorbed.iter().map(|p| State::Pool(p.state.clone())));
+        let o = objs(&u, &states)?;
+        let call = Call::Draw {
+            cov: c.cov,
+            drawer: o[0].clone(),
+            marker: o[1].clone(),
+            vault: o[2].clone(),
+            controller: o[3].clone(),
+            absorbed: o[4..].to_vec(),
+            purchases: c.trees.iter().map(|t| t.purchases()).collect(),
+            proof: c.proof.as_ref().map(|p| p.to_bytes().to_vec()),
+            funder: c.funder,
+            funds: f,
+        };
+        out.push((name.into(), call, u));
+    }
+    Ok(out)
+}
+
 /// Front end F4: one claim of each mode (D56), as page calls: PAY on a combination held twice
 /// (h = 2, prize 0.1 KAS), ACCRUE (a prize below P_MIN), and FINAL (the ticket's last unclaimed
 /// index: the prize plus the ticket's value). Not part of `calls()`, whose digests are golden.

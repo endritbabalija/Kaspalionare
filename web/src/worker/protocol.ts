@@ -53,6 +53,7 @@ const BASE = [
   'verifyRound',
   'callerFigures',
   'anchorProofX',
+  'absorbablePools',
   'nodeConnect',
   'nodeDisconnect',
   'nodeInfo',

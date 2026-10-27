@@ -98,6 +98,10 @@ describe('CallerPanel', () => {
     expect(screen.getByTestId('caller').dataset.state).toBe('reward-below-fee');
     expect(screen.getByTestId('caller-warning')).toBeTruthy();
     expect(screen.getByTestId('caller-refund').dataset.sompi).toBe(SAMPLE_DRAW_LOW.refund);
+    // F5 review S1: the expired pools it absorbs; the new pools' reserves back from their claim deadline.
+    expect(screen.getByTestId('caller-absorbed').dataset.value).toBe('3');
+    expect(screen.getByTestId('caller-back-row')).toBeTruthy();
+    expect(screen.queryByTestId('caller-record-back')).toBeNull();
     expect(screen.getByTestId('caller-connect')).toBeTruthy();
     expect(screen.queryByTestId('caller-button')).toBeNull();
   });

@@ -436,7 +436,7 @@ async fn self_check(c: &KaspaRpcClient, api: std::net::SocketAddr, cov: Hash, me
     let utxos = node_utxos(c, &t.tickets).await?;
     let n = check_objects(net, &ObjectsCheckInput { covenant_id: covh.clone(), objects: t.tickets, utxos }).map_err(e)?.len();
     println!("SELF-CHECK tickets: ok, {n} live tickets of {me} against the node ({} purchases)", t.bought.len());
-    for p in ["/v1/vault".to_string(), format!("/v1/positions?owner={me}"), format!("/v1/requests?owner={me}")] {
+    for p in ["/v1/vault".to_string(), "/v1/pools".to_string(), format!("/v1/positions?owner={me}"), format!("/v1/requests?owner={me}")] {
         let (_, b) = get(p.clone()).await?;
         let o = parse_objects(&b).map_err(e)?;
         let utxos = node_utxos(c, &o.objects).await?;

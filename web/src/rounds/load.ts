@@ -116,6 +116,8 @@ export interface DetailData {
   status: ShownStatus;
   /** Closing (once X exists): the provisional numbers, bound to the anchor block a public node reports. */
   provisional?: WinningOut;
+  /** Drawn: X (hash and DAA score) bound to the block a public node reports and to the live pools (`anchorBound`). */
+  anchor?: WinningOut;
   /** The anchor proof the indexer serves (unverified; checked before it is used). */
   proof?: ApiAnchorProof;
   /** The indexer's row of the round (S and J of a round no live object fixes them for; unverified). */
@@ -134,6 +136,32 @@ export async function anchorBlockOf(ctx: Ctx, proof: ApiAnchorProof): Promise<An
   const b = await ctx.lottery.call('nodeAnchorBlock', x.anchorHash);
   if ('ok' in b) return b.ok;
   console.info(`anchor block ${x.anchorHash}: ${b.error.code}: ${b.error.detail}`);
+  return undefined;
+}
+
+/** Drawn rounds whose X a public node's block bound (X never changes once drawn): instance:round → X. */
+const boundAnchors = new Map<string, WinningOut>();
+
+/** Drawn, with a live pool: X.hash and its DAA score bound to the node's block (else undefined: unverified). */
+async function drawnAnchor(ctx: Ctx, r: string, round: ApiRound, utxos: Utxo[]): Promise<WinningOut | undefined> {
+  const key = `${ctx.config.covenantId}:${r}`;
+  const known = boundAnchors.get(key);
+  if (known) return known;
+  const proof = (await ctx.indexer.anchorProof(r).catch(() => null)) ?? undefined;
+  const block = proof ? await anchorBlockOf(ctx, proof).catch(() => undefined) : undefined;
+  if (!proof || !block) return undefined;
+  const c = await ctx.lottery.call('checkIndexerRound', {
+    covenantId: ctx.config.covenantId,
+    round,
+    utxos,
+    anchorProof: proof,
+    anchorBlock: block,
+  });
+  if ('ok' in c && c.ok.anchorBound && c.ok.winning) {
+    boundAnchors.set(key, c.ok.winning);
+    return c.ok.winning;
+  }
+  if ('error' in c) console.warn(`round ${r}: the anchor proof: ${c.error.code}: ${c.error.detail}`);
   return undefined;
 }
 
@@ -164,6 +192,11 @@ export async function loadDetail(ctx: Ctx, r: string, now: () => number = Date.n
       }
     }
   }
+  // Drawn (a live pool fixes the numbers): X bound to the node's block, so its hash and DAA score show as checked.
+  const anchor =
+    checked.statusChecked && checked.status === 'drawn' && checked.facts.pools.length
+      ? await drawnAnchor(ctx, r, round, utxos)
+      : undefined;
   const row = (await ctx.indexer.rounds().catch(() => null))?.rounds.find((x) => x.round === api.round);
   const node = unwrap(await ctx.lottery.call('nodeInfo'));
   return {
@@ -172,6 +205,7 @@ export async function loadDetail(ctx: Ctx, r: string, now: () => number = Date.n
     checked,
     status: await shownStatus(ctx, checked),
     provisional,
+    anchor,
     proof,
     node,
     clock: { virtualDaa: node.virtualDaaScore, observedAt: now() },

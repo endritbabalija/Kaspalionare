@@ -393,7 +393,30 @@ pub fn parse_rounds(body: &str) -> Result<ApiRounds> {
     parse_capped("rounds", body, LIMITS.round)
 }
 pub fn parse_round(body: &str) -> Result<ApiRound> {
-    parse_capped("round", body, LIMITS.round)
+    let r: ApiRound = parse_capped("round", body, LIMITS.round)?;
+    // F5 review: every transaction ID and hash is 32 bytes of hex (a page shows and links them).
+    let mut ids: Vec<(&str, &str)> = r.objects.iter().map(|o| ("objects.transactionId", o.transaction_id.as_str())).collect();
+    if let Some(c) = &r.close {
+        ids.push(("close.transactionId", &c.transaction_id));
+        ids.extend(c.frozen_roots.iter().map(|h| ("close.frozenRoots", h.as_str())));
+    }
+    if let Some(d) = &r.draw {
+        ids.push(("draw.transactionId", &d.transaction_id));
+        ids.push(("draw.anchorHash", &d.anchor_hash));
+        ids.extend(d.pools.iter().map(|p| ("draw.pools.transactionId", p.transaction_id.as_str())));
+    }
+    hex32s(&ids)?;
+    Ok(r)
+}
+
+/// Each `(what, value)` is 64 hex digits.
+fn hex32s(ids: &[(&str, &str)]) -> Result<()> {
+    for (what, v) in ids {
+        if v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::new(Code::InputFormat, format!("{what}: {v:?} is not 32 bytes of hex")));
+        }
+    }
+    Ok(())
 }
 pub fn parse_shard(body: &str) -> Result<ApiShard> {
     parse_capped("shard", body, LIMITS.purchases)
@@ -405,10 +428,16 @@ pub fn parse_anchor_proof(body: &str) -> Result<ApiAnchorProof> {
     parse_capped("anchor proof", body, LIMITS.small)
 }
 pub fn parse_tickets(body: &str) -> Result<ApiTickets> {
-    parse_capped("tickets", body, LIMITS.objects)
+    let t: ApiTickets = parse_capped("tickets", body, LIMITS.objects)?;
+    let mut ids: Vec<(&str, &str)> = t.tickets.iter().map(|o| ("tickets.transactionId", o.transaction_id.as_str())).collect();
+    ids.extend(t.bought.iter().map(|b| ("bought.transactionId", b.transaction_id.as_str())));
+    hex32s(&ids)?;
+    Ok(t)
 }
 pub fn parse_objects(body: &str) -> Result<ApiObjects> {
-    parse_capped("objects", body, LIMITS.objects)
+    let o: ApiObjects = parse_capped("objects", body, LIMITS.objects)?;
+    hex32s(&o.objects.iter().map(|o| ("objects.transactionId", o.transaction_id.as_str())).collect::<Vec<_>>())?;
+    Ok(o)
 }
 pub fn parse_error(body: &str) -> Result<ApiErrorBody> {
     parse_capped("error", body, LIMITS.small)
@@ -461,7 +490,7 @@ fn find_utxo<'a>(o: &ApiObject, utxos: &'a [Utxo]) -> Result<&'a Utxo> {
 /// One API object against the node's entry: the same outpoint, the same entry as the API
 /// claims (amount, creation DAA, script), and its state bytes rebuilding that script under
 /// the instance's covenant ID (`cases::live`).
-fn check_object(net: Net, cov: &kaspa_hashes::Hash, o: &ApiObject, utxos: &[Utxo]) -> Result<(CheckedObject, lottery::index::State)> {
+pub(crate) fn check_object(net: Net, cov: &kaspa_hashes::Hash, o: &ApiObject, utxos: &[Utxo]) -> Result<(CheckedObject, lottery::index::State)> {
     let u = find_utxo(o, utxos)?;
     let same_entry = u.amount == o.amount && u.block_daa_score == o.block_daa_score && u.script_public_key.eq_ignore_ascii_case(&o.script_public_key);
     if !same_entry {
@@ -519,6 +548,9 @@ pub struct CheckedRound {
     pub status: RoundStatus,
     pub status_checked: bool,
     pub m: Option<u32>,
+    /// F5 review S3: `m` is fixed by a live marker, pool, open controller or shard of the round
+    /// (else it is the indexer's, unverified).
+    pub m_checked: bool,
     pub k: u32,
     pub objects: Vec<CheckedObject>,
     /// The roots rebuilt from the purchases (they matched the chain's), position i for shard i,
@@ -622,9 +654,7 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
     let open_controller = controller.as_ref().is_some_and(|(_, c)| c.round == r);
     let shown = if marker.is_some() {
         Some(RoundStatus::Closing)
-    } else if !pools.is_empty() || (record.is_some() && a.status != RoundStatus::Void) {
-        // A void with pending vault requests also leaves a settlement record of the round, so a
-        // record alone does not tell a draw from a void.
+    } else if !pools.is_empty() {
         Some(RoundStatus::Drawn)
     } else if !shards.is_empty() || open_controller {
         Some(RoundStatus::Open)
@@ -633,6 +663,13 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
     };
     if open_controller && (marker.is_some() || !pools.is_empty() || record.is_some()) {
         return Err(chain_mismatch(format!("round {r}: its controller is live, so it is not closed, yet a closed round's object was served")));
+    }
+    // F5 review S3: a settlement record of round r is written by its `draw()` or by its void (a
+    // void with pending vault requests also leaves one), so a record alone shows the round past
+    // its draw window's transition without telling a draw from a void: no checked status, but
+    // anything other than drawn or void contradicts it.
+    if shown.is_none() && record.is_some() && !matches!(a.status, RoundStatus::Drawn | RoundStatus::Void) {
+        return Err(chain_mismatch(format!("the indexer says round {r} is {:?}; its settlement record says it was drawn or voided", a.status)));
     }
     if let Some(s) = shown {
         if s != a.status {
@@ -659,6 +696,21 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
     }
     if shards.iter().any(|(_, s)| a.m.map(i64::from) != Some(s.m) || s.shard_index >= i64::from(a.k)) {
         return Err(chain_mismatch(format!("round {r}: a shard's m or index differs from the indexer's m and k")));
+    }
+    // F5 review S3: m is the chain's only when a live marker, pool, open controller or shard of the
+    // round fixed it (compared above); otherwise it is the indexer's.
+    let m_checked = a.m.is_some() && (!chain_mk.is_empty() || !shards.is_empty());
+    // F5 review S4: the close's and the draw's transaction IDs against the live objects only they
+    // create (`facts.close_tx`, `facts.draw_tx`).
+    if let (Some(c), Some(t)) = (&a.close, &facts.close_tx) {
+        if !c.transaction_id.eq_ignore_ascii_case(&t.transaction_id) {
+            return Err(chain_mismatch(format!("round {r}: the indexer's close() is {}, the chain's {}", c.transaction_id, t.transaction_id)));
+        }
+    }
+    if let (Some(d), Some(t)) = (&a.draw, &facts.draw_tx) {
+        if !d.transaction_id.eq_ignore_ascii_case(&t.transaction_id) {
+            return Err(chain_mismatch(format!("round {r}: the indexer's draw() is {}, the chain's {}", d.transaction_id, t.transaction_id)));
+        }
     }
     // The frozen roots the API states against the chain's (marker or pool).
     if let Some(close) = &a.close {
@@ -760,6 +812,7 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
         status: shown.unwrap_or(a.status),
         status_checked: shown.is_some(),
         m: a.m,
+        m_checked,
         k: a.k,
         objects,
         roots: roots_out,

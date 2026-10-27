@@ -114,20 +114,62 @@ async function claim(page: Page, txid: string, index: number) {
     .toBe(true);
 }
 
-/** The outcome of a claim row's last press: accepted (or the card ended claimed), or failed. */
-async function outcome(page: Page, txid: string, index: number): Promise<'accepted' | 'failed'> {
+/** A claim row's progress now: its transaction ID (once signed), its step, and whether it failed. */
+interface Progress {
+  id: string | null;
+  step: string | null;
+  failed: boolean;
+}
+
+async function progressOf(page: Page, txid: string, index: number): Promise<Progress> {
+  const row = card(page, txid).getByTestId(new RegExp(`-claim-${index}-progress$`));
+  const p = row.getByTestId('tx-progress');
+  const id = row.getByTestId(new RegExp(`-claim-${index}-txid$`));
+  if (!(await p.count())) return { id: null, step: null, failed: false };
+  return {
+    id: (await id.count()) ? await id.getAttribute('data-value') : null,
+    step: await p.getAttribute('data-step'),
+    failed: (await p.getAttribute('data-failed')) === 'true',
+  };
+}
+
+/**
+ * Press a claim row's button and follow that press only (F5 review): its outcome is read once the row shows this
+ * press's own attempt (a progress no longer the earlier press's failure, or another transaction ID), so an earlier
+ * press's "failed" is never read as this one's. Accepted: this press's step is accepted, or the card has ended
+ * as claimed (a last claim). The press's transaction ID is logged.
+ */
+async function press(page: Page, txid: string, index: number): Promise<'accepted' | 'failed'> {
+  const before = await progressOf(page, txid, index);
+  await card(page, txid)
+    .getByTestId(new RegExp(`-claim-${index}-button$`))
+    .click();
+  return outcomeAfter(page, txid, index, before);
+}
+
+async function outcomeAfter(page: Page, txid: string, index: number, before: Progress): Promise<'accepted' | 'failed'> {
   const until = Date.now() + 150_000;
+  let started = false;
+  let id: string | null = null;
   while (Date.now() < until) {
     const c = card(page, txid);
-    if ((await c.getAttribute('data-state')) === 'claimed') return 'accepted';
-    const p = c.getByTestId(new RegExp(`-claim-${index}-progress$`)).getByTestId('tx-progress');
-    if (await p.count()) {
-      if ((await p.getAttribute('data-step')) === 'accepted') return 'accepted';
-      if ((await p.getAttribute('data-failed')) === 'true') return 'failed';
-    }
+    const now = await progressOf(page, txid, index);
+    // Only an earlier press's failure can be stale: without one, any state is this press's.
+    started ||= !before.failed || !now.failed || (now.id !== null && now.id !== before.id);
+    if (started && now.id) id = now.id;
+    if (started && now.step === 'accepted') return log('accepted');
+    if ((await c.getAttribute('data-state')) === 'claimed') return log('accepted');
+    if (started && now.failed) return log('failed');
     await page.waitForTimeout(500);
   }
-  throw new Error(`claim ${txid}#${index}: no outcome`);
+  // Still failed 150 s after the press (a press settles in seconds): this press failed as well.
+  if ((await progressOf(page, txid, index)).failed) return log('failed');
+  throw new Error(`claim ${txid}#${index}: no outcome of this press (transaction ${id ?? 'not shown'})`);
+
+  function log(o: 'accepted' | 'failed') {
+    console.log(`claim ${txid.slice(0, 8)}#${index}: ${o} (transaction ${id ?? 'not shown'})`);
+    return o;
+  }
 }
 
 async function quality(page: Page, label: string) {
@@ -247,8 +289,9 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   const b3 = card(p2, t3).getByTestId(/-claim-0-button$/);
   await expect(b2).toBeEnabled({ timeout: 90_000 });
   await expect(b3).toBeEnabled({ timeout: 90_000 });
+  const [before2, before3] = await Promise.all([progressOf(page, t2, 1), progressOf(p2, t3, 0)]);
   await Promise.all([b2.click(), b3.click()]);
-  const first = await Promise.all([outcome(page, t2, 1), outcome(p2, t3, 0)]);
+  const first = await Promise.all([outcomeAfter(page, t2, 1, before2), outcomeAfter(p2, t3, 0, before3)]);
   console.log(`two claimers on one pool: T2 ${first[0]}, T3 ${first[1]}`);
   expect(first, 'both claims spent the pool: one is refused').toContain('failed');
   expect(first, 'one of them is accepted').toContain('accepted');
@@ -264,12 +307,19 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   ] as const) {
     if (o === 'accepted') continue;
     let last: 'accepted' | 'failed' = o;
-    for (let press = 0; press < 3 && last !== 'accepted'; press++) {
+    for (let n = 0; n < 3 && last !== 'accepted'; n++) {
       const button = () => card(p, t).getByTestId(new RegExp(`-claim-${i}-button$`));
-      await ticketsUntil(p, async () => await button().isEnabled());
-      await button().click();
-      last = await outcome(p, t, i);
-      console.log(`two claimers: re-press ${press + 1}: ${last}`);
+      // A card that ended claimed needs no press (the last press went through after all).
+      await ticketsUntil(
+        p,
+        async () => (await card(p, t).getAttribute('data-state')) === 'claimed' || (await button().isEnabled()),
+      );
+      if ((await card(p, t).getAttribute('data-state')) === 'claimed') {
+        last = 'accepted';
+        break;
+      }
+      last = await press(p, t, i);
+      console.log(`two claimers: re-press ${n + 1}: ${last}`);
     }
     expect(last).toBe('accepted');
   }

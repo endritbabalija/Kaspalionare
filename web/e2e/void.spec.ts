@@ -11,6 +11,9 @@ import { expect, test } from '@playwright/test';
 import { buyAndWait, fundedQuickWallet, shots, ticketOf } from './helpers';
 import { detail, devPost, pressCaller, statusIs } from './roundsHelpers';
 
+// On request only (owner, DECISIONS 2026-10-27): `npm run e2e:void` (E2E_VOID=1), never in a plain `npm run e2e`.
+test.skip(process.env.E2E_VOID !== '1', 'the void e2e runs on request: npm run e2e:void');
+
 test('a void: the open round closed, D + draw_window mined, voided from its panel; void on S3 and on S2', async ({
   browser,
 }) => {

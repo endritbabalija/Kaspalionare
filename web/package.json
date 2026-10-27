@@ -22,6 +22,7 @@
     "test:unit": "vitest run",
     "test": "node scripts/ensure-wasm.mjs && npm run typecheck && npm run lint && npm run format:check && npm run test:unit",
     "e2e": "playwright test",
+    "e2e:void": "node scripts/e2e-void.mjs",
     "e2e:install": "node scripts/playwright-install.mjs",
     "wasm:mainnet": "node scripts/wasm.mjs mainnet",
     "check:csp": "node scripts/check-csp.mjs"

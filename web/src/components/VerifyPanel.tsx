@@ -1,7 +1,8 @@
 // Verify in this browser (spec J6, S3, 4 "verify result: match, mismatch, not checkable"): the Verify button and,
 // once run, one line per check with its result as text (never colour alone). Every check ran in the worker
 // (`verifyRound`): the item names are the figures checked; a mismatch also shows the one message of
-// chain_mismatch. States: idle, running, done, error.
+// chain_mismatch. An item's `detail` is for logs, never shown (copy rule); its code is in `data-code`. States: idle,
+// running, done, error.
 import type { RoundVerify, VerifyItem } from '@wasm/web.js';
 import { cn } from '@/lib/cn';
 import { messageOf } from '@/lib/errors';
@@ -105,7 +106,7 @@ export function VerifyPanel({ state, result, error, disabled, onVerify, testId =
                 data-kind={i.kind}
                 data-result={i.result}
                 data-shard={i.shard ?? ''}
-                title={i.detail || undefined}
+                data-code={i.code ?? ''}
                 className="flex min-h-9 items-center justify-between gap-3 border-b border-rule-soft text-[13px] last:border-b-0"
               >
                 <span className="min-w-0 truncate">{itemName(i)}</span>

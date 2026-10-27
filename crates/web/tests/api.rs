@@ -1095,6 +1095,23 @@ fn page_fixtures() -> String {
     for (name, call, _) in lottery::web::fixtures::claim_calls().expect("claim calls") {
         m.insert(name, common::input(&call).json());
     }
+    // F5 review S1, S5: a void absorbing two expired pools (round 2, with purchases), for the page's caller tests.
+    for (name, call, _) in lottery::web::fixtures::draw_calls().expect("draw calls") {
+        if name == "void absorbing 2" || name == "draw absorbing 3" {
+            let i = common::input(&call);
+            if let common::Input::Draw(d) = &i {
+                if let Some(proof) = &d.anchor_proof {
+                    // X's header as a node reports it (the fixture's X.hash commits to it).
+                    let p = lottery::anchor::AnchorProof::from_bytes(&web::convert::unhex("proof", proof).unwrap()).unwrap();
+                    let header = lottery::anchor::header_committing_to(&p.x, 1);
+                    assert_eq!(header.hash.as_bytes(), p.x_hash());
+                    let block = AnchorBlock { header: web::convert::header_dto(&header), is_chain_block: true };
+                    m.insert(format!("{name} anchor block"), serde_json::to_value(block).unwrap());
+                }
+            }
+            m.insert(name, i.json());
+        }
+    }
     // F4 review M2: each claim round's marker and every pool its draw created (the drawn copy with
     // the marker kept), for the page's copy tests.
     let mut rounds = serde_json::Map::new();

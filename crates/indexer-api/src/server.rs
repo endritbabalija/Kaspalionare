@@ -116,6 +116,7 @@ pub fn router(st: AppState, origins: &[String]) -> Result<Router, String> {
         .route("/v1/rounds/{r}/anchor-proof", get(routes::anchor_proof))
         .route("/v1/tickets", get(routes::tickets))
         .route("/v1/vault", get(routes::vault))
+        .route("/v1/pools", get(routes::pools))
         .route("/v1/positions", get(routes::positions))
         .route("/v1/requests", get(routes::requests))
         .fallback(routes::not_found)

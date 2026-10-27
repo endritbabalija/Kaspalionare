@@ -293,6 +293,13 @@ pub fn caller_figures(#[wasm_bindgen(unchecked_param_type = "CallerFiguresInput"
     out(net().and_then(|n| crate::rounds::caller_figures(n, &parse("input", input)?)))
 }
 
+/// Spec S4, design 7.3 (F5 review S1): the expired pools a `draw()` or void absorbs, from the
+/// indexer's candidates checked against the node's entries for them, oldest first, at most A_MAX.
+#[wasm_bindgen(js_name = absorbablePools, unchecked_return_type = "Outcome<Absorbable>")]
+pub fn absorbable_pools(#[wasm_bindgen(unchecked_param_type = "AbsorbInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::rounds::absorbable_pools(n, &parse("input", input)?)))
+}
+
 /// X of an anchor proof (its hash and DAA score), to fetch the anchor block from a public node.
 #[wasm_bindgen(js_name = anchorProofX, unchecked_return_type = "Outcome<AnchorX>")]
 pub fn anchor_proof_x(proof: &str) -> JsValue {

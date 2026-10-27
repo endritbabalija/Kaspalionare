@@ -47,7 +47,13 @@ test('S3: the rounds from the chain; round 1 verified in this browser; round 2 p
   await expect(page.getByTestId('round-detail')).toHaveAttribute('data-status', 'drawn', { timeout: 90_000 });
   await expect(page.getByTestId('round-numbers')).toHaveAttribute('data-state', 'final');
   await expect(page.getByTestId('round-roots')).toHaveAttribute('data-count', '16');
-  await expect(page.getByTestId('round-anchor')).toHaveAttribute('data-checked', 'false');
+  // F5 review: X bound to the node's block by the detail itself (hash and DAA score); the draw's ID bound to the
+  // drawer of round 2 (only round 1's draw creates it); the close's ID no live object fixes any more: unverified.
+  await expect(page.getByTestId('round-anchor')).toHaveAttribute('data-state', 'checked', { timeout: 30_000 });
+  await expect(page.getByTestId('round-anchor-daa')).toHaveAttribute('data-state', 'checked');
+  await expect(page.getByTestId('round-draw-tx')).toHaveAttribute('data-checked', 'true');
+  await expect(page.getByTestId('round-close-tx')).toHaveAttribute('data-checked', 'false');
+  await expect(page.getByTestId('round-m')).toHaveAttribute('data-checked', 'true');
   const v = await verify(page);
   await expect(v).toHaveAttribute('data-consistent', 'true');
   const items = await results(page);
@@ -63,6 +69,11 @@ test('S3: the rounds from the chain; round 1 verified in this browser; round 2 p
   await expect(page.getByTestId('round-detail')).toHaveAttribute('data-status', 'closing');
   await expect(page.getByTestId('round-numbers')).toHaveAttribute('data-state', 'provisional');
   await expect(page.getByTestId('round-numbers-status')).toHaveText('Provisional');
+  // Before the draw X is bound only to the node's current view: provisional, like the numbers. The close's ID is
+  // the marker's transaction.
+  await expect(page.getByTestId('round-anchor')).toHaveAttribute('data-state', 'provisional');
+  await expect(page.getByTestId('round-anchor-provisional')).toHaveText('Provisional');
+  await expect(page.getByTestId('round-close-tx')).toHaveAttribute('data-checked', 'true');
   await expect(page.getByTestId('caller')).toHaveAttribute('data-due', 'due');
   await expect(page.getByTestId('caller-connect')).toBeVisible();
   await quality(page, 'f5-round-2');

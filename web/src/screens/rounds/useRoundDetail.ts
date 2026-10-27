@@ -2,7 +2,10 @@
 // (the worker's `verifyRound`); the caller panel: with a wallet connected, the due transition is built at once
 // so its rows show the reward, the reserves, the fee and the total before anything is signed; a press signs
 // exactly that build (one transition at a time, one wallet request at a time). A transition whose outcome the
-// page does not learn (submit_unknown) keeps the press disabled until the chain shows the round moved on.
+// page does not learn (submit_unknown) keeps the press disabled until the chain shows the round moved on. A build
+// belongs to one (round, transition, wallet, live objects): when the due transition changes or the chain moves the
+// round's objects, it is dropped at once and the due one rebuilt (F5 review S6), so the panel never shows, and a
+// press never signs, another state's build.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RoundVerify } from '@wasm/web.js';
 import type { CallerTx } from '@/components/CallerPanel';
@@ -21,6 +24,8 @@ export type DetailLoad =
 
 export interface CallerView {
   prep?: PreparedCaller;
+  /** The build key `prep` was made for (only shown while it is the current one). */
+  prepFor?: string;
   estimating?: boolean;
   error?: string;
   tx?: CallerTx;
@@ -30,6 +35,15 @@ export interface CallerView {
 
 function dueKey(r: string, d: Due): string {
   return d.kind === 'due' ? `${r}:${d.action}` : `${r}:${d.kind}`;
+}
+
+/** The round's live, checked objects (what a build spends): any change means the chain moved. */
+function objectsKey(d: DetailData | undefined): string {
+  if (!d) return '';
+  return d.checked.objects
+    .map((o) => `${o.object.utxo.transactionId.toLowerCase()}:${o.object.utxo.index}`)
+    .sort()
+    .join(',');
 }
 
 export function useRoundDetail(ctx: Ctx, wallet: WalletSession, r: string) {
@@ -68,6 +82,7 @@ export function useRoundDetail(ctx: Ctx, wallet: WalletSession, r: string) {
   const data = load.kind === 'ready' ? load.data : undefined;
   const due: Due = useMemo(() => (data ? dueOf(data) : { kind: 'none' }), [data]);
   const key = `${dueKey(r, due)}:${address ?? ''}`;
+  const buildKey = `${key}|${objectsKey(data)}`;
 
   // Another transition due (e.g. the void after this page's close): the last one's progress no longer applies, and
   // it would hide the new transition's press. Kept until then (after a press the panel shows its outcome).
@@ -78,25 +93,38 @@ export function useRoundDetail(ctx: Ctx, wallet: WalletSession, r: string) {
     setCaller((c) => (c.tx ? { ...c, tx: undefined } : c));
   }, [key, due]);
 
-  // Build the due transition once per (round, transition, wallet); again after a press.
+  // Build the due transition once per (round, transition, wallet, live objects); again after a press. Another key:
+  // the old build is dropped at once (its answer, if it comes later, too).
   useEffect(() => {
-    if (!data || due.kind !== 'due' || !adapter || !address || busy.current) return;
-    if (builtFor.current === key) return;
-    builtFor.current = key;
+    if (busy.current || builtFor.current === buildKey) return;
+    builtFor.current = buildKey;
+    if (!data || due.kind !== 'due' || !adapter || !address) {
+      setCaller((c) =>
+        c.prep || c.estimating || c.error
+          ? { ...c, prep: undefined, prepFor: undefined, estimating: false, error: undefined }
+          : c,
+      );
+      return;
+    }
     const action = due.action;
-    setCaller((c) => ({ ...c, estimating: true, error: undefined, prep: undefined }));
+    const forKey = buildKey;
+    setCaller((c) => ({ ...c, estimating: true, error: undefined, prep: undefined, prepFor: undefined }));
     void prepareCaller({ ctx, wallet: adapter, address }, data, action).then(
-      (prep) => setCaller((c) => ({ ...c, prep, estimating: false })),
+      (prep) =>
+        setCaller((c) => (builtFor.current === forKey ? { ...c, prep, prepFor: forKey, estimating: false } : c)),
       (e: unknown) => {
         const d = describe(e);
         if (d.detail) console.warn(`round ${r} ${action}: ${d.code ?? 'error'}: ${d.detail}`);
-        setCaller((c) => ({ ...c, estimating: false, error: d.message }));
+        setCaller((c) => (builtFor.current === forKey ? { ...c, estimating: false, error: d.message } : c));
       },
     );
-  }, [data, due, key, adapter, address, ctx, r]);
+  }, [data, due, buildKey, adapter, address, ctx, r]);
+
+  // Only the build of the current key is shown and signed.
+  const shown = caller.prepFor === buildKey ? caller.prep : undefined;
 
   const press = useCallback(async () => {
-    const p = caller.prep;
+    const p = shown;
     if (!p || !adapter || !address || busy.current || caller.blockedKey === key) return;
     busy.current = true;
     setRunning(true);
@@ -125,7 +153,7 @@ export function useRoundDetail(ctx: Ctx, wallet: WalletSession, r: string) {
       builtFor.current = null;
       void reload();
     }
-  }, [caller.prep, caller.blockedKey, key, adapter, address, ctx, r, reload, wallet]);
+  }, [shown, caller.blockedKey, key, adapter, address, ctx, r, reload, wallet]);
 
   const runVerify = useCallback(async () => {
     setVerify({ state: 'running' });
@@ -141,7 +169,7 @@ export function useRoundDetail(ctx: Ctx, wallet: WalletSession, r: string) {
   return {
     load,
     due,
-    caller,
+    caller: { ...caller, prep: shown },
     running,
     blocked: caller.blockedKey === key,
     verify,

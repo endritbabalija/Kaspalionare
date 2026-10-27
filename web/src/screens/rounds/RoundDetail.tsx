@@ -4,7 +4,7 @@
 // the round's transactions; then Verify in this browser and Run the round. A figure a node-checked object fixes
 // links to the transaction holding it; one only the indexer states says "Unverified". Nothing is computed here:
 // the figures are the round's facts (Rust) and its objects' decoded states.
-import type { Combination, RecordView } from '@wasm/web.js';
+import type { Combination, RecordView, WinningOut } from '@wasm/web.js';
 import { useSession } from '@/app/context';
 import { Amount } from '@/components/Amount';
 import { BallRow } from '@/components/BallRow';
@@ -103,10 +103,7 @@ export function RoundDetail({ r }: { r: string }) {
         </h1>
         {data.status ? <RoundStatusPill status={data.status} /> : <Unverified testId="round-detail-status" />}
       </div>
-      <Figures
-        data={data}
-        anchorBound={d.verify.result?.anchorBound ? d.verify.result.winning?.anchorHash : undefined}
-      />
+      <Figures data={data} anchorBound={d.verify.result?.anchorBound ? d.verify.result.winning : undefined} />
       <Roots data={data} />
       <Pools data={data} />
       <Settlement data={data} />
@@ -129,7 +126,7 @@ export function RoundDetail({ r }: { r: string }) {
   );
 }
 
-function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: string }) {
+function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: WinningOut }) {
   const { config } = useSession();
   const f = data.checked.facts;
   const api = data.api;
@@ -141,10 +138,20 @@ function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: string
   const final: Combination | undefined = pool?.role === 'pool' ? pool.win : undefined;
   const numbers = final ?? data.provisional?.winning ?? api.draw?.winning;
   const numbersState = final ? 'final' : data.provisional ? 'provisional' : numbers ? 'unverified' : '';
-  // X.hash: bound to a public node's block (the closed path, or Verify after the draw), else the indexer's.
-  const anchor = data.provisional?.anchorHash ?? anchorBound;
-  const anchorShown = anchor ?? (api.draw && !api.draw.void ? api.draw.anchorHash : undefined);
-  const anchorDaa = data.provisional?.anchorDaaScore;
+  // X: after the draw bound to a public node's block and the live pools (the detail's own check, or Verify), so
+  // shown checked; before the draw bound only to the node's current view, so provisional like the numbers; else
+  // the indexer's, unverified.
+  const drawnX = data.anchor ?? anchorBound;
+  const anchorState: 'checked' | 'provisional' | 'unverified' = drawnX
+    ? 'checked'
+    : data.provisional
+      ? 'provisional'
+      : 'unverified';
+  const anchorShown =
+    drawnX?.anchorHash ??
+    data.provisional?.anchorHash ??
+    (api.draw && !api.draw.void ? api.draw.anchorHash : undefined);
+  const anchorDaa = drawnX?.anchorDaaScore ?? data.provisional?.anchorDaaScore;
   const sales = f.sales
     ? { v: f.sales.value, c: true, s: f.sales.sources[0]?.transactionId }
     : data.row?.sales
@@ -175,7 +182,7 @@ function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: string
     <div className={card} data-testid="round-figures">
       {m !== undefined && (
         <FigureRow name="m" testId="round-m-row">
-          <Value checked={data.checked.statusChecked} name="m" testId="round-m">
+          <Value checked={data.checked.mChecked} name="m" testId="round-m">
             <span data-value={m}>{m}</span>
           </Value>
         </FigureRow>
@@ -227,17 +234,25 @@ function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: string
           <span
             className="flex min-w-0 items-center gap-1"
             data-testid="round-anchor"
-            data-checked={anchor ? 'true' : 'false'}
+            data-checked={anchorState === 'checked' ? 'true' : 'false'}
+            data-state={anchorState}
           >
             <HashOrAddress value={anchorShown} kind="block" explorer={config.explorerUrl} testId="round-anchor-hash" />
-            {!anchor && <Unverified testId="round-anchor-unverified" />}
+            {anchorState === 'provisional' && <Provisional testId="round-anchor-provisional" />}
+            {anchorState === 'unverified' && <Unverified testId="round-anchor-unverified" />}
           </span>
         </FigureRow>
       )}
       {anchorDaa && (
         <FigureRow name="Anchor DAA" testId="round-anchor-daa-row" part>
-          <span data-testid="round-anchor-daa" data-value={anchorDaa}>
+          <span
+            className="flex items-center gap-1"
+            data-testid="round-anchor-daa"
+            data-value={anchorDaa}
+            data-state={anchorState}
+          >
             {groupDigits(anchorDaa)}
+            {anchorState === 'provisional' && <Provisional testId="round-anchor-daa-provisional" />}
           </span>
         </FigureRow>
       )}
@@ -255,11 +270,7 @@ function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: string
                 Final
               </span>
             )}
-            {numbersState === 'provisional' && (
-              <span data-testid="round-numbers-status" className="font-mono text-[13px] text-amber">
-                Provisional
-              </span>
-            )}
+            {numbersState === 'provisional' && <Provisional testId="round-numbers-status" />}
             {numbersState === 'unverified' && <Unverified testId="round-numbers-status" />}
           </div>
           <BallRow combination={numbers} testId="round-numbers-balls" />
@@ -270,20 +281,40 @@ function Figures({ data, anchorBound }: { data: DetailData; anchorBound?: string
   );
 }
 
+function Provisional({ testId }: { testId: string }) {
+  return (
+    <span data-testid={testId} className="font-mono text-[13px] text-amber">
+      Provisional
+    </span>
+  );
+}
+
+/**
+ * The close's and the draw's transaction IDs (F5 review S4): checked when a live object only that transaction
+ * creates fixes it (`facts.closeTx`, `facts.drawTx`: the marker or next controller; the next drawer), else the
+ * indexer's, unverified. `checkIndexerRound` refuses an indexer ID that differs from a bound one.
+ */
 function Transactions({ data }: { data: DetailData }) {
   const { config } = useSession();
-  const close = data.api.close?.transactionId;
-  const draw = data.api.draw?.transactionId;
+  const f = data.checked.facts;
+  const close = f.closeTx?.transactionId ?? data.api.close?.transactionId;
+  const draw = f.drawTx?.transactionId ?? data.api.draw?.transactionId;
+  const tx = (value: string, checked: boolean, testId: string) => (
+    <span className="flex min-w-0 items-center gap-1" data-testid={testId} data-checked={checked ? 'true' : 'false'}>
+      <HashOrAddress value={value} kind="transaction" explorer={config.explorerUrl} testId={`${testId}-hash`} />
+      {!checked && <Unverified testId={`${testId}-unverified`} />}
+    </span>
+  );
   return (
     <>
       {close && (
         <FigureRow name="close()" testId="round-close-tx-row">
-          <HashOrAddress value={close} kind="transaction" explorer={config.explorerUrl} testId="round-close-tx" />
+          {tx(close, !!f.closeTx, 'round-close-tx')}
         </FigureRow>
       )}
       {draw && (
         <FigureRow name={data.api.draw?.void ? 'Void' : 'draw()'} testId="round-draw-tx-row">
-          <HashOrAddress value={draw} kind="transaction" explorer={config.explorerUrl} testId="round-draw-tx" />
+          {tx(draw, !!f.drawTx, 'round-draw-tx')}
         </FigureRow>
       )}
     </>

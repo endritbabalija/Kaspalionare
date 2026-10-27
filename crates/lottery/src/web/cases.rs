@@ -318,8 +318,16 @@ pub fn draw(cov: &Hash, o: &DrawObjs, purchases: &[Vec<u8>], proof: Option<&[u8]
     let mk = marker(o.marker, cov)?;
     check_marker(&mk)?;
     let k = mk.k as usize;
-    ensure((1..=K_MAX).contains(&k) && purchases.len() == k, Code::StoreIncomplete, || format!("{} purchase lists for k = {k}", purchases.len()))?;
-    let trees = trees(mk.m, purchases)?;
+    // F5 review S5: a void uses no leaves, siblings or counts (draw.rs `try_expected`), so it
+    // needs no purchases: with none given, k empty trees fill the case's shape (the void's
+    // transaction is the same whatever the trees: `build::draw` checks the roots of a draw
+    // only). Purchases given for a void are still checked against the marker's roots.
+    let void_without_purchases = proof.is_none() && purchases.is_empty();
+    ensure((1..=K_MAX).contains(&k) && (void_without_purchases || purchases.len() == k), Code::StoreIncomplete, || format!("{} purchase lists for k = {k}", purchases.len()))?;
+    let trees = if void_without_purchases { (0..k).map(|_| Tree::new(mk.m as usize)).collect() } else { trees(mk.m, purchases)? };
+    if proof.is_none() && !void_without_purchases {
+        super::verify::check_roots(&trees, &mk.roots, mk.k)?;
+    }
     let ctrl = controller(o.controller, cov)?;
     let mut c = DrawCase::new_with(k, &t);
     c.drawer = drawer(o.drawer, cov)?;

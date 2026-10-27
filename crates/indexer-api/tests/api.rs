@@ -80,6 +80,12 @@ async fn endpoints_serve_their_types() {
     let (s, _, _) = get(&a, &format!("/v1/tickets?payout={}", payout.replace(':', "%3A"))).await;
     assert_eq!(s, 200);
 
+    // F5 review S1: the live pools, oldest claim deadline first (round 1's).
+    let (s, _, b) = get(&a, "/v1/pools").await;
+    assert_eq!(s, 200, "{b}");
+    let pl = parse_objects(&b).unwrap();
+    assert!(!pl.objects.is_empty() && pl.objects.iter().all(|o| o.role == web::views::RoleName::Pool));
+    assert_eq!(pl.objects.len(), d.pools.len(), "round 1's pools, all live");
     let (_, _, b) = get(&a, "/v1/vault").await;
     let v = parse_objects(&b).unwrap();
     assert!(v.objects.iter().any(|o| o.role == web::views::RoleName::Vault));

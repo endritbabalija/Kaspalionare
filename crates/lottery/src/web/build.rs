@@ -408,7 +408,13 @@ pub fn draw(case: &DrawCase, outpoints: &[TransactionOutpoint], funds: &Funds) -
     value("boost pot", case.pot)?;
     add(add(case.pot, ctrl.acc as u64)?, ctrl.reserve as u64)?;
     ensure(case.trees.iter().all(|tr| tr.m as i64 == mk.m), Code::TreeMismatch, || "a tree's m is not the marker's".into())?;
-    check_roots(&case.trees, &mk.roots, mk.k)?;
+    ensure(case.trees.len() as i64 == mk.k, Code::TreeMismatch, || format!("{} trees for k = {}", case.trees.len(), mk.k))?;
+    // F5 review S5: the trees give a draw its leaves, siblings and counts; a void uses none of
+    // them (`DrawCase::try_expected`), so its roots are not checked here (`cases::draw` checks
+    // purchases given for a void itself).
+    if !case.void {
+        check_roots(&case.trees, &mk.roots, mk.k)?;
+    }
     // drawer.sil check 4 (lines 454-461): S - P_R - C_close >= 0 and J_boost <= TOTAL_MAX - it.
     let held = mk.sales - mk.ref_paid - crate::game::muldiv(mk.sales, mk.s_c);
     ensure(held >= 0 && mk.j_boost <= TOTAL_MAX - held, Code::Refused, || "the marker's value is out of range (drawer check 4)".into())?;
