@@ -306,6 +306,40 @@ pub fn anchor_proof_x(proof: &str) -> JsValue {
     out(net().and_then(|_| crate::rounds::anchor_x(proof)))
 }
 
+// ------------------------------------------------------------------------------ vault (F6)
+
+/// Spec S5: the vault's figures and the connected wallet's positions and requests (with what each
+/// settlement does), from node-checked chain objects.
+#[wasm_bindgen(js_name = vaultView, unchecked_return_type = "Outcome<VaultPage>")]
+pub fn vault_view(#[wasm_bindgen(unchecked_param_type = "VaultViewInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::vault::vault_view(n, &parse("input", input)?)))
+}
+
+/// Spec S5 (D86, W4b): the shares a withdrawal of an amount (or of the whole position) takes, or
+/// `vault_amount` when the vault does not take it.
+#[wasm_bindgen(js_name = withdrawChoice, unchecked_return_type = "Outcome<WithdrawChoice>")]
+pub fn withdraw_choice(#[wasm_bindgen(unchecked_param_type = "WithdrawChoiceInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::vault::withdraw_choice(n, &parse("input", input)?)))
+}
+
+/// Spec S5, 7: a built `request_deposit()`'s rows, each checked against its transaction.
+#[wasm_bindgen(js_name = depositFigures, unchecked_return_type = "Outcome<DepositFigures>")]
+pub fn deposit_figures(#[wasm_bindgen(unchecked_param_type = "DepositFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::vault::deposit_figures(n, &parse("input", input)?)))
+}
+
+/// Spec S5, 7: a built `request_withdraw()`'s rows, each checked against its transaction.
+#[wasm_bindgen(js_name = withdrawFigures, unchecked_return_type = "Outcome<WithdrawFigures>")]
+pub fn withdraw_figures(#[wasm_bindgen(unchecked_param_type = "WithdrawFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::vault::withdraw_figures(n, &parse("input", input)?)))
+}
+
+/// Spec S5, 7: a built `settle()`'s rows, each checked against its transaction.
+#[wasm_bindgen(js_name = settleFigures, unchecked_return_type = "Outcome<SettleFigures>")]
+pub fn settle_figures(#[wasm_bindgen(unchecked_param_type = "SettleFiguresInput")] input: JsValue) -> JsValue {
+    out(net().and_then(|n| crate::vault::settle_figures(n, &parse("input", input)?)))
+}
+
 // ------------------------------------------------------------------------------ page tables (F3)
 
 /// Every error code with its one message (the one table, `lottery::web::Code`). Needs no

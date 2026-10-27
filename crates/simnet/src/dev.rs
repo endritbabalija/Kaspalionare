@@ -303,13 +303,14 @@ async fn advance(c: &KaspaRpcClient, w: &Wallet, x: &mut Indexer, t: &Arc<Templa
 }
 
 /// F5 (`POST /mine?to=…` on the dev faucet; TEST-ONLY, simnet only): mine until the page's own S4
-/// panel finds a transition due: past the open round's T (`close()`), past the closing round's D and
+/// panel finds a transition due (F6: or the Vault page a request possible, `to=vault`): past the open round's T (`close()`), past the closing round's D and
 /// 60 blocks on (`draw()`, its anchor proof buildable), or past its D + draw_window (the void; about
 /// 864,000 blocks, mined to a throwaway address so the dev wallet's coin list stays small, with the
 /// indexer catching up every 20,000 blocks). Nothing is built or submitted: the page does that.
 async fn mine_to(c: &KaspaRpcClient, x: &mut Indexer, starts: &Starts, to: crate::faucet::MineTo, pay: &kaspa_addresses::Address) -> Result<serde_json::Value, String> {
     use crate::faucet::MineTo;
     let t0 = Instant::now();
+    catch_up(c, x).await?;
     let (round, target) = match to {
         MineTo::Deadline => {
             let (r, t) = live_where(x, |s| matches!(s, State::Controller(_)))
@@ -317,6 +318,14 @@ async fn mine_to(c: &KaspaRpcClient, x: &mut Indexer, starts: &Starts, to: crate
                 .max()
                 .ok_or("no live controller")?;
             (r, t as u64 + 5)
+        }
+        MineTo::Vault => {
+            // F6: the vault takes a request once the node's DAA score is past its creation DAA +
+            // VAULT_REQ_DELAY (vault checks D10, W12). The index first catches up, so the vault is the
+            // live one (a request the page just made moved it).
+            let v = live_where(x, |s| matches!(s, State::Vault(_))).next().ok_or("no live vault")?;
+            let r = live_where(x, |s| matches!(s, State::Controller(_))).filter_map(|l| if let Some(State::Controller(cc)) = &l.state { Some(cc.round) } else { None }).max().unwrap_or(0);
+            (r, v.daa + lottery::game::VAULT_REQ_DELAY as u64 + 5)
         }
         MineTo::Anchor | MineTo::Void => {
             let mk = live_where(x, |s| matches!(s, State::Marker(_))).find_map(|l| if let Some(State::Marker(mk)) = &l.state { Some(mk.round) } else { None }).ok_or("no closing round (no live marker)")?;

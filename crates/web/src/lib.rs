@@ -61,6 +61,9 @@ pub mod rounds;
 pub mod safe_json;
 /// My tickets (spec S2; F4): the ticket card, the claim row and the deposit return, from Rust.
 pub mod tickets;
+/// S5 Vault (spec S5; F6 part A): the vault's figures, the wallet's positions and requests, and the
+/// rows of a built request or settlement, bound to it.
+pub mod vault;
 pub mod views;
 /// The page's local store format (`webstore/2`, spec 6.3; front end F3 part B, F4): the records the
 /// page keeps in IndexedDB, declared here so the page has no hand-written copy of them.

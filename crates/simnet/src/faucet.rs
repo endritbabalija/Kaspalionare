@@ -75,6 +75,8 @@ pub enum MineTo {
     Anchor,
     /// Past the closing round's D + draw_window (only its void valid; about 864,000 blocks).
     Void,
+    /// F6: past the live vault's creation DAA + VAULT_REQ_DELAY (the vault takes a request).
+    Vault,
 }
 
 impl MineTo {
@@ -83,7 +85,8 @@ impl MineTo {
             Some("deadline") => Ok(MineTo::Deadline),
             Some("anchor") => Ok(MineTo::Anchor),
             Some("void") => Ok(MineTo::Void),
-            _ => Err("to=deadline, to=anchor or to=void is required".into()),
+            Some("vault") => Ok(MineTo::Vault),
+            _ => Err("to=deadline, to=anchor, to=void or to=vault is required".into()),
         }
     }
 }
@@ -97,7 +100,7 @@ struct State {
 
 /// Start the faucet on `bind` (loopback only); runs until the task is dropped. With `rounds`, it
 /// also takes `POST /round?main=a,b,c,d,e&bonus=n` (F4, the e2e suite's deterministic draws),
-/// `POST /close` (F4 review) and `POST /mine?to=deadline|anchor|void` (F5).
+/// `POST /close` (F4 review) and `POST /mine?to=deadline|anchor|void|vault` (F5, F6).
 pub async fn serve(bind: SocketAddr, c: Arc<KaspaRpcClient>, w: Wallet, spent: Spent, rounds: Option<tokio::sync::mpsc::Sender<DevRound>>) -> Result<tokio::task::JoinHandle<()>, String> {
     if !bind.ip().is_loopback() {
         return Err("--faucet-bind: the dev faucet binds to a loopback address only".into());
@@ -262,6 +265,7 @@ mod tests {
         assert_eq!(MineTo::parse("to=deadline"), Ok(MineTo::Deadline));
         assert_eq!(MineTo::parse("x=1&to=anchor"), Ok(MineTo::Anchor));
         assert_eq!(MineTo::parse("to=void"), Ok(MineTo::Void));
+        assert_eq!(MineTo::parse("to=vault"), Ok(MineTo::Vault));
         assert!(MineTo::parse("").is_err() && MineTo::parse("to=draw").is_err());
     }
 

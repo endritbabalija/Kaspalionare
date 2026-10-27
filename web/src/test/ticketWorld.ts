@@ -103,7 +103,10 @@ export class Sim {
 }
 
 export type Api = Partial<
-  Record<'tickets' | 'round' | 'purchases' | 'status' | 'anchorProof' | 'pools', (...a: unknown[]) => Promise<unknown>>
+  Record<
+    'tickets' | 'round' | 'purchases' | 'status' | 'anchorProof' | 'pools' | 'vault' | 'positions' | 'requests',
+    (...a: unknown[]) => Promise<unknown>
+  >
 >;
 
 /** A context on `sim`; `indexer` answers what the test gives (else indexer_unavailable); `calls` overrides wasm calls. */
@@ -157,6 +160,9 @@ export function ctxOf(
       purchases: down,
       status: down,
       pools: down,
+      vault: down,
+      positions: down,
+      requests: down,
       ...indexer,
     } as unknown as Ctx['indexer'],
   };

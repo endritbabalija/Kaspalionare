@@ -22,7 +22,21 @@ import { RoundCardView } from '@/screens/play/RoundCard';
 import { CallerPanel } from '@/components/CallerPanel';
 import { RoundRow } from '@/components/RoundRow';
 import { VerifyPanel } from '@/components/VerifyPanel';
+import { DepositPanel } from '@/components/DepositPanel';
+import { SettleRows } from '@/components/SettleRows';
+import { VaultFigures } from '@/components/VaultFigures';
+import { VaultPositionCard } from '@/components/VaultPositionCard';
+import { WithdrawPanel } from '@/components/WithdrawPanel';
 import { SAMPLE_CLOSE, SAMPLE_DRAW_LOW, SAMPLE_VERIFY } from './roundSamples';
+import {
+  SAMPLE_DEPOSIT,
+  SAMPLE_PAY,
+  SAMPLE_POSITION,
+  SAMPLE_REQUESTS,
+  SAMPLE_SETTLE,
+  SAMPLE_VAULT,
+  SAMPLE_WITHDRAW,
+} from './vaultSamples';
 import { claimView, SAMPLE_TX, sampleCard, sampleFigures, samplePending, sampleStored } from './ticketSamples';
 
 /** Searched for by scripts/check-bundle.mjs: present in development, absent from production bundles. */
@@ -30,6 +44,7 @@ export const CATALOGUE_MARKER = 'KASPALIONARE_DEV_CATALOGUE';
 
 const NOW = new Date(2026, 9, 25, 12, 0, 0).getTime();
 const VDAA = '13000';
+const CLOCK = { virtualDaa: VDAA, observedAt: NOW };
 const COV_TX = '9f3c0a11223344556677889900aabbccddeeff00112233445566778899b71e21';
 const ADDR = 'kaspatest:qqdasdj3abcdefghijklmnopqrstuvwxyz0123456789abcdefghijphyfvu';
 
@@ -350,6 +365,95 @@ function Sheet() {
             onPress={() => undefined}
             clock={{ virtualDaa: VDAA, observedAt: NOW }}
             testId="cat-caller-running"
+          />
+        </div>
+      </Row>
+      <Row name="Vault: ready · next request later · stale">
+        <div className="flex w-full flex-col gap-2">
+          <VaultFigures vault={{ ...SAMPLE_VAULT, requestOpen: true }} clock={CLOCK} testId="cat-vault-ready" />
+          <VaultFigures vault={SAMPLE_VAULT} clock={CLOCK} stale testId="cat-vault-stale" />
+        </div>
+      </Row>
+      <Row name="Vault position card: position · withdraw (part, built) · pending request · settle due · unknown">
+        <div className="flex w-full flex-col gap-2">
+          <VaultPositionCard position={SAMPLE_POSITION} testId="cat-vault-position" />
+          <VaultPositionCard position={SAMPLE_POSITION} testId="cat-vault-position-withdraw">
+            <WithdrawPanel
+              testId="cat-vault-withdraw"
+              position={SAMPLE_POSITION}
+              mode="part"
+              onMode={() => undefined}
+              amount="12"
+              onAmount={() => undefined}
+              figures={SAMPLE_WITHDRAW}
+              requestOpen
+              requestFrom="13300"
+              clock={CLOCK}
+              walletConnected
+              onRequest={() => undefined}
+            />
+          </VaultPositionCard>
+          <VaultPositionCard request={SAMPLE_REQUESTS.pending} testId="cat-vault-pending" />
+          <VaultPositionCard request={SAMPLE_REQUESTS.due} testId="cat-vault-due">
+            <SettleRows
+              testId="cat-vault-due-settle"
+              view={SAMPLE_SETTLE.settle}
+              round="11"
+              figures={SAMPLE_SETTLE}
+              walletConnected
+              onSettle={() => undefined}
+            />
+          </VaultPositionCard>
+          <VaultPositionCard request={{ ...SAMPLE_REQUESTS.due, kind: 'withdrawal' }} testId="cat-vault-due-pay">
+            <SettleRows
+              testId="cat-vault-due-pay-settle"
+              view={SAMPLE_PAY}
+              round="11"
+              estimating
+              walletConnected
+              onSettle={() => undefined}
+            />
+          </VaultPositionCard>
+          <VaultPositionCard request={SAMPLE_REQUESTS.unknown} testId="cat-vault-unknown" />
+        </div>
+      </Row>
+      <Row name="Deposit: empty · built (next request later) · running">
+        <div className="flex w-full flex-col gap-2">
+          <DepositPanel
+            testId="cat-deposit-empty"
+            minDeposit="1000000000"
+            amount=""
+            onAmount={() => undefined}
+            requestOpen
+            requestFrom="13300"
+            clock={CLOCK}
+            walletConnected
+            onRequest={() => undefined}
+          />
+          <DepositPanel
+            testId="cat-deposit-built"
+            minDeposit="1000000000"
+            amount="25"
+            onAmount={() => undefined}
+            figures={SAMPLE_DEPOSIT}
+            requestOpen={false}
+            requestFrom="13300"
+            clock={CLOCK}
+            walletConnected
+            onRequest={() => undefined}
+          />
+          <DepositPanel
+            testId="cat-deposit-running"
+            minDeposit="1000000000"
+            amount="25"
+            onAmount={() => undefined}
+            figures={SAMPLE_DEPOSIT}
+            tx={{ step: 'signed' }}
+            requestOpen
+            requestFrom="13300"
+            clock={CLOCK}
+            walletConnected
+            onRequest={() => undefined}
           />
         </div>
       </Row>

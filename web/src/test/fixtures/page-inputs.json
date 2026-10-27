@@ -1032,6 +1032,176 @@
       ]
     }
   },
+  "request_deposit": {
+    "amount": "1000000000",
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "2000000000",
+          "blockDaaScore": "1100000",
+          "covenantId": null,
+          "index": 1,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0200000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "owner": "kaspatest:qp5npard6zckmpndt8gs2j4xx2vtx46fnngcvth3dul4tuw2ln4cyp6lfyffr",
+    "vault": {
+      "state": "0106080100000000000000080080c6a47e8d0300080080c6a47e8d03000800000000000000000800000000000000000800800e63965e000020b215984bb31bb506330081d2aa05fd228120ee545df4f76634ca846784e4995020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c201a3e5d19c373d5b77ca5c59b542ced15d7675ce2e01e866b671ea80f9096e02a",
+      "utxo": {
+        "amount": "1000000169000000",
+        "blockDaaScore": "1000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa206821870e75642d3b0ab336e514852f18fd9c0f07af4af6aebe356f9a2272cc5d87",
+        "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "request_withdraw 0 partial": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qp5npard6zckmpndt8gs2j4xx2vtx46fnngcvth3dul4tuw2ln4cyp6lfyffr",
+      "coins": [],
+      "feeRate": 100
+    },
+    "owner": {
+      "coin": {
+        "amount": "1000000000",
+        "blockDaaScore": "1100000",
+        "covenantId": null,
+        "index": 2,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000206930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82ac",
+        "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+      },
+      "kind": "schnorr",
+      "publicKey": "6930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82"
+    },
+    "position": {
+      "state": "010b0801000000000000000800743ba40b0000000100216930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb8200",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "900000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20ed951c0b559b06d5a96206575b421b805498ef949bd2e8ea5cfeb38c3107dfa687",
+        "transactionId": "0200000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "shares": "10000000000",
+    "vault": {
+      "state": "0106080100000000000000080080c6a47e8d0300080080c6a47e8d03000800000000000000000800000000000000000800800e63965e000020b215984bb31bb506330081d2aa05fd228120ee545df4f76634ca846784e4995020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c201a3e5d19c373d5b77ca5c59b542ced15d7675ce2e01e866b671ea80f9096e02a",
+      "utxo": {
+        "amount": "1000000169000000",
+        "blockDaaScore": "1000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa206821870e75642d3b0ab336e514852f18fd9c0f07af4af6aebe356f9a2272cc5d87",
+        "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "request_withdraw 0 whole": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qp5npard6zckmpndt8gs2j4xx2vtx46fnngcvth3dul4tuw2ln4cyp6lfyffr",
+      "coins": [],
+      "feeRate": 100
+    },
+    "owner": {
+      "coin": {
+        "amount": "1000000000",
+        "blockDaaScore": "1100000",
+        "covenantId": null,
+        "index": 2,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000206930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82ac",
+        "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+      },
+      "kind": "schnorr",
+      "publicKey": "6930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82"
+    },
+    "position": {
+      "state": "010b0801000000000000000800743ba40b0000000100216930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb8200",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "900000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20ed951c0b559b06d5a96206575b421b805498ef949bd2e8ea5cfeb38c3107dfa687",
+        "transactionId": "0200000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "shares": "50000000000",
+    "vault": {
+      "state": "0106080100000000000000080080c6a47e8d0300080080c6a47e8d03000800000000000000000800000000000000000800800e63965e000020b215984bb31bb506330081d2aa05fd228120ee545df4f76634ca846784e4995020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c201a3e5d19c373d5b77ca5c59b542ced15d7675ce2e01e866b671ea80f9096e02a",
+      "utxo": {
+        "amount": "1000000169000000",
+        "blockDaaScore": "1000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa206821870e75642d3b0ab336e514852f18fd9c0f07af4af6aebe356f9a2272cc5d87",
+        "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "request_withdraw 1 partial": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [],
+      "feeRate": 100
+    },
+    "owner": {
+      "coin": {
+        "amount": "1000000000",
+        "blockDaaScore": "1100000",
+        "covenantId": null,
+        "index": 2,
+        "isCoinbase": false,
+        "scriptPublicKey": "000021036930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82ab",
+        "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+      },
+      "kind": "ecdsa",
+      "publicKey": "036930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82"
+    },
+    "position": {
+      "state": "010b0801000000000000000800743ba40b000000010121036930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb82",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "900000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa2064d114fe24077a50824398cba4e98711fcaff6ab44757f63923f7f1e957a15cf87",
+        "transactionId": "0200000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "shares": "10000000000",
+    "vault": {
+      "state": "0106080100000000000000080080c6a47e8d0300080080c6a47e8d03000800000000000000000800000000000000000800800e63965e000020b215984bb31bb506330081d2aa05fd228120ee545df4f76634ca846784e4995020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c201a3e5d19c373d5b77ca5c59b542ced15d7675ce2e01e866b671ea80f9096e02a",
+      "utxo": {
+        "amount": "1000000169000000",
+        "blockDaaScore": "1000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa206821870e75642d3b0ab336e514852f18fd9c0f07af4af6aebe356f9a2272cc5d87",
+        "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
   "return after": {
     "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
     "funds": {
@@ -1103,6 +1273,270 @@
         "scriptPublicKey": "0000aa200c85126edc18a56b9efaab26d23552d84c121782d0a86209b783d7b54d23ed6d87",
         "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
       }
+    }
+  },
+  "settle deposit": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "1000000000",
+          "blockDaaScore": "1300000",
+          "covenantId": null,
+          "index": 2,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "record": {
+      "state": "010808020000000000000020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c010008005ed0b20000000008c0c62d000000000008c0c62d000000000008c0c62d000000000008fd5dd0b200000000010021989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f00",
+      "utxo": {
+        "amount": "3168999997",
+        "blockDaaScore": "1200000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20e5d40b3d3df70464dcd42ea4e14be11206ea45a8617f65cbbd28eea382b8854687",
+        "transactionId": "0200000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "request": {
+      "state": "010708020000000000000001000800ca9a3b000000000100216930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb8200",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "1000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20c96208bb3a9a26234401e55af768a2d9281d906665c80d242ec7488eef21838987",
+        "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "settle deposit last": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "1000000000",
+          "blockDaaScore": "1300000",
+          "covenantId": null,
+          "index": 2,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "record": {
+      "state": "010808020000000000000020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c01000800ca9a3b000000000840420f00000000000800000000000000000800000000000000000800000000000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20908d48a2bf31736c87f1e20815d757782eb49bcfe34eab0bdf7843b9a4e94b3e87",
+        "transactionId": "7272727272727272727272727272727272727272727272727272727272727272"
+      }
+    },
+    "request": {
+      "state": "010708020000000000000001000800ca9a3b000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20efd09d1339dc64f4a1533af5f128c50562976b4402f9d17eda673d92316aab2387",
+        "transactionId": "7171717171717171717171717171717171717171717171717171717171717171"
+      }
+    }
+  },
+  "settle refund": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "1000000000",
+          "blockDaaScore": "1300000",
+          "covenantId": null,
+          "index": 2,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "record": {
+      "state": "010808020000000000000020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c01010800ca9a3b000000000800000000000000000800000000000000000800000000000000000800000000000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "1169000000",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa204899a209bff2486becd3ca2ce00d139a5f6e751a6183ba9ae2b39ce35356410587",
+        "transactionId": "7272727272727272727272727272727272727272727272727272727272727272"
+      }
+    },
+    "request": {
+      "state": "010708020000000000000001000800ca9a3b000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20efd09d1339dc64f4a1533af5f128c50562976b4402f9d17eda673d92316aab2387",
+        "transactionId": "7171717171717171717171717171717171717171717171717171717171717171"
+      }
+    }
+  },
+  "settle withdrawal": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "1000000000",
+          "blockDaaScore": "1300000",
+          "covenantId": null,
+          "index": 2,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "record": {
+      "state": "010808020000000000000020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c010008005ed0b20000000008c0c62d000000000008c0c62d000000000008c0c62d000000000008fd5dd0b200000000010021989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f00",
+      "utxo": {
+        "amount": "3168999997",
+        "blockDaaScore": "1200000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20e5d40b3d3df70464dcd42ea4e14be11206ea45a8617f65cbbd28eea382b8854687",
+        "transactionId": "0200000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "request": {
+      "state": "010708020000000000000001010840420f00000000000100216930f46dd0b16d866d59d1054aa63298b357499cd1862ef16f3f55f1cafceb8200",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "1000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa2075613c1bb425e16383f6f167d7ed5d3e2c538e48b7f34cbf8f3e846d96ef17e187",
+        "transactionId": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "settle withdrawal accrue": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "1000000000",
+          "blockDaaScore": "1300000",
+          "covenantId": null,
+          "index": 2,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "record": {
+      "state": "010808020000000000000020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c010008000000000000000008000000000000000008c0c62d000000000008e803000000000000083f420f00000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "169999999",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa2038a6e4abdd4c20c9b80800ce2232f80d5870e3f4ede745af2aaf971d143c848e87",
+        "transactionId": "7272727272727272727272727272727272727272727272727272727272727272"
+      }
+    },
+    "request": {
+      "state": "010708020000000000000001010840420f00000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20ea8ef7638064d148268cb98300aa2f6d1c57bfd83c2a0e413b786c44478faad587",
+        "transactionId": "7171717171717171717171717171717171717171717171717171717171717171"
+      }
+    }
+  },
+  "settle withdrawal pay": {
+    "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "funds": {
+      "change": "kaspatest:qzxh2qxafsfxshgl2695c26sfr59xju8xvvl82x65cftg6gn9mrlwpd0qe3zu",
+      "coins": [
+        {
+          "amount": "1000000000",
+          "blockDaaScore": "1300000",
+          "covenantId": null,
+          "index": 2,
+          "isCoinbase": false,
+          "scriptPublicKey": "0000208d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7ac",
+          "transactionId": "0300000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "feeRate": 100
+    },
+    "record": {
+      "state": "010808020000000000000020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c010008000000000000000008000000000000000008c0c62d00000000000860e316000000000008fe2e6859000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "1668999998",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 1,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa2026692bdc033a78431304a2b1613803298ea1aa753ca6b3e323bf30fa9bd661bf87",
+        "transactionId": "7272727272727272727272727272727272727272727272727272727272727272"
+      }
+    },
+    "request": {
+      "state": "010708020000000000000001010840420f00000000000100218d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f700",
+      "utxo": {
+        "amount": "169000000",
+        "blockDaaScore": "2000000",
+        "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+        "index": 0,
+        "isCoinbase": false,
+        "scriptPublicKey": "0000aa20ea8ef7638064d148268cb98300aa2f6d1c57bfd83c2a0e413b786c44478faad587",
+        "transactionId": "7171717171717171717171717171717171717171717171717171717171717171"
+      }
+    }
+  },
+  "vault at 2": {
+    "state": "0106080200000000000000080080c6a47e8d0300080080c6a47e8d03000800000000000000000800000000000000000800800e63965e000020b215984bb31bb506330081d2aa05fd228120ee545df4f76634ca846784e4995020d5ed4341c33fe93d4403c3cc45bd57117ab734a6d054bbcc5183e09a435cab5c201a3e5d19c373d5b77ca5c59b542ced15d7675ce2e01e866b671ea80f9096e02a",
+    "utxo": {
+      "amount": "1000000169000000",
+      "blockDaaScore": "2000000",
+      "covenantId": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+      "index": 0,
+      "isCoinbase": false,
+      "scriptPublicKey": "0000aa20536ef9704db1dbf3a0ec80f9b9bfc208a76d8e24d5eb75fa88a41b9fda69781e87",
+      "transactionId": "7070707070707070707070707070707070707070707070707070707070707070"
     }
   },
   "void absorbing 2": {

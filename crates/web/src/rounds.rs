@@ -43,7 +43,7 @@ pub struct Outpoint {
 }
 
 impl Outpoint {
-    fn of(u: &Utxo) -> Self {
+    pub(crate) fn of(u: &Utxo) -> Self {
         Outpoint { transaction_id: u.transaction_id.to_ascii_lowercase(), index: u.index }
     }
 }

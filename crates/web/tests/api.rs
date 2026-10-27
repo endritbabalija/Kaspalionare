@@ -1120,6 +1120,22 @@ fn page_fixtures() -> String {
         rounds.insert(name.into(), common::marked_round(&i));
     }
     m.insert("marked rounds".into(), serde_json::Value::Object(rounds));
+    // F6 (S5): the vault's requests and settlements of every mode, for the page's vault tests. A
+    // withdrawal's change goes to the owner's own address, as the page builds it.
+    m.insert("request_deposit".into(), common::fixture_input("request_deposit").json());
+    for name in ["request_withdraw 0 partial", "request_withdraw 0 whole"] {
+        let Input::Withdraw(mut w) = common::fixture_input(name) else { unreachable!() };
+        w.funds.change = api::address_of(Net::Testnet10, &w.owner.coin.script_public_key).unwrap();
+        m.insert(name.into(), Input::Withdraw(w).json());
+    }
+    for name in ["settle deposit", "settle withdrawal", "request_withdraw 1 partial"] {
+        m.insert(name.into(), common::fixture_input(name).json());
+    }
+    for (name, s) in common::vault_settles() {
+        m.insert(name, Input::Settle(s).json());
+    }
+    let Input::Deposit(d) = common::fixture_input("request_deposit") else { unreachable!() };
+    m.insert("vault at 2".into(), serde_json::to_value(common::vault_at(&d.covenant_id, 2)).unwrap());
     serde_json::to_string_pretty(&serde_json::Value::Object(m)).unwrap() + "\n"
 }
 

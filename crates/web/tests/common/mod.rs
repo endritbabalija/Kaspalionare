@@ -473,3 +473,63 @@ pub fn marked_round(i: &ClaimInput) -> serde_json::Value {
         "pools": pools,
     })
 }
+
+/// The page input of a fixture call by name (`lottery::web::fixtures::calls`).
+pub fn fixture_input(name: &str) -> Input {
+    let (_, c, _) = lottery::web::fixtures::calls().expect("fixture calls").into_iter().find(|(n, _, _)| n == name).unwrap_or_else(|| panic!("no fixture {name}"));
+    input(&c)
+}
+
+/// F6: the wallet of the fixture inputs as a vault owner (Schnorr P2PK of `WALLET_SK`).
+pub fn wallet_owner() -> Payout {
+    Payout::Schnorr(lottery::params::xonly(&WALLET_SK))
+}
+
+/// F6: the fixture vault (`vault::fixture_vault`) at `round`, as a live UTXO of `cov` holding A +
+/// pending deposits + R.
+pub fn vault_at(cov: &str, round: i64) -> CovUtxo {
+    let t = lottery::buy::Templates::get(lottery::buy::b_max());
+    let v = lottery::state::VaultState { round, ..lottery::vault::fixture_vault(&t) };
+    let value = (v.total_assets + v.pend_dep) as u64 + lottery::params::TEST_RESERVE;
+    live_utxo(cov, &lottery::index::State::Vault(v), 0x70, 0, value)
+}
+
+/// F6: settlements of the modes the fixture calls lack, as page inputs (the fixtures settle a
+/// converting deposit and a final withdrawal of `OWNER_SK`): a deposit refund draining its record
+/// (refund mode, D70), a withdrawal paid in part (PAY: the record converted about half its shares,
+/// D69's cap), one whose payout accrues (ACCRUE, below P_MIN), and the last deposit of a converting
+/// record (drained). Each request is the wallet's own (`wallet_owner`), each record funded by the
+/// wallet, both live UTXOs of the instance holding what the covenants require; the coins are the
+/// fixture settlement's.
+pub fn vault_settles() -> Vec<(String, SettleInput)> {
+    use lottery::index::State;
+    use lottery::state::{KIND_DEPOSIT, KIND_WITHDRAW, RecordState, RequestState};
+    let Input::Settle(base) = fixture_input("settle deposit") else { unreachable!() };
+    let t = lottery::buy::Templates::get(lottery::buy::b_max());
+    let r = lottery::params::TEST_RESERVE;
+    let me = wallet_owner();
+    let kas = lottery::buy::KAS as i64;
+    let v = lottery::vault::FIXTURE_VAULT;
+    let s = v / 1_000;
+    let conv = |d: i64, w: i64, l: i64| lottery::game::convert(v, s, d, w, l).expect("conversion").record(2, t.request.hash, &me).expect("a record");
+    let refund = RecordState { round: 2, request_tpl: t.request.hash, refund: 1, dep_rem: 10 * kas, mint_rem: 0, wsh_rem: 0, burn_rem: 0, out_rem: 0, funder_class: me.class(), funder_key: me.key33() };
+    let cases = [
+        ("settle refund", refund, RequestState::new(2, KIND_DEPOSIT, 10 * kas, &me)),
+        ("settle withdrawal pay", conv(0, 3_000_000, v - 15 * kas), RequestState::new(2, KIND_WITHDRAW, 1_000_000, &me)),
+        ("settle withdrawal accrue", conv(0, 3_000_000, v - 1_000_000), RequestState::new(2, KIND_WITHDRAW, 1_000_000, &me)),
+        ("settle deposit last", conv(10 * kas, 0, lottery::vault::FIXTURE_LIABILITY), RequestState::new(2, KIND_DEPOSIT, 10 * kas, &me)),
+    ];
+    cases
+        .into_iter()
+        .map(|(name, rc, rq)| {
+            let rec_value = rc.out_rem as u64 + rc.refund as u64 * rc.dep_rem as u64 + r;
+            let i = SettleInput {
+                covenant_id: base.covenant_id.clone(),
+                request: live_utxo(&base.covenant_id, &State::Request(rq), 0x71, 0, r),
+                record: live_utxo(&base.covenant_id, &State::Record(rc), 0x72, 1, rec_value),
+                funds: Funds { change: addr(&me), ..base.funds.clone() },
+            };
+            (name.to_string(), i)
+        })
+        .collect()
+}

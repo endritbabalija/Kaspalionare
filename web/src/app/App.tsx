@@ -6,6 +6,7 @@ import { MyTickets } from '@/screens/MyTickets';
 import { Play } from '@/screens/Play';
 import { Rounds } from '@/screens/Rounds';
 import { Placeholder } from '@/screens/Placeholder';
+import { Vault } from '@/screens/Vault';
 import { Wallet } from '@/screens/Wallet';
 import { useTheme } from '@/theme/useTheme';
 import { useWallet } from '@/wallet/context';
@@ -52,7 +53,7 @@ function Screens({ ctx }: { ctx: Ctx }) {
       screen = <Rounds />;
       break;
     case 'vault':
-      screen = <Placeholder title="Vault" testId="vault" />;
+      screen = <Vault />;
       break;
     case 'how':
       screen = <Placeholder title="How it works" testId="how" />;

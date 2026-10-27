@@ -221,6 +221,10 @@ codes! {
     /// Front end F5 (S4, design 12 liveness note): a warning, not a refusal: the built `close()`
     /// or `draw()`'s network fee is larger than its caller reward (C_close or C_draw).
     FeeAboveReward = 54, "fee_above_reward", "The network fee is larger than the caller reward.";
+    /// Front end F6 (S5): a vault request amount the vault does not take: a deposit below
+    /// MIN_DEPOSIT, or a withdrawal that is neither the whole position nor w >= wmin leaving a
+    /// remainder >= wmin (vault checks D5, W4, W4b; D85, D86).
+    VaultAmount = 55, "vault_amount", "The vault does not take this amount.";
 }
 
 impl fmt::Display for Code {

@@ -68,3 +68,15 @@ export function shortHash(v: string): string {
   const body = colon >= 0 ? v.slice(colon + 1) : v;
   return body.length <= 14 ? v : `${prefix}${body.slice(0, 6)}…${body.slice(-6)}`;
 }
+
+/**
+ * An amount typed in KAS ("12", "12.5", "0.00000001") as sompi, or null when it is not a plain decimal with at
+ * most 8 decimals (input reading only: the wasm decides what the vault takes).
+ */
+export function sompiOfKas(text: string): string | null {
+  const m = /^(\d{1,11})(?:\.(\d{1,8}))?$/.exec(text.trim());
+  if (!m) return null;
+  const whole = BigInt(m[1] as string);
+  const frac = BigInt((m[2] ?? '').padEnd(8, '0'));
+  return (whole * SOMPI_PER_KAS + frac).toString();
+}

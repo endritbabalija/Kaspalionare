@@ -115,6 +115,34 @@ export class Indexer {
     );
   }
 
+  /** The vault, the newest controller, the drawer and the live settlement records (S5; checked by the caller). */
+  async vault(): Promise<ApiObjects> {
+    const c = await this.caps();
+    return unwrap(await this.lottery.call('parseIndexerObjects', (await this.get('vault', c.objects)) ?? ''));
+  }
+
+  /** The share positions of `owner` (S5; each checked against the node and its owner by the caller). */
+  async positions(owner: string): Promise<ApiObjects> {
+    return this.owned('positions', owner);
+  }
+
+  /** The vault requests of `owner` and the live records of their rounds (S5; checked by the caller). */
+  async requests(owner: string): Promise<ApiObjects> {
+    return this.owned('requests', owner);
+  }
+
+  private async owned(what: 'positions' | 'requests', owner: string): Promise<ApiObjects> {
+    const c = await this.caps();
+    const o = unwrap(
+      await this.lottery.call(
+        'parseIndexerObjects',
+        (await this.get(`${what}?owner=${encodeURIComponent(owner)}`, c.objects)) ?? '',
+      ),
+    );
+    if (o.owner !== owner) throw new PageError('chain_mismatch', `${what}: asked for ${owner}, answered ${o.owner}`);
+    return o;
+  }
+
   /** The round's anchor proof (the spec 6.1 fallback), or null when the API has none. */
   async anchorProof(r: string): Promise<ApiAnchorProof | null> {
     const c = await this.caps();

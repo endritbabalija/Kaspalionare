@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clock, countdown, daaToMs, groupDigits, kas2, shortHash, sompiExact } from './format';
+import { clock, countdown, daaToMs, groupDigits, kas2, shortHash, sompiExact, sompiOfKas } from './format';
 
 describe('amounts', () => {
   it('prints KAS with two decimals, rounded half up', () => {
@@ -16,6 +16,15 @@ describe('amounts', () => {
     expect(sompiExact('4820000000000')).toBe('4,820,000,000,000');
     expect(sompiExact('13000000')).toBe('13,000,000');
     expect(groupDigits('285012')).toBe('285,012');
+  });
+  it('reads an amount typed in KAS as sompi (F6), refusing anything else', () => {
+    expect(sompiOfKas('10')).toBe('1000000000');
+    expect(sompiOfKas(' 12.5 ')).toBe('1250000000');
+    expect(sompiOfKas('0.00000001')).toBe('1');
+    expect(sompiOfKas('99999999999.99999999')).toBe('9999999999999999999');
+    for (const bad of ['', '.5', '1.', '1.123456789', '-1', '1e9', '1,5', '0x10', '123456789012', 'NaN']) {
+      expect(sompiOfKas(bad), bad).toBeNull();
+    }
   });
   it('refuses what is not a decimal', () => {
     expect(() => kas2('1e9')).toThrow();
