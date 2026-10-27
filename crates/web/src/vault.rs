@@ -175,15 +175,27 @@ pub struct VaultSummary {
     pub source: Outpoint,
 }
 
-/// The partial withdrawals W4b allows on a position: w from `least` to `most` shares.
+/// The partial withdrawals W4b allows on a position: w from `least` to `most` shares, and the amounts
+/// (sompi) `withdrawChoice` turns into them (F6 part A review S1: every amount from `least_amount` to
+/// `most_amount` is taken, and none outside).
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PartRange {
     pub least: Dec,
     pub most: Dec,
-    pub least_worth: Dec,
-    pub most_worth: Dec,
+    /// The smallest amount the vault takes: ceil(least (A + VA) / (S + VS)).
+    pub least_amount: Dec,
+    /// The largest amount the vault takes: its shares floor(a (S + VS) / (A + VA)) stay <= `most`.
+    pub most_amount: Dec,
+    /// What the page prints for them (exactly, never rounded again): `least_amount` rounded up and
+    /// `most_amount` rounded down to a whole SHOWN_STEP (0.01 KAS) when both stay inside the range,
+    /// else the exact amounts. Typed back, each is taken.
+    pub least_shown: Dec,
+    pub most_shown: Dec,
 }
+
+/// The page's KAS precision (2 decimals) in sompi: the step the Least and Most figures are rounded to.
+pub const SHOWN_STEP: u64 = 1_000_000;
 
 /// A share position of the wallet (spec 4 "Vault position card": position).
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -309,14 +321,40 @@ pub struct VaultPage {
     pub foreign: u32,
 }
 
+/// The shares `withdrawChoice` takes for an amount: floor(a (S + VS) / (A + VA)). `part_range`
+/// inverts it, so the two must stay the same formula.
+fn shares_for(a: u128, v: &VaultState) -> Option<u128> {
+    a.checked_mul(v.total_shares as u128 + VS as u128).map(|x| x / (v.total_assets as u128 + VA as u128))
+}
+
+/// W4b's part range on a position, as amounts: w from wmin to min(shares - wmin, S - pend_wsh) (W4b,
+/// W4), and the amounts whose `shares_for` lands in it. None when no amount does (a range narrower
+/// than one sompi's worth of shares) or the position is below 2 wmin.
 fn part_range(v: &VaultState, shares: i64) -> Option<PartRange> {
     let wm = game::w_min(v.total_assets, v.total_shares);
-    let most = shares.checked_sub(wm)?;
-    (most >= wm && wm >= 1).then(|| PartRange {
+    let most = shares.checked_sub(wm)?.min(v.total_shares.checked_sub(v.pend_wsh)?);
+    if wm < 1 || most < wm {
+        return None;
+    }
+    let n = v.total_assets as u128 + VA as u128;
+    let d = v.total_shares as u128 + VS as u128;
+    // The smallest a with a d >= wm n, and the largest a with a d < (most + 1) n.
+    let lo = (wm as u128 * n).div_ceil(d);
+    let hi = ((most as u128 + 1) * n - 1) / d;
+    if lo > hi || lo == 0 {
+        return None;
+    }
+    debug_assert!(shares_for(lo, v) >= Some(wm as u128) && shares_for(hi, v) <= Some(most as u128));
+    let step = SHOWN_STEP as u128;
+    let (ls, ms) = (lo.div_ceil(step) * step, hi / step * step);
+    let (ls, ms) = if ls <= ms { (ls, ms) } else { (lo, hi) };
+    Some(PartRange {
         least: wm.to_string(),
         most: most.to_string(),
-        least_worth: worth(wm, v).to_string(),
-        most_worth: worth(most, v).to_string(),
+        least_amount: lo.to_string(),
+        most_amount: hi.to_string(),
+        least_shown: ls.to_string(),
+        most_shown: ms.to_string(),
     })
 }
 
@@ -511,7 +549,7 @@ pub fn withdraw_choice(_net: Net, i: &WithdrawChoiceInput) -> Result<WithdrawCho
         Some(a) => {
             let a = dec("amount", a)?;
             // The shares worth at most `a` at today's price: floor(a (S + VS) / (A + VA)).
-            let q = (a as u128).checked_mul(v.total_shares as u128 + VS as u128).ok_or_else(|| amount_err("amount out of range"))? / (v.total_assets as u128 + VA as u128);
+            let q = shares_for(a as u128, &v).ok_or_else(|| amount_err("amount out of range"))?;
             i64::try_from(q).map_err(|_| amount_err("amount out of range"))?
         }
     };

@@ -2,18 +2,20 @@
 // chain state or the wasm and are only formatted here.
 import { useState } from 'react';
 import { cn } from '@/lib/cn';
-import { kas2, sompiExact } from '@/lib/format';
+import { kas2, kasExact, sompiExact } from '@/lib/format';
 
 export interface AmountProps {
   /** Sompi, a decimal string. */
   sompi: string;
+  /** KAS exactly, in the form the amount field reads (`kasExact`), instead of 2 decimals. */
+  exact?: boolean;
   className?: string;
   testId?: string;
 }
 
-export function Amount({ sompi, className, testId = 'amount' }: AmountProps) {
+export function Amount({ sompi, exact: plain = false, className, testId = 'amount' }: AmountProps) {
   const [exact, setExact] = useState(false);
-  const text = exact ? `${sompiExact(sompi)} sompi` : `${kas2(sompi)} KAS`;
+  const text = exact ? `${sompiExact(sompi)} sompi` : `${plain ? kasExact(sompi) : kas2(sompi)} KAS`;
   return (
     <button
       type="button"

@@ -4,14 +4,27 @@
 // records what the flow asks for; the point is what the page does between a conflict, a lost answer or a
 // closed round and the next signature, not the transactions themselves (the post-sign tests run those on the
 // real wasm).
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Signed } from '@wasm/web.js';
 import { PageError } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { MemoryKV } from '@/store/kv';
 import { WebStore } from '@/store/webstore';
 import type { WalletAdapter } from '@/wallet/types';
-import { buy, loadSales, prepareBuy, prepareWithReferral, type BuyEnv, type BuyEvent, type Prepared } from './buyFlow';
+import {
+  buy,
+  forgetRefused,
+  loadSales,
+  prepareBuy,
+  prepareWithReferral,
+  type BuyEnv,
+  type BuyEvent,
+  type Prepared,
+} from './buyFlow';
+
+// The stand-in builds reuse transaction IDs (tx-<round>-<shard>) from test to test: each test starts from a page
+// that has seen no refusal (F6 part A review N1).
+afterEach(() => forgetRefused());
 
 const COV = 'aa'.repeat(32);
 

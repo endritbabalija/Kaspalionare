@@ -15,7 +15,7 @@ import type { BuiltTx, CallerFigures, CloseInput, CovUtxo, DrawInput } from '@wa
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { coinsFor } from '@/play/buyFlow';
-import { sendAndWait, type SendEnv, type SendEvent, type Watched } from '@/tickets/send';
+import { sendAndWait, unrefused, type SendEnv, type SendEvent, type Watched } from '@/tickets/send';
 import type { WalletAdapter } from '@/wallet/types';
 import { anchorBlockOf, liveRound, objectsOf, type DetailData } from './load';
 
@@ -53,6 +53,8 @@ export interface CallerEnv {
   ctx: Ctx;
   wallet: WalletAdapter;
   address: string;
+  /** The pause between builds after a refusal (`unrefused`; tests). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface PreparedCaller {
@@ -112,8 +114,15 @@ export async function expiredPools(
   return a.pools;
 }
 
-/** Build the due transition of round `d` from its live, checked objects; the panel's rows bound to it. */
-export async function prepareCaller(env: CallerEnv, d: DetailData, action: CallerAction): Promise<PreparedCaller> {
+/**
+ * Build the due transition of round `d` from its live, checked objects; the panel's rows bound to it. Never one the
+ * node has just refused (`unrefused`, F6 part A review N1).
+ */
+export function prepareCaller(env: CallerEnv, d: DetailData, action: CallerAction): Promise<PreparedCaller> {
+  return unrefused(() => callerOnce(env, d, action), env.sleep);
+}
+
+async function callerOnce(env: CallerEnv, d: DetailData, action: CallerAction): Promise<PreparedCaller> {
   const { ctx } = env;
   const covenantId = ctx.config.covenantId;
   const r = d.checked.round;

@@ -10,6 +10,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { ApiObject, CovUtxo, DepositInput, QuickKey, SettleInput, Utxo, WithdrawInput } from '@wasm/web.js';
 import { unwrap } from '@/lib/errors';
+import { kasExact, sompiOfKas } from '@/lib/format';
 import { MemoryKV } from '@/store/kv';
 import fixtures from '@/test/fixtures/page-inputs.json';
 import { ctxOf, fast, lottery, need, Sim } from '@/test/ticketWorld';
@@ -208,7 +209,16 @@ describe('withdrawal request (spec S5, design 5.4, D86)', () => {
     expect(part.figures.positionNext?.index).toBe(2);
     // Amounts the vault does not take: below wmin's worth, or leaving less than wmin.
     await expect(prepareWithdraw(env, d, pos, '500000000')).rejects.toMatchObject({ code: 'vault_amount' });
-    const most = BigInt(need(pos.partial).mostWorth);
+    // Least and Most as the panel prints them, typed back (F6 part A review S1): both taken.
+    const range = need(pos.partial);
+    for (const shown of [range.leastShown, range.mostShown, range.leastAmount, range.mostAmount]) {
+      const typed = need(sompiOfKas(kasExact(shown)));
+      await expect(prepareWithdraw(env, d, pos, typed)).resolves.toMatchObject({ kind: 'withdraw' });
+    }
+    await expect(prepareWithdraw(env, d, pos, String(BigInt(range.leastAmount) - 1n))).rejects.toMatchObject({
+      code: 'vault_amount',
+    });
+    const most = BigInt(need(pos.partial).mostAmount);
     await expect(prepareWithdraw(env, d, pos, String(most + 200_000_000n))).rejects.toMatchObject({
       code: 'vault_amount',
     });

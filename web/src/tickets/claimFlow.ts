@@ -24,7 +24,7 @@ import type { Ctx } from '@/net/round';
 import { coinsFor } from '@/play/buyFlow';
 import type { WebStore } from '@/store/webstore';
 import type { WalletAdapter } from '@/wallet/types';
-import { sendAndWait, type SendEnv, type SendEvent, type Watched } from './send';
+import { sendAndWait, unrefused, type SendEnv, type SendEvent, type Watched } from './send';
 
 /** What a claim or a return is built from: the ticket's live entry and the round's chain objects. */
 export interface TicketChain {
@@ -43,6 +43,8 @@ export interface ActEnv {
   wallet: WalletAdapter;
   /** The wallet's address: it pays the fee and gets the change. */
   address: string;
+  /** The pause between builds after a refusal (`unrefused`; tests). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 async function funds(env: ActEnv) {
@@ -61,7 +63,12 @@ export interface PreparedClaim {
   figures: ClaimFigures;
 }
 
-export async function prepareClaim(env: ActEnv, t: TicketChain, index: number): Promise<PreparedClaim> {
+/** Build a claim, never one the node has just refused (`unrefused`, F6 part A review N1). */
+export function prepareClaim(env: ActEnv, t: TicketChain, index: number): Promise<PreparedClaim> {
+  return unrefused(() => buildClaimOnce(env, t, index), env.sleep);
+}
+
+async function buildClaimOnce(env: ActEnv, t: TicketChain, index: number): Promise<PreparedClaim> {
   const { ctx } = env;
   const input: ClaimInput = {
     covenantId: ctx.config.covenantId,
@@ -92,7 +99,12 @@ export interface PreparedReturn {
   figures: ReturnFigures;
 }
 
-export async function prepareReturn(env: ActEnv, t: TicketChain): Promise<PreparedReturn> {
+/** Build a deposit return, never one the node has just refused (`unrefused`). */
+export function prepareReturn(env: ActEnv, t: TicketChain): Promise<PreparedReturn> {
+  return unrefused(() => buildReturnOnce(env, t), env.sleep);
+}
+
+async function buildReturnOnce(env: ActEnv, t: TicketChain): Promise<PreparedReturn> {
   const { ctx } = env;
   const r = t.card.returnable;
   if (!r) throw new Error('return_deposit() is not valid for this ticket yet');

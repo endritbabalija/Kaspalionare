@@ -164,7 +164,7 @@ describe('DepositPanel and WithdrawPanel', () => {
     expect(screen.getByTestId('d-from')).toBeTruthy();
     expect((screen.getByTestId('d-button') as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId('w').dataset.mode).toBe('part');
-    expect(screen.getByTestId('w-least').dataset.sompi).toBe(SAMPLE_POSITION.partial?.leastWorth);
+    expect(screen.getByTestId('w-least').dataset.sompi).toBe(SAMPLE_POSITION.partial?.leastShown);
     expect(screen.getByTestId('w-left').textContent).toBe('1,300,000,000 shares');
     expect(screen.queryByTestId('w-terms-refund')).toBeNull();
     expect((screen.getByTestId('w-button') as HTMLButtonElement).disabled).toBe(false);

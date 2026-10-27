@@ -102,35 +102,50 @@ async function claim(page: Page, txid: string, index: number) {
   const button = c.getByTestId(new RegExp(`-claim-${index}-button$`));
   await expect(button).toBeEnabled({ timeout: 90_000 });
   await button.click();
-  // Accepted: the row's progress says so, or (a last claim) the card has ended as claimed.
-  const progress = c.getByTestId(new RegExp(`-claim-${index}-progress$`)).getByTestId('tx-progress');
+  // Accepted: the card has ended as claimed (a last claim), or the row's progress says so.
   await expect
     .poll(
-      async () =>
-        (await c.getAttribute('data-state')) === 'claimed' ||
-        ((await progress.count()) > 0 && (await progress.getAttribute('data-step')) === 'accepted'),
+      async () => {
+        const now = await progressOf(page, txid, index);
+        return now.claimed || now.step === 'accepted';
+      },
       { timeout: 150_000 },
     )
     .toBe(true);
 }
 
-/** A claim row's progress now: its transaction ID (once signed), its step, and whether it failed. */
+/**
+ * A claim row's progress now: whether its card has ended as claimed, the row's transaction ID (once signed), its
+ * step, and whether it failed. Read in one evaluate (F6 part A review S2): a locator read waits for its element
+ * with no time limit, and the row or the card can unmount between a count and a read (a claim that ends the card),
+ * which hung the F4 test until its 40-minute timeout. A card or row not on the page reads as nothing.
+ */
 interface Progress {
+  claimed: boolean;
   id: string | null;
   step: string | null;
   failed: boolean;
 }
 
 async function progressOf(page: Page, txid: string, index: number): Promise<Progress> {
-  const row = card(page, txid).getByTestId(new RegExp(`-claim-${index}-progress$`));
-  const p = row.getByTestId('tx-progress');
-  const id = row.getByTestId(new RegExp(`-claim-${index}-txid$`));
-  if (!(await p.count())) return { id: null, step: null, failed: false };
-  return {
-    id: (await id.count()) ? await id.getAttribute('data-value') : null,
-    step: await p.getAttribute('data-step'),
-    failed: (await p.getAttribute('data-failed')) === 'true',
-  };
+  const none: Progress = { claimed: false, id: null, step: null, failed: false };
+  const read = card(page, txid).evaluateAll(
+    (cards, i): Progress[] =>
+      cards.map((c) => {
+        const row = c.querySelector(`[data-testid$="-claim-${i}-progress"]`);
+        const p = row?.querySelector('[data-testid="tx-progress"]');
+        const id = row?.querySelector(`[data-testid$="-claim-${i}-txid"]`);
+        return {
+          claimed: c.getAttribute('data-state') === 'claimed',
+          id: p ? (id?.getAttribute('data-value') ?? null) : null,
+          step: p?.getAttribute('data-step') ?? null,
+          failed: p?.getAttribute('data-failed') === 'true',
+        };
+      }),
+    index,
+  );
+  // A page in the middle of a navigation has no document to read: nothing this time, read again next look.
+  return (await read.catch(() => [none]))[0] ?? none;
 }
 
 /**
@@ -152,13 +167,13 @@ async function outcomeAfter(page: Page, txid: string, index: number, before: Pro
   let started = false;
   let id: string | null = null;
   while (Date.now() < until) {
-    const c = card(page, txid);
     const now = await progressOf(page, txid, index);
+    // A card that ended claimed: this press went through (its row is gone with the card's claim rows).
+    if (now.claimed) return log('accepted');
     // Only an earlier press's failure can be stale: without one, any state is this press's.
     started ||= !before.failed || !now.failed || (now.id !== null && now.id !== before.id);
     if (started && now.id) id = now.id;
     if (started && now.step === 'accepted') return log('accepted');
-    if ((await c.getAttribute('data-state')) === 'claimed') return log('accepted');
     if (started && now.failed) return log('failed');
     await page.waitForTimeout(500);
   }
@@ -285,6 +300,15 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   await p2.getByTestId('quick-import').click();
   await expect(p2.getByTestId('wallet-status')).toHaveText('Quick wallet');
   await ticketsUntil(p2, async () => (await card(p2, t3).getAttribute('data-state')) === 'win');
+  // The page's own warnings in the race (a refusal's code and detail), for the log.
+  for (const [who, pg] of [
+    ['T2', page],
+    ['T3', p2],
+  ] as const) {
+    pg.on('console', (m) => {
+      if (m.type() === 'warning' || m.type() === 'error') console.log(`${who} page: ${m.text().slice(0, 240)}`);
+    });
+  }
   const b2 = card(page, t2).getByTestId(/-claim-1-button$/);
   const b3 = card(p2, t3).getByTestId(/-claim-0-button$/);
   await expect(b2).toBeEnabled({ timeout: 90_000 });
@@ -312,9 +336,13 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
       // A card that ended claimed needs no press (the last press went through after all).
       await ticketsUntil(
         p,
-        async () => (await card(p, t).getAttribute('data-state')) === 'claimed' || (await button().isEnabled()),
+        async () =>
+          (await progressOf(p, t, i)).claimed ||
+          (await button()
+            .isEnabled({ timeout: 2_000 })
+            .catch(() => false)),
       );
-      if ((await card(p, t).getAttribute('data-state')) === 'claimed') {
+      if ((await progressOf(p, t, i)).claimed) {
         last = 'accepted';
         break;
       }

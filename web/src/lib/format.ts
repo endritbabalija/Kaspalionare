@@ -27,6 +27,21 @@ export function kas2(sompi: string): string {
   return `${neg ? '-' : ''}${groupDigits(whole.toString())}.${frac}`;
 }
 
+/**
+ * Sompi as KAS exactly, 2 to 8 decimals and no digit grouping ("2510000" -> "0.0251", "3000000" -> "0.03"): the
+ * form the amount field reads back (`sompiOfKas`), for figures a player types in again (F6 part A review S1).
+ */
+export function kasExact(sompi: string): string {
+  const v = big(sompi);
+  const neg = v < 0n;
+  const a = neg ? -v : v;
+  const frac = (a % SOMPI_PER_KAS)
+    .toString()
+    .padStart(8, '0')
+    .replace(/0{1,6}$/, '');
+  return `${neg ? '-' : ''}${(a / SOMPI_PER_KAS).toString()}.${frac}`;
+}
+
 /** Exact sompi, grouped ("4820000000000" -> "4,820,000,000,000"). */
 export function sompiExact(sompi: string): string {
   const v = big(sompi);

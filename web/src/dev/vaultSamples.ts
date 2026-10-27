@@ -54,7 +54,14 @@ export const SAMPLE_POSITION: PositionCard = {
   worth: '2499999999',
   owner: ADDR,
   ownerKey: '11'.repeat(32),
-  partial: { least: '1000000000', most: '1500000000', leastWorth: '999999999', mostWorth: '1499999999' },
+  partial: {
+    least: '1000000000',
+    most: '1500000000',
+    leastAmount: '1000000000',
+    mostAmount: '1500000000',
+    leastShown: '1000000000',
+    mostShown: '1500000000',
+  },
   source: { transactionId: TX, index: 1 },
 };
 

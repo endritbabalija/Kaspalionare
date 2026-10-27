@@ -9,6 +9,10 @@
 //! - `withdraw_choices_are_what_the_vault_takes`: W4/W4b on amounts (whole, the least and most
 //!   partial, below wmin, a remainder below wmin, more than the position) as `vault_amount`, and
 //!   the chosen shares accepted by the builder.
+//! - `least_and_most_are_amounts_the_vault_takes` (F6 part A review S1): over 400 vaults, the exact
+//!   and the shown Least and Most are taken by `withdrawChoice` and one sompi outside is not.
+//! - `vault_builders_cap_the_fee_rate`, `a_consistent_build_with_another_lock_time_is_refused` (the
+//!   review's probe; N2: the lock-time check's negative control).
 //! - `deposit_figures_are_bound_to_the_transaction`, `withdraw_figures_are_bound_to_the_transaction`,
 //!   `settle_figures_are_bound_to_the_transaction`: each figure set equals what the transaction does;
 //!   any input field that differs from the build's (amount, owner, vault, position, shares, request,
@@ -171,9 +175,17 @@ fn withdraw_choices_are_what_the_vault_takes() {
     assert!(whole.whole && n(&whole.shares) == p.shares && whole.remainder == "0");
     // An amount takes the shares worth at most that much today: floor(a (S + VS) / (A + VA)).
     let shares_for = |a: u64| ((a as u128 * (v.total_shares as u128 + 1_000)) / (v.total_assets as u128 + 1)) as i64;
+    // The view's Least and Most (F6 part A review S1): the exact bounds, no slack.
+    let p_owner = addr(&Payout::from_fields(p.owner_class, &p.owner_key));
+    let view = vault_view(N, &VaultViewInput { positions: vec![wp.position.clone()], ..view_input(wp.vault.clone(), Some(p_owner)) }).unwrap();
+    let pr = view.positions[0].partial.clone().expect("a part range");
+    let (lo, hi) = (n(&pr.least_amount) as u64, n(&pr.most_amount) as u64);
     for (a, ok) in [
         (20 * MIN_DEPOSIT as u64, true),
-        (lottery::vault::position_worth(wm, v.total_assets, v.total_shares) as u64 + 2, true),
+        (lo, true),
+        (lo - 1, false),
+        (hi, true),
+        (hi + 1, false),
         (5 * lottery::buy::KAS, false),
         (lottery::vault::position_worth(p.shares - wm + 2, v.total_assets, v.total_shares) as u64, false),
         (lottery::vault::position_worth(p.shares, v.total_assets, v.total_shares) as u64 + 10 * lottery::buy::KAS, false),
@@ -334,4 +346,120 @@ fn every_settlement_mode_settles_from_the_page() {
         assert!(modes.iter().any(|x| x.0 == m), "{m:?} not exercised");
     }
     assert!(modes.iter().any(|x| x.1) && modes.iter().any(|x| !x.1), "drained and not drained");
+}
+
+/// A test position (A, S, shares, pending withdrawal shares) on the fixture vault's other fields.
+fn part_case(cov: &str, i: usize, a: i64, s: i64, shares: i64, pend_wsh: i64) -> (CovUtxo, CovUtxo, VaultPage) {
+    let t = lottery::buy::Templates::get(lottery::buy::b_max());
+    let base = lottery::vault::fixture_vault(&t);
+    let me = wallet_owner();
+    let vs = lottery::state::VaultState { total_assets: a, total_shares: s, pend_dep: 0, pend_wsh, liability: 0, ..base };
+    let v = live_utxo(cov, &State::Vault(vs), 0x70, 0, a as u64 + lottery::params::TEST_RESERVE);
+    let p = live_utxo(cov, &State::Position(PositionState::new(1, shares, &Payout::from_fields(me.class(), &me.key33()))), 0x71 ^ (i as u8), 1, lottery::params::TEST_RESERVE);
+    let view = vault_view(N, &VaultViewInput { covenant_id: cov.into(), vault: v.clone(), positions: vec![p.clone()], requests: vec![], records: vec![], owner: Some(addr(&me)), virtual_daa_score: "3000000".into() }).unwrap();
+    (v, p, view)
+}
+
+#[test]
+fn least_and_most_are_amounts_the_vault_takes() {
+    let cov = deposit().covenant_id;
+    // (A, S, position shares, pending withdrawal shares)
+    let mut cases: Vec<(i64, i64, i64, i64)> = vec![
+        (2_500_000_000, 2_500_000_000_000, 2_500_000_000_000, 0), // the e2e's first deposit (price 0.001)
+        (3_500_000_000, 3_400_000_000_000, 2_500_000_000_000, 0),
+        (1_000_000_000_000_000, 1_000_000_000_000_000, 50_000_000_000, 0), // the fixture vault
+    ];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut rnd = |m: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % m
+    };
+    for _ in 0..400 {
+        let a = 1_000_000_000 + rnd(100_000_000_000_000) as i64;
+        let k = 1 + rnd(3000) as i64;
+        let s = (a / 1000) * k + rnd(1000) as i64;
+        let wm = game::w_min(a, s);
+        // Mostly wide ranges, some within a few shares of 2 wmin (narrower than 0.01 KAS).
+        let shares = if rnd(4) == 0 { 2 * wm + rnd(4) as i64 } else { 2 * wm + rnd((8 * wm) as u64) as i64 };
+        if shares > s {
+            continue;
+        }
+        cases.push((a, s, shares, 0));
+    }
+    let take = |v: &CovUtxo, p: &CovUtxo, a: u64| withdraw_choice(N, &WithdrawChoiceInput { covenant_id: cov.clone(), vault: v.clone(), position: p.clone(), amount: Some(a.to_string()) });
+    let (mut ranges, mut rounded, mut none) = (0, 0, 0);
+    for (i, (a, s, shares, pend)) in cases.into_iter().enumerate() {
+        let (v, p, view) = part_case(&cov, i, a, s, shares, pend);
+        let Some(pr) = view.positions[0].partial.clone() else {
+            none += 1;
+            continue;
+        };
+        ranges += 1;
+        let (lo, hi, ls, ms) = (n(&pr.least_amount) as u64, n(&pr.most_amount) as u64, n(&pr.least_shown) as u64, n(&pr.most_shown) as u64);
+        let ctx = format!("A {a} S {s} shares {shares} pend {pend}: {pr:?}");
+        assert!(lo <= ls && ls <= ms && ms <= hi, "{ctx}");
+        if ls % SHOWN_STEP == 0 && ms % SHOWN_STEP == 0 {
+            rounded += 1;
+        } else {
+            assert_eq!((ls, ms), (lo, hi), "shown is rounded or exact: {ctx}");
+        }
+        for amount in [lo, hi, ls, ms] {
+            let c = take(&v, &p, amount).unwrap_or_else(|e| panic!("{amount} refused: {e} ({ctx})"));
+            assert!(!c.whole && n(&c.shares) >= n(&pr.least) && n(&c.shares) <= n(&pr.most), "{ctx}");
+        }
+        for amount in [lo - 1, hi + 1] {
+            assert_eq!(take(&v, &p, amount).map(|c| c.shares).unwrap_err().code, Code::VaultAmount, "{amount}: {ctx}");
+        }
+    }
+    println!("part ranges {ranges} (shown at 0.01 KAS: {rounded}, exact: {}), none {none}", ranges - rounded);
+    assert!(ranges > 300 && rounded > 0 && rounded < ranges, "both kinds of shown range exercised");
+}
+
+#[test]
+fn vault_builders_cap_the_fee_rate() {
+    let d = deposit();
+    let w = withdraw("request_withdraw 0 partial");
+    let s = settle("settle deposit");
+    for rate in [1000u32, 1001, u32::MAX] {
+        let dr = api::build_request_deposit(N, &DepositInput { funds: Funds { fee_rate: rate, ..d.funds.clone() }, ..d.clone() });
+        let wr = api::build_request_withdraw(N, &WithdrawInput { funds: Funds { fee_rate: rate, ..w.funds.clone() }, ..w.clone() });
+        let sr = api::build_settle(N, &SettleInput { funds: Funds { fee_rate: rate, ..s.funds.clone() }, ..s.clone() });
+        for r in [&dr, &wr, &sr] {
+            if rate > 1000 {
+                assert_eq!(r.as_ref().unwrap_err().code, Code::FeeRate, "rate {rate}");
+            } else {
+                assert!(r.is_ok(), "rate {rate}");
+            }
+        }
+    }
+}
+
+/// N2: a self-consistent build (summary, id and masses recomputed by `built_tx`) whose lock time is
+/// not the vault's creation DAA + VAULT_REQ_DELAY is refused by the figures (the check's control).
+#[test]
+fn a_consistent_build_with_another_lock_time_is_refused() {
+    let d = deposit();
+    let built = api::build_request_deposit(N, &d).unwrap();
+    let df = |b: BuiltTx| deposit_figures(N, &DepositFiguresInput { covenant_id: d.covenant_id.clone(), vault: d.vault.clone(), amount: d.amount.clone(), owner: d.owner.clone(), built: b });
+    assert!(df(built.clone()).is_ok());
+    let relock = |b: &BuiltTx, delta: i64| {
+        let mut u = api::unsigned_of(N, b).unwrap();
+        u.tx.lock_time = (u.tx.lock_time as i64 + delta) as u64;
+        u.tx.finalize();
+        api::built_tx(N, &u).unwrap()
+    };
+    // + 1: the covenant takes a later lock time (lower-bound checks only), so only the page's check
+    // refuses it; - 1: the engine refuses it already (vault D10).
+    assert_eq!(code(df(relock(&built, 1))), Code::BuiltMismatch, "deposit lock time + 1");
+    assert!(df(relock(&built, -1)).is_err(), "deposit lock time - 1");
+    for name in ["request_withdraw 0 partial", "request_withdraw 0 whole"] {
+        let wi = withdraw(name);
+        let built = api::build_request_withdraw(N, &wi).unwrap();
+        let wf = |b: BuiltTx| withdraw_figures(N, &WithdrawFiguresInput { covenant_id: wi.covenant_id.clone(), vault: wi.vault.clone(), position: wi.position.clone(), shares: wi.shares.clone(), built: b });
+        assert!(wf(built.clone()).is_ok(), "{name}");
+        assert_eq!(code(wf(relock(&built, 1))), Code::BuiltMismatch, "{name}: lock time + 1");
+        assert!(wf(relock(&built, -1)).is_err(), "{name}: lock time - 1");
+    }
 }

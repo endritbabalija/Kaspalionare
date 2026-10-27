@@ -9,8 +9,34 @@ import type { ApiObject, BuiltTx, Signed, Utxo } from '@wasm/web.js';
 import type { TxStep } from '@/components/TxProgress';
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
-import { settleSubmit, signAndSubmit } from '@/play/buyFlow';
+import { refusedLately, settleSubmit, signAndSubmit } from '@/play/buyFlow';
 import type { WalletAdapter } from '@/wallet/types';
+
+/** How often, and how far apart, `unrefused` builds again. */
+export const UNREFUSED = { tries: 5, delayMs: 2_000 };
+
+/**
+ * Build with `make` until its transaction ID is not one the node has just refused (F6 part A review N1): a build
+ * made right after a conflict, from a node whose UTXO index has not caught up yet, comes out the very transaction
+ * the node refused; it is built again after a pause, never offered or sent. Still the same after the tries:
+ * node_conflict (the next read builds again).
+ */
+export async function unrefused<T extends { built: BuiltTx }>(
+  make: () => Promise<T>,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+): Promise<T> {
+  for (let i = 1; ; i++) {
+    const p = await make();
+    if (!refusedLately(p.built.id)) return p;
+    if (i >= UNREFUSED.tries) {
+      throw new PageError(
+        'node_conflict',
+        `transaction ${p.built.id}: refused a moment ago and built the same ${i} times; the node has not caught up`,
+      );
+    }
+    await sleep(UNREFUSED.delayMs);
+  }
+}
 
 /** One output of a built transaction, to look for on the node. */
 export interface Watched {

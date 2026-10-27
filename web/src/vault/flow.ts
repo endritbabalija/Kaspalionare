@@ -25,7 +25,7 @@ import type {
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { coinsFor } from '@/play/buyFlow';
-import { sendAndWait, type SendEnv, type SendEvent, type Watched } from '@/tickets/send';
+import { sendAndWait, unrefused, type SendEnv, type SendEvent, type Watched } from '@/tickets/send';
 import type { WalletAdapter } from '@/wallet/types';
 import type { VaultData } from './load';
 
@@ -34,6 +34,8 @@ export interface VaultEnv {
   wallet: WalletAdapter;
   /** The wallet's address: the owner of its requests, it pays the fee and gets the change. */
   address: string;
+  /** The pause between builds after a refusal (`unrefused`; tests). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export type Prepared =
@@ -55,7 +57,12 @@ async function wallet(env: VaultEnv): Promise<{ coins: Utxo[]; feeRate: number; 
   return { coins, feeRate: unwrap(rate), max: shape.coinsMax };
 }
 
-export async function prepareDeposit(env: VaultEnv, d: VaultData, amount: string): Promise<Prepared> {
+// Each build is never one the node has just refused (`unrefused`, F6 part A review N1).
+export function prepareDeposit(env: VaultEnv, d: VaultData, amount: string): Promise<Prepared> {
+  return unrefused(() => depositOnce(env, d, amount), env.sleep);
+}
+
+async function depositOnce(env: VaultEnv, d: VaultData, amount: string): Promise<Prepared> {
   await signer(env);
   const { ctx } = env;
   const w = await wallet(env);
@@ -91,12 +98,16 @@ export async function withdrawChoice(ctx: Ctx, d: VaultData, p: PositionCard, am
   );
 }
 
-export async function prepareWithdraw(
+export function prepareWithdraw(
   env: VaultEnv,
   d: VaultData,
   p: PositionCard,
   amount: string | null,
 ): Promise<Prepared> {
+  return unrefused(() => withdrawOnce(env, d, p, amount), env.sleep);
+}
+
+async function withdrawOnce(env: VaultEnv, d: VaultData, p: PositionCard, amount: string | null): Promise<Prepared> {
   await signer(env);
   const { ctx } = env;
   if (!p.ownerKey) throw new PageError('owner_type', 'the position is not of a Schnorr P2PK owner');
@@ -127,7 +138,11 @@ export async function prepareWithdraw(
   return { kind: 'withdraw', built, figures, choice };
 }
 
-export async function prepareSettle(env: VaultEnv, r: RequestCard): Promise<Prepared> {
+export function prepareSettle(env: VaultEnv, r: RequestCard): Promise<Prepared> {
+  return unrefused(() => settleOnce(env, r), env.sleep);
+}
+
+async function settleOnce(env: VaultEnv, r: RequestCard): Promise<Prepared> {
   await signer(env);
   const { ctx } = env;
   if (!r.record || r.status !== 'settleDue') throw new PageError('store_incomplete', 'the request has no live record');

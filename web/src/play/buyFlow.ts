@@ -254,6 +254,30 @@ export async function prepareWithReferral(
   }
 }
 
+/**
+ * Transaction IDs the node refused because an input is spent (node_conflict), with when (F6 part A review N1).
+ * Such a transaction can never be accepted again, and a build that comes out with the same ID (the node's UTXO
+ * index not yet showing what spent the input) is refused here before the wallet signs it, never sent as an orphan:
+ * the flows build again instead (`unrefused` in tickets/send.ts; a purchase moves to another shard).
+ */
+const refused = new Map<string, number>();
+export const REFUSED_MS = 10 * 60_000;
+
+export function noteRefused(id: string, now = Date.now()): void {
+  for (const [k, at] of refused) if (now - at > REFUSED_MS) refused.delete(k);
+  refused.set(id.toLowerCase(), now);
+}
+
+/** Forget every refusal (tests: each starts from a page that has seen none). */
+export function forgetRefused(): void {
+  refused.clear();
+}
+
+export function refusedLately(id: string, now = Date.now()): boolean {
+  const at = refused.get(id.toLowerCase());
+  return at !== undefined && now - at <= REFUSED_MS;
+}
+
 /** A submit whose answer was lost: the node may or may not have the transaction. */
 function outcomeUnknown(e: unknown): boolean {
   return e instanceof PageError && (e.code === 'node_unavailable' || e.code === 'worker_stopped');
@@ -310,6 +334,7 @@ export async function settleSubmit(
         if (alreadyHeld(e)) return final.id;
         if (e instanceof PageError && e.code === 'node_conflict') {
           if (await isLanded(o)) return final.id;
+          noteRefused(final.id);
           throw e;
         }
         if (!outcomeUnknown(e)) throw e;
@@ -342,6 +367,12 @@ export async function signAndSubmit(
   settle?: SettleOpts,
   onSigned?: (final: Signed) => Promise<void>,
 ): Promise<{ id: string; final: Signed }> {
+  if (refusedLately(built.id)) {
+    throw new PageError(
+      'node_conflict',
+      `transaction ${built.id} was refused a moment ago (an input is spent): not signed or sent again`,
+    );
+  }
   const signed = await wallet.signInputs(
     built,
     built.sign.map((s) => s.index),
@@ -364,6 +395,7 @@ export async function signAndSubmit(
   try {
     id = await submit(final);
   } catch (e) {
+    if (e instanceof PageError && e.code === 'node_conflict') noteRefused(final.id);
     if (!outcomeUnknown(e)) throw e;
     console.info(`submit ${final.id}: the answer was lost (${(e as PageError).detail}); asking the chain`);
     id = await settleSubmit(final, submit, settle);

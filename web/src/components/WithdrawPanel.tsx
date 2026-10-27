@@ -1,6 +1,8 @@
 // Withdrawal request (spec 3 S5, 7; J5; design 5.4): the whole position, or a part w >= wmin that leaves a
-// remainder >= wmin. The least and most a part may be are the wasm's (`vaultView`'s range, worth today); an amount
-// outside them is refused by the wasm (`vault_amount`) and nothing is built. Once built, the rows of the very
+// remainder >= wmin. The least and most a part may be are the wasm's (`vaultView`'s range: the amounts it takes,
+// Least rounded up and Most rounded down to 0.01 KAS where the range allows, printed exactly so that typed back
+// each is taken; F6 part A review S1); an amount outside them is refused by the wasm (`vault_amount`) and nothing
+// is built. Once built, the rows of the very
 // transaction the press signs (`withdrawFigures`, bound to it): the shares and their worth today, the position
 // left, the reserve a part posts and when it comes back, the fee, the total and the terms.
 import type { PositionCard, WithdrawFigures } from '@wasm/web.js';
@@ -72,10 +74,10 @@ export function WithdrawPanel(p: WithdrawPanelProps) {
             </label>
           </FigureRow>
           <FigureRow name="Least" testId={`${id}-least-row`} part>
-            <Amount sompi={range.leastWorth} testId={`${id}-least`} />
+            <Amount sompi={range.leastShown} exact testId={`${id}-least`} />
           </FigureRow>
           <FigureRow name="Most" testId={`${id}-most-row`} part>
-            <Amount sompi={range.mostWorth} testId={`${id}-most`} />
+            <Amount sompi={range.mostShown} exact testId={`${id}-most`} />
           </FigureRow>
         </>
       )}
