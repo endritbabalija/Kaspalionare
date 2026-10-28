@@ -433,6 +433,37 @@ async fn health_detail_only_on_loopback() {
     }
 }
 
+/// F6 part E: `/v1/status`'s `error` is the fixed word `STATUS_STORE_ERROR` for a remote client and for
+/// one behind the local proxy (the store's error text can name the server's paths); the text itself only
+/// on loopback without a forwarded client (as `/health`). Negative control: the local answer carries the
+/// path the public one hides, and a store without an error answers `null` to everyone.
+#[tokio::test]
+async fn status_error_text_only_on_loopback() {
+    let f = fixture("hosted-status-error");
+    let mut snap = indexer_api::store::Follower::open(&f.cfg.store, &f.cfg.bundle, f.cfg.cov).unwrap().snapshot();
+    let clean = snap.clone();
+    snap.error = Some("log line 9 (byte 4242): C:\\srv\\secret-store\\index-log.jsonl: txid mismatch".into());
+    let field = |b: &str| serde_json::from_str::<serde_json::Value>(b).unwrap()["error"].clone();
+    for mode in [ClientIp::Peer, ClientIp::Forwarded] {
+        let mut cfg = f.cfg.clone();
+        cfg.client_ip = mode;
+        let r = indexer_api::router(indexer_api::AppState::new(snap.clone(), &cfg), &[]).unwrap();
+        for (who, p, xff) in [("a remote client", Some(peer("203.0.113.9")), None), ("a client behind the local proxy", Some(peer("127.0.0.1")), Some("203.0.113.9"))] {
+            let (s, _, b) = status_of(&r, "/v1/status", p, xff).await;
+            assert_eq!(s, 200, "{mode:?}: {who}");
+            assert_eq!(field(&b), serde_json::json!(indexer_api::routes::STATUS_STORE_ERROR), "{mode:?}: {who}: {b}");
+            assert!(!b.contains("secret-store") && !b.contains("4242"), "{mode:?}: {who}: {b}");
+            // The page's parser still reads the answer (the field stays a string).
+            assert!(web::indexer::parse_status(&b).is_ok(), "{mode:?}: {who}: {b}");
+        }
+        let (_, _, b) = status_of(&r, "/v1/status", Some(peer("127.0.0.1")), None).await;
+        assert!(field(&b).as_str().is_some_and(|e| e.contains("secret-store") && e.contains("4242")), "{mode:?}: the local detail: {b}");
+        let r = indexer_api::router(indexer_api::AppState::new(clean.clone(), &cfg), &[]).unwrap();
+        let (_, _, b) = status_of(&r, "/v1/status", Some(peer("203.0.113.9")), None).await;
+        assert_eq!(field(&b), serde_json::Value::Null, "{mode:?}: no error: {b}");
+    }
+}
+
 fn empty_block(byte: u8, daa: u64) -> ChainBlock {
     ChainBlock { hash: Hash::from_bytes([byte; 32]), daa, txs: vec![] }
 }

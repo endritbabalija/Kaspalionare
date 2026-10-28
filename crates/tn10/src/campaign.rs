@@ -738,6 +738,26 @@ impl Default for GenesisKnobs {
 /// 1 hour and 24 hours of DAA at 10 BPS.
 pub const HOUR_DAA: i64 = 36_000;
 pub const DAY_DAA: i64 = 24 * HOUR_DAA;
+/// The `beta8h` round: 8 hours of DAA (F6 part E).
+pub const BETA8H_ROUND: i64 = 8 * HOUR_DAA;
+/// The owner's fee (house) address for the beta (DECISIONS 2026-10-28); `--fee-address` overrides it.
+pub const BETA_FEE_ADDRESS: &str = "kaspatest:qz7k86c6rrc0leazeh8vkv3u2u83c8tvy86z3cjdkljcg9a9puzhymnk7e48y";
+/// The owner's default referral address (DECISIONS 2026-10-28): a page setting
+/// (`VITE_REFERRAL_ADDRESS`), not a genesis value; `beta genesis` prints it with the page values.
+pub const BETA_REFERRAL_ADDRESS: &str = "kaspatest:qz2cr4g5262katpapg4djvpvgakltuv5h99dedl4hh5ktluvke6pza8pa3h2f";
+
+/// A testnet-10 Schnorr address (`kaspatest:q...`) as a payout; anything else is refused.
+pub fn schnorr_payout(a: &str) -> R<Payout> {
+    let addr = Address::try_from(a).map_err(|e| format!("{a}: {e}"))?;
+    if addr.prefix != Prefix::Testnet {
+        return Err(format!("{a}: not a testnet address"));
+    }
+    if addr.version != kaspa_addresses::Version::PubKey {
+        return Err(format!("{a}: a Schnorr (kaspatest:q...) address only"));
+    }
+    let key: [u8; 32] = addr.payload.as_slice().try_into().map_err(|_| format!("{a}: payload is not 32 bytes"))?;
+    Ok(Payout::Schnorr(key))
+}
 
 impl GenesisKnobs {
     /// The beta profiles (F6 part C, docs/launch/beta-plan.md): the floors for every window
@@ -745,14 +765,29 @@ impl GenesisKnobs {
     /// m(1) = 3 in [2, M_DRAW], and the round length: `fast` one hour, `steady` one day, with
     /// d_min half of it (the next deadline stays on the clock when the close comes within half a
     /// round of T).
+    ///
+    /// `beta8h` (F6 part E, owner's launch choices, DECISIONS 2026-10-28): one round every 8 hours,
+    /// J(1) 100 KAS with V0 510 KAS, and the owner's fee (house) address. V0 is the cap's floor:
+    /// L(1) = 100 + 2 x 1 = 102 KAS <= 20 % of V0. It also keeps the jackpot near 100 KAS later:
+    /// `draw()` tops J(r+1) up to the largest J with J + G2 (m' - 1) <= 20 % of the vault (design
+    /// 4.6), so with V0 600 KAS round 2 would already start at 117.65 KAS (test below).
     pub fn beta(profile: &str) -> R<Self> {
         let len = match profile {
             "fast" => HOUR_DAA,
             "steady" => DAY_DAA,
+            "beta8h" => BETA8H_ROUND,
             "m8" => return Ok(Self::default()),
-            p => return Err(format!("--profile {p}: fast, steady or m8")),
+            p => return Err(format!("--profile {p}: beta8h, fast, steady or m8")),
         };
-        Ok(Self {
+        if profile == "beta8h" {
+            let fee = schnorr_payout(BETA_FEE_ADDRESS)?;
+            return Ok(Self { j1: 100 * KAS as i64, v0: 510 * KAS as i64, fee_address: Some(fee), ..Self::beta_windows(profile, len) });
+        }
+        Ok(Self::beta_windows(profile, len))
+    }
+
+    fn beta_windows(profile: &str, len: i64) -> Self {
+        Self {
             profile: profile.into(),
             round_len: len,
             // T' = max(T + round_len, close + d_min): a close within half a round keeps the clock time.
@@ -762,7 +797,7 @@ impl GenesisKnobs {
             draw_window: Some(lottery::game::VOID_MIN),
             claim_window: Some(lottery::game::CLAIM_WINDOW),
             ..Self::default()
-        })
+        }
     }
 
     /// Apply to a genesis case whose round 1 ends at `t1` (C1 sets the funding, owner and
@@ -2581,7 +2616,7 @@ mod tests {
     #[test]
     fn beta_profiles_pass_genesis_validation() {
         let t = Templates::get(b_max());
-        for p in ["fast", "steady", "m8"] {
+        for p in ["fast", "steady", "beta8h", "m8"] {
             let k = GenesisKnobs::beta(p).unwrap();
             let mut g = GenesisCase::new_with(K, vec![], &t);
             k.apply(&mut g, 2_000_000, &Payout::Schnorr([7; 32]));
@@ -2594,6 +2629,41 @@ mod tests {
         assert_eq!(GenesisKnobs::beta("fast").unwrap().round_len, 36_000);
         assert_eq!(GenesisKnobs::beta("steady").unwrap().round_len, 864_000);
         assert!(GenesisKnobs::beta("hourly").is_err());
+        // F6 part E: the owner's 8-hour profile (DECISIONS 2026-10-28).
+        let k = GenesisKnobs::beta("beta8h").unwrap();
+        assert_eq!((k.round_len, k.d_min, k.first_sales), (288_000, 144_000, 288_000));
+        assert_eq!((k.j1, k.v0), (100 * KAS as i64, 510 * KAS as i64));
+        let fee = schnorr_payout(BETA_FEE_ADDRESS).unwrap();
+        assert_eq!(k.fee_address.as_ref().map(|p| p.key33()), Some(fee.key33()));
+        let mut g = GenesisCase::new_with(K, vec![], &t);
+        k.apply(&mut g, 2_000_000, &Payout::Schnorr([7; 32]));
+        g.params.admin_hash = admin_hash(&[0x55; 32]);
+        assert_eq!((g.controller.fee_key, g.params.next_fee_key), (fee.key33(), fee.key33()), "the owner's fee address, not the funding key's");
+        assert_eq!((g.controller.jackpot, g.controller.liability, g.vault.total_assets), (100 * KAS as i64, 102 * KAS as i64, 510 * KAS as i64));
+        // The vault cap's floor for J(1) 100 KAS: L(1) 102 KAS <= 20 % of V0, so V0 >= 510 KAS.
+        g.validate().unwrap();
+        let mut lo = g.clone();
+        lo.set_vault(510 * KAS as i64 - 1);
+        assert!(lo.validate().unwrap_err().contains("L(1)"), "V0 one sompi below 510 KAS");
+        // What draw() fixes as J(2) after a round with no sales and no winner (V' = V0, no boost pot):
+        // the top-up takes J to the largest value with J + G2 (m' - 1) <= 20 % of V' (design 4.6, A5).
+        for (v0, m) in [(510, 3), (600, 3), (510, 2), (510, 10), (600, 10)] {
+            let mut c = g.controller.clone();
+            c.m = m;
+            let rule = lottery::game::JackpotRule::new(&c, v0 * KAS as i64);
+            let fix = lottery::game::fix_jackpot(&rule, v0 * KAS as i64, 0, c.j);
+            println!("beta8h: V' {v0} KAS, m' {m}: J(2) = {:.8} KAS, L(2) = {:.8} KAS (edge limit {:.2} KAS, cap {:.2} KAS)", fix.jackpot as f64 / 1e8, fix.liability as f64 / 1e8, rule.e_lim as f64 / 1e8, rule.cv as f64 / 1e8);
+            if (v0, m) == (510, 3) {
+                assert_eq!(fix.jackpot, 100 * KAS as i64, "the jackpot stays at 100 KAS with V0 510 KAS");
+            }
+            if (v0, m) == (600, 3) {
+                assert!(fix.jackpot > 117 * KAS as i64, "with V0 600 KAS round 2 starts above 117 KAS");
+            }
+        }
+        // The owner's addresses are testnet Schnorr addresses; a mainnet one is refused.
+        schnorr_payout(BETA_REFERRAL_ADDRESS).unwrap();
+        let main = Address::new(Prefix::Mainnet, kaspa_addresses::Version::PubKey, &fee.key33()[..32]).to_string();
+        assert!(schnorr_payout(&main).unwrap_err().contains("not a testnet"));
         // Negative controls: a claim window one DAA below the floor, a draw window below VOID_MIN.
         let mut k = GenesisKnobs::beta("fast").unwrap();
         k.claim_window = Some(lottery::game::CLAIM_WINDOW - 1);

@@ -37,6 +37,7 @@ import { ticketKey, type WebStore } from '@/store/webstore';
 import { settleSubmit } from '@/play/buyFlow';
 import { settledTicket, type TicketChain } from './claimFlow';
 import { firstLive, type Watched } from './send';
+import { withIndexer } from '@/net/indexers';
 
 /** A signed purchase, claim or return is sent again by itself only this long after it was signed. */
 export const RESEND_MS = 10 * 60_000;
@@ -233,7 +234,11 @@ function sameOutpoint(a: { transactionId: string; index: number }, b: { transact
  * A ticket whose payout is not this wallet's is never kept as the wallet's (F4 review S2), and a ticket this
  * browser follows already (also as the successor of its pending claim) is not added twice.
  */
-export async function findByPayout(ctx: Ctx, store: WebStore, address: string): Promise<number> {
+export function findByPayout(ctx: Ctx, store: WebStore, address: string): Promise<number> {
+  return withIndexer(ctx, (c) => findByPayoutOn(c, store, address));
+}
+
+async function findByPayoutOn(ctx: Ctx, store: WebStore, address: string): Promise<number> {
   const api = await ctx.indexer.tickets(address);
   if (!api.tickets.length) return 0;
   const utxos = await nodeEntries(ctx, api.tickets);

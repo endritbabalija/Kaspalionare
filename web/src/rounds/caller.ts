@@ -18,6 +18,7 @@ import { coinsFor } from '@/play/buyFlow';
 import { sendAndWait, unrefused, type SendEnv, type SendEvent, type Watched } from '@/tickets/send';
 import type { WalletAdapter } from '@/wallet/types';
 import { anchorBlockOf, liveRound, objectsOf, type DetailData } from './load';
+import { withIndexer } from '@/net/indexers';
 
 export type CallerAction = 'close' | 'draw' | 'void';
 
@@ -119,7 +120,8 @@ export async function expiredPools(
  * node has just refused (`unrefused`, F6 part A review N1).
  */
 export function prepareCaller(env: CallerEnv, d: DetailData, action: CallerAction): Promise<PreparedCaller> {
-  return unrefused(() => callerOnce(env, d, action), env.sleep);
+  // One indexer per build (F6 part E: the next one when it fails or its answers are refused); building only.
+  return unrefused(() => withIndexer(env.ctx, (ctx) => callerOnce({ ...env, ctx }, d, action)), env.sleep);
 }
 
 async function callerOnce(env: CallerEnv, d: DetailData, action: CallerAction): Promise<PreparedCaller> {

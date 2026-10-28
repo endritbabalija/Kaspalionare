@@ -25,7 +25,19 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { WEB, run } from './lib.mjs';
 import { files } from './check-bundle.mjs';
-import { broadSources, connectSources, directives, productionEnv, readVercel, siteCsp } from './csp.mjs';
+import {
+  broadSources,
+  connectSources,
+  directives,
+  indexerUrls,
+  productionEnv,
+  PROXY_PATH,
+  PROXY_SOURCE,
+  proxyTarget,
+  readVercel,
+  rewritesFor,
+  siteCsp,
+} from './csp.mjs';
 
 let bad = 0;
 const check = (ok, what) => {
@@ -49,8 +61,29 @@ export function configProblems(env) {
     /\.invalid(?::|\/|$)|\.example(?::|\/|$)|localhost|127\.0\.0\.1/.test(new URL(v).host + '/');
   if ((env.VITE_NETWORK ?? 'testnet-10') !== 'testnet-10') p.push(`VITE_NETWORK=${env.VITE_NETWORK}`);
   if (env.VITE_FAUCET_URL) p.push('VITE_FAUCET_URL is set (the dev faucet; never in a deploy)');
-  if (!env.VITE_INDEXER_URL || !https(env.VITE_INDEXER_URL)) p.push('VITE_INDEXER_URL is not an https:// URL');
-  else if (placeholder(env.VITE_INDEXER_URL)) p.push(`VITE_INDEXER_URL ${env.VITE_INDEXER_URL} is a placeholder`);
+  // F6 part E: one URL or a list; each https and not a placeholder, or the same-origin /api/v1/ proxy (with
+  // INDEXER_PROXY_TARGET, a public server: not a placeholder, not this machine).
+  const urls = indexerUrls(env);
+  if (!urls.length) p.push('VITE_INDEXER_URL is not set');
+  if (urls.length > 8) p.push('VITE_INDEXER_URL lists more than 8 URLs');
+  if (new Set(urls).size !== urls.length) p.push('VITE_INDEXER_URL lists a URL twice');
+  for (const u of urls) {
+    if (u === PROXY_PATH) {
+      if (!env.INDEXER_PROXY_TARGET) p.push(`VITE_INDEXER_URL lists ${PROXY_PATH} but INDEXER_PROXY_TARGET is not set`);
+    } else if (!https(u)) p.push(`VITE_INDEXER_URL entry ${u} is not an https:// URL`);
+    else if (placeholder(u)) p.push(`VITE_INDEXER_URL entry ${u} is a placeholder`);
+  }
+  if (env.INDEXER_PROXY_TARGET) {
+    let t;
+    try {
+      t = proxyTarget(env);
+    } catch (e) {
+      p.push(e.message);
+    }
+    if (t && placeholder(t)) p.push(`INDEXER_PROXY_TARGET ${t} is a placeholder or this machine`);
+    if (t && !urls.includes(PROXY_PATH))
+      p.push(`INDEXER_PROXY_TARGET is set but VITE_INDEXER_URL does not list ${PROXY_PATH}`);
+  }
   if (!HEX64.test((env.VITE_COVENANT_ID ?? '').toLowerCase())) p.push('VITE_COVENANT_ID is not 64 hex digits');
   if (!HEX64.test((env.VITE_BUNDLE_HASH ?? '').toLowerCase()))
     p.push('VITE_BUNDLE_HASH is not 64 hex digits (pin the launch bundle)');
@@ -141,6 +174,13 @@ async function main() {
       `vercel.json connect-src allows no scheme-wide source (${have.length} sources)`,
     );
     check(have.join(' ') === want.join(' '), `vercel.json connect-src = ${want.join(' ')}`);
+    const rw = rewritesFor(env);
+    check(
+      JSON.stringify(readVercel().rewrites ?? []) === JSON.stringify(rw),
+      `vercel.json rewrites = ${rw.length ? `${rw[0].source} -> ${rw[0].destination}` : 'none'}`,
+    );
+    if (rw.length && rw[0].destination.startsWith('http:'))
+      console.log('check-deploy: note the proxy reaches the indexer over http: that leg is not encrypted');
   } catch (e) {
     check(false, `connect-src: ${e.message}`);
   }
@@ -193,6 +233,12 @@ async function main() {
           return Object.entries(want).every(([k, v]) => got[k] === v);
         });
         check(found, `.vercel/output/config.json serves the headers of vercel.json rule ${rule.source}`);
+      }
+      // F6 part E: the /api/v1/ proxy, when configured, is a route of config.json to its target.
+      const t = proxyTarget(env);
+      if (t) {
+        const hit = routes.some((r) => typeof r.dest === 'string' && r.dest.startsWith(`${t}/v1/`));
+        check(hit, `.vercel/output/config.json routes ${PROXY_SOURCE} to ${t}/v1/`);
       }
     }
   }

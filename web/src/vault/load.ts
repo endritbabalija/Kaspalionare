@@ -9,6 +9,7 @@ import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import type { Clock } from '@/rounds/load';
 import { nodeEntries } from '@/tickets/load';
+import { withIndexer } from '@/net/indexers';
 
 export interface VaultData {
   /** Every figure of the page (`vaultView`). */
@@ -43,7 +44,12 @@ async function liveChecked(ctx: Ctx, objects: ApiObject[]): Promise<CheckedObjec
 
 const of = (objs: ApiObject[], role: ApiObject['role']) => objs.filter((o) => o.role === role);
 
-export async function loadVault(ctx: Ctx, owner: string | null, now: () => number = Date.now): Promise<VaultData> {
+/** One indexer for the vault and the wallet's objects (F6 part E). */
+export function loadVault(ctx: Ctx, owner: string | null, now: () => number = Date.now): Promise<VaultData> {
+  return withIndexer(ctx, (c) => loadVaultOn(c, owner, now));
+}
+
+async function loadVaultOn(ctx: Ctx, owner: string | null, now: () => number = Date.now): Promise<VaultData> {
   const [v, positions, requests] = await Promise.all([
     ctx.indexer.vault(),
     owner ? ctx.indexer.positions(owner) : Promise.resolve(null),

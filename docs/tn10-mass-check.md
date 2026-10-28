@@ -1100,3 +1100,50 @@ Probe `tn10 wallet-probe serve` (commit `6084821` binary), page `http://localhos
 | 7 | `close()` | `pushPskt` | `p.pushPskt is not a function` | – | not sent |
 
 Findings: KasWare round-trips our v1 Safe JSON (covenant bindings, compute budgets, storage mass) at both sizes and signs exactly the listed P2PK input. Without a list it overwrites covenant signature scripts, which the post-sign check refuses before sending (a real-wallet negative control for 6.2). `pushPskt` is not available, so the page's path is `signPskt` with the explicit index list, then the post-sign check, then the page's own submit.
+
+## Front end F6 part E: M8 store re-anchored; no transfer (2026-10-28)
+
+- **Nothing was submitted.** The planned move of "the M8 campaign key's" balance to the main key was not made:
+  the M8 campaign ran with `TN10_PRIVATE_KEY` itself (`tn10 campaign` signs with the funding key; every M8 ticket
+  pays `kaspatest:qqdasdj3…85tms5s`), so both are one key. Read-only `tn10 info`: 4,789.38682917 test-KAS in 203
+  coins, largest 3,728.62102262.
+- **`tn10 campaign reanchor --check`** (read-only, `wss://vector-10.kaspa.green`): 383 live instance UTXOs
+  unchanged (586 node entries, 203 not instance-bound); old block `e7df021d…76ff0244` (DAA 605,601,500), nothing
+  written (file hashes unchanged).
+- **`tn10 campaign reanchor`** (`wss://alpha-10.kaspa.stream`): the same proof, then old block `e7df021d…76ff0244`
+  → new block `05e0056307c377fdbe345ec857fd591df18bf12b0087fe9f3a7b4ae905f9c748` (DAA 608,152,477), recorded in
+  `index-log.jsonl` and `index.json`; caught up to `45c549c9…2ac568` (DAA 608,152,503). Local files only.
+- **`tn10 beta genesis --profile beta8h --dry-run`**: every C0/C1 check ok; 547.49 test-KAS locked, fee 0.46065700
+  KAS (docs/launch/beta-plan.md).
+
+## Front end beta: genesis (F6 part F, 2026-10-28)
+
+- **`tn10 beta genesis --profile beta8h --dry-run`** (local ledger and engine, nothing sent; node `muon-10.kaspa.blue`,
+  DAA 608,247,557): every C0/C1 check ok; dry-run covenant ID `07834c04…88c18cffc8`; 547.49 test-KAS locked, fee
+  0.46065700 KAS.
+- **`tn10 beta genesis --profile beta8h --submit`** (node `wss://muon-10.kaspa.blue`, DAA 608,247,684): C0 balance
+  4,789.38682917 KAS ≥ budget 710; fee rate 100 sompi/gram. C1: covenant ID recomputed, admin hash `d8b95fa1…684ad529`
+  (the beta admin key, not the default's), knobs `beta8h` (T(1) = DAA **608,535,700**, round_len 288,000, d_min
+  144,000, m 3 in [2, 50], J(1) 100 KAS, G2(1) 1 KAS, L(1) 102 KAS, V0 510 KAS, price 1 KAS, deposit 0.13 KAS, s_C/s_D
+  50, s_R 1000, s_F 500, seed_offset 600, draw_window 864,000, claim_window 6,048,000, margin 15,000, R 1.69 KAS).
+  - **genesis** `1b6cc6eb87f2aeeb3d9e824621482e2e9eb102c1f34421ca6aaf2b1e05408caf`: 547.49 test-KAS locked in 21
+    protocol outputs + the vault + the fee accumulator, fee **0.46061100 KAS**; `bundle-verify` in C1: 21 live UTXOs, no
+    mismatch.
+  - **Covenant ID `2b86171b385bb93ffb7726994ba83901a7732af432c2c583aaa45cce6401ec00`**; instance files
+    `tn10-data/beta/2b86171b…01ec00/` (`tn10-data/beta/current` names it; `tn10-data/current` still names M8).
+  - Page values: `VITE_BUNDLE_HASH=d10bb199b12967b46edd94d0a2c3d9f29bd998bbf5f01f344c55747ff7095d60` (blake2b-256 of
+    the store's `bundle.json`, served at `/v1/instance`).
+- **Launch bundle** `tn10 bundle --beta --out ../docs/launch/tn10-beta.json` (`muon-10.kaspa.blue`, 21 live UTXOs at
+  DAA 608,247,854), then **`tn10 bundle-verify ../docs/launch/tn10-beta.json`** on a second node
+  (`vector-10.kaspa.green`): **PASS** (covenant ID recomputed, 11 templates = the local compilation, every live UTXO
+  present with its script, value, DAA and covenant ID; admin hash not the default's). It equals the served
+  `/v1/instance` in every field but `snapshot`.
+- **Smoke test of the production build** (`web/dist` under `vite preview` with vercel.json's headers, the hosted
+  indexer `https://172-104-238-197.sslip.io/v1/`, public nodes):
+  - funding of a fresh quick wallet `kaspatest:qzlz2nfl548lh6cudnfcy8ur9gjrr7mwnhsrtjtsvr4d78a752ykufykfcu9u` by
+    `tn10 send … 20 --parts 2`: `d38178b85e771bbcbe6af5dabd6ce501cd9b8770c48d8db484e15a93e8691939`;
+  - **round 1 `buy()` from the page, b = 1** (01 14 16 23 30, bonus 2; price 1.00, referral 0.10 to the owner's default
+    referrer, deposit 0.13, network fee 0.42, total 1.55 KAS): **ACCEPTED**
+    `b950e55699b4c71bc6dc34794af8fc74fc2c8c8975edcb104f9c6a8a7365fdb3`; the hosted indexer lists round 1 with 1 buy.
+- Explorer: `https://explorer-tn10.kaspa.org` answers HTTP 402 `DEPLOYMENT_DISABLED`; `https://tn10.kaspa.stream`
+  shows the genesis and the buy under `/transactions/<id>` (and addresses, blocks under `/addresses/`, `/blocks/`).

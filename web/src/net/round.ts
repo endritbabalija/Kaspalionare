@@ -5,15 +5,21 @@ import type { CheckedInstance, CheckedRound, ControllerView, NodeInfo, RoundStat
 import type { Config } from '@/config';
 import { PageError, unwrap } from '@/lib/errors';
 import type { LotteryClient } from '@/worker/client';
-import type { Indexer } from './indexer';
+import type { IndexerApi } from './indexers';
+import { withIndexer } from './indexers';
 
 export interface Ctx {
   config: Config;
   lottery: LotteryClient;
-  indexer: Indexer;
+  /** One indexer, or the set of the build's URLs with fallback (net/indexers.ts). */
+  indexer: IndexerApi;
 }
 
-export async function checkInstance(ctx: Ctx): Promise<CheckedInstance> {
+export function checkInstance(ctx: Ctx): Promise<CheckedInstance> {
+  return withIndexer(ctx, checkInstanceOn);
+}
+
+async function checkInstanceOn(ctx: Ctx): Promise<CheckedInstance> {
   const bundle = await ctx.indexer.instanceText();
   return unwrap(
     await ctx.lottery.call('checkIndexerInstance', {
@@ -24,7 +30,11 @@ export async function checkInstance(ctx: Ctx): Promise<CheckedInstance> {
   );
 }
 
-export async function checkedRound(ctx: Ctx, r: string): Promise<CheckedRound> {
+export function checkedRound(ctx: Ctx, r: string): Promise<CheckedRound> {
+  return withIndexer(ctx, (c) => checkedRoundOn(c, r));
+}
+
+async function checkedRoundOn(ctx: Ctx, r: string): Promise<CheckedRound> {
   const round = await ctx.indexer.round(r);
   const utxos = unwrap(await ctx.lottery.call('nodeEntries', round.objects));
   return unwrap(await ctx.lottery.call('checkIndexerRound', { covenantId: ctx.config.covenantId, round, utxos }));
@@ -57,7 +67,12 @@ function controllerOf(c: CheckedRound): ControllerView | undefined {
 }
 
 /** The current round (the newest the index knows), checked against the node, as the round card shows it. */
-export async function loadRoundCard(ctx: Ctx, now: () => number = Date.now): Promise<RoundCardData> {
+/** One indexer for the whole card (F6 part E: the next one when it fails or is refused). */
+export function loadRoundCard(ctx: Ctx, now: () => number = Date.now): Promise<RoundCardData> {
+  return withIndexer(ctx, (c) => loadRoundCardOn(c, now));
+}
+
+async function loadRoundCardOn(ctx: Ctx, now: () => number = Date.now): Promise<RoundCardData> {
   const status = await ctx.indexer.status();
   if (status.covenantId.toLowerCase() !== ctx.config.covenantId) {
     throw new PageError('chain_mismatch', `the indexer serves instance ${status.covenantId}`);

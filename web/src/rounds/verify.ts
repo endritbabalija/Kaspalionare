@@ -8,8 +8,14 @@ import type { AnchorBlock, ApiAnchorProof, ApiPurchases, RoundVerify } from '@wa
 import { unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { anchorBlockOf } from './load';
+import { withIndexer } from '@/net/indexers';
 
-export async function verifyRound(ctx: Ctx, r: string): Promise<RoundVerify> {
+/** One indexer for every item (F6 part E); a lie is reported item by item, only an unreachable one moves on. */
+export function verifyRound(ctx: Ctx, r: string): Promise<RoundVerify> {
+  return withIndexer(ctx, (c) => verifyRoundOn(c, r));
+}
+
+async function verifyRoundOn(ctx: Ctx, r: string): Promise<RoundVerify> {
   const round = await ctx.indexer.round(r);
   const utxos = round.objects.length ? unwrap(await ctx.lottery.call('nodeEntries', round.objects)) : [];
   let purchases: ApiPurchases | undefined;

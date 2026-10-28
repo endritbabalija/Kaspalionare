@@ -1,8 +1,69 @@
-# The beta instance: plan and options (testnet-10, nothing launched yet)
+# The beta instance: plan (testnet-10, nothing launched yet)
 
 This is the plan for the lottery instance the public beta runs on. It was rehearsed with a dry run on
 2026-10-27: local ledger and engine, nothing sent to any node. **The owner chooses the options below.** The
 launch itself (one genesis transaction on testnet-10) waits for the owner's go-ahead.
+
+## The owner's choice: `beta8h` (DECISIONS 2026-10-28; dry run 2026-10-28)
+
+The owner chose a round every **8 hours**, a starting jackpot of **100 test-KAS**, the fee (house) address
+`kaspatest:qz7k86c6rrc0leazeh8vkv3u2u83c8tvy86z3cjdkljcg9a9puzhymnk7e48y` and the default referral address
+`kaspatest:qz2cr4g5262katpapg4djvpvgakltuv5h99dedl4hh5ktluvke6pza8pa3h2f`. This is the profile `beta8h` of
+`tn10 beta genesis` (`crates/tn10/src/campaign.rs`, `GenesisKnobs::beta`): every window at its floor, the fee
+address built in (`--fee-address` still overrides it), the admin key from `.env` (`TN10_ADMIN_KEY`, never the
+public default). The referral address is a page setting (`VITE_REFERRAL_ADDRESS`), not a genesis value; the
+command prints it with the other page values.
+
+- Rehearse: `./target/release/tn10 beta genesis --profile beta8h --dry-run`.
+- Launch (owner's go-ahead only): `./target/release/tn10 beta genesis --profile beta8h --submit`.
+
+**What the dry run reported (2026-10-28, local ledger and engine, nothing sent):**
+
+| | |
+|---|---|
+| Checks | C0 balance and fee rate (100 sompi/gram) ok. C1: covenant ID recomputed; the admin hash is the new key's (`d8b95fa1…684ad529`), not the default's; `bundle-verify` passes (21 live UTXOs, no mismatch). |
+| Settings | T(1) = genesis + 8 h; round_len 288,000 DAA, d_min 144,000 (4 h); m 3 in [2, 50]; J(1) 100 KAS, G2(1) 1 KAS, L(1) 102 KAS; **V0 510 KAS**; price 1 KAS, deposit 0.13 KAS; s_C = s_D = 0.5 %, s_R 10 %, s_F 5 %; seed offset 1 min, draw window 24 h, claim window 7 days; margin 1.5; R = 1.69 KAS. |
+| **Locked at genesis** | **547.49 test-KAS**: the 510 KAS vault, 21 protocol outputs × 1.69 KAS = 35.49 KAS, and the 2 KAS fee accumulator. **Fee 0.46 KAS.** |
+| Main test key (read-only, `tn10 info`, 2026-10-28) | **4,789.39 test-KAS** in 203 coins; the largest is 3,728.62 KAS, so genesis spends one coin. |
+
+**Why the vault is 510 KAS (an owner choice).** The only check the 100 KAS jackpot touches is the vault cap: the
+house's promise L = J + G2 × (m − 1) = 102 KAS must stay within 20 % of the vault, so the vault needs at least
+510 KAS (a test refuses 509.99999999). Each draw then sets the next jackpot as high as that cap allows (design 4.6).
+With 510 KAS the jackpot stays at **100 KAS** from round 2 on (m = 3; 100.99 KAS at m = 2, 93.58 KAS at m = 10,
+because a wider bonus range raises the second prizes). With 600 KAS it would jump to 117.65 KAS in round 2. Sales
+and backers' deposits raise it slowly; a jackpot win lowers it. The vault is your position: you can withdraw it
+later on the Vault page. To start bigger: `--vault <KAS>`.
+
+**No other check is tripped.** The edge rule's limit is 268,909 KAS against 102; the whale check and the margin
+floor (1.5) pass; the windows are at their floors and sum to 6,912,600 DAA ≤ D_RET = 12,096,000. Genesis has no
+floor on the round length, so 8 hours is allowed.
+
+**Your work: a Close and a Draw three times a day.**
+- After each deadline press **Close**, and about 1–2 minutes later **Draw** (Rounds, S4).
+- **Close within 4 hours of the deadline to keep the clock.** The next deadline is the later of "this deadline +
+  8 h" and "the close + 4 h". A later close shifts every following deadline.
+- **Draw within 24 hours of the close.** After that anyone may void the round: no winners, every deposit back.
+- **The 6-day limit, in rounds:** a round must be closed within 5,183,400 DAA (5 days 23 h 59 min) of its own
+  deadline: **17.998 round lengths**. You may miss up to 17 consecutive 8-hour slots; never leave a round
+  unclosed into its 18th. Past that, a winning ticket still unclaimed could have its deposit returned by anyone
+  and its prize lost (M8 U6, D102).
+
+**Cost a day (3 closes + 3 draws), at today's 100 sompi/gram:**
+- **Fees about 1.96 test-KAS a day** (about 59 a month): a close 0.4323 KAS, a draw 0.2217 KAS (M8's measured
+  masses, `tn10 masses`: close 432,306 grams, draw with pools about 221,700). A draw that absorbs expired pools is
+  larger and was not measured (old-M8 check M.2 will measure one). The caller rewards (0.5 % of sales each) are
+  small at test sales and come back to you.
+- **Reserves locked and returned:**
+  - each close locks 1.69 KAS for the marker; the draw a minute later returns it;
+  - each draw locks 1.69 KAS per prize pool it creates (only tiers someone holds; at most 7), back when a later
+    draw absorbs the pool after its claim deadline (about 8 days after the close: 1 min + 24 h + 7 days), or
+    with its last claim. Each draw absorbs up to 7 expired pools, oldest first, so three draws a day keep up;
+  - at most 3 × 7 × 1.69 = 35.49 KAS a day, so **at most about 300 test-KAS in flight** after 8–9 days of busy
+    rounds; with few players far fewer pools exist.
+- **Budget:** genesis about 548 KAS, up to about 300 KAS of reserves in flight, about 60 KAS of fees a month,
+  test buys for the journeys (about 1.2 KAS each): **about 950 test-KAS**. The main key holds 4,789.
+
+The options below were the choices before the owner's decision (F6 part C); they stay for reference.
 
 ## How it is launched (and how not)
 
@@ -110,9 +171,7 @@ still loses a little. Both are fixed at genesis.
 
 ## What the owner needs to give
 
-1. **Profile:** A (daily, recommended), B (hourly) or C.
-2. **The referral and fee address:** one or two `kaspatest:` addresses of the owner's (KasWare's testnet account
-   is fine).
-3. **Jackpot and vault size** if not 10 / 100 KAS, and the caller shares if not 0.5 %.
-4. **The go-ahead** for the genesis transaction. It is one transaction on testnet-10 and spends about 138
-   test-KAS.
+1. ~~Profile~~, ~~addresses~~, ~~jackpot~~: given on 2026-10-28 (`beta8h` above).
+2. **The vault size:** 510 KAS (built: the jackpot stays near 100 KAS) or more (`--vault`).
+3. **The go-ahead** for the genesis transaction: one transaction on testnet-10, about 548 test-KAS locked
+   (0.46 KAS fee).

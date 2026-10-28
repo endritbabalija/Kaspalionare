@@ -21,6 +21,7 @@ import type {
 import { PageError, describe, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { storeOf } from '@/store/session';
+import { withIndexer } from '@/net/indexers';
 
 /** A figure and whether a node-checked object fixes it (false: the indexer's, unverified). */
 export interface Shown {
@@ -80,7 +81,11 @@ function fromFact(f: { value: string; sources: { transactionId: string }[] } | u
 }
 
 /** The rounds the indexer lists, newest first (its row figures, unchecked until `checkRow`). */
-export async function roundRows(ctx: Ctx): Promise<ApiRoundRow[]> {
+export function roundRows(ctx: Ctx): Promise<ApiRoundRow[]> {
+  return withIndexer(ctx, roundRowsOn);
+}
+
+async function roundRowsOn(ctx: Ctx): Promise<ApiRoundRow[]> {
   const list = await ctx.indexer.rounds();
   if (list.covenantId.toLowerCase() !== ctx.config.covenantId) {
     throw new PageError('chain_mismatch', `the indexer serves instance ${list.covenantId}`);
@@ -89,7 +94,11 @@ export async function roundRows(ctx: Ctx): Promise<ApiRoundRow[]> {
 }
 
 /** One row checked against the node. */
-export async function checkRow(ctx: Ctx, row: ApiRoundRow): Promise<RowData> {
+export function checkRow(ctx: Ctx, row: ApiRoundRow): Promise<RowData> {
+  return withIndexer(ctx, (c) => checkRowOn(c, row));
+}
+
+async function checkRowOn(ctx: Ctx, row: ApiRoundRow): Promise<RowData> {
   try {
     const { round, utxos } = await liveRound(ctx, await ctx.indexer.round(row.round));
     const c = unwrap(await ctx.lottery.call('checkIndexerRound', { covenantId: ctx.config.covenantId, round, utxos }));
@@ -165,7 +174,12 @@ async function drawnAnchor(ctx: Ctx, r: string, round: ApiRound, utxos: Utxo[]):
   return undefined;
 }
 
-export async function loadDetail(ctx: Ctx, r: string, now: () => number = Date.now): Promise<DetailData> {
+/** One indexer for the whole detail (F6 part E). */
+export function loadDetail(ctx: Ctx, r: string, now: () => number = Date.now): Promise<DetailData> {
+  return withIndexer(ctx, (c) => loadDetailOn(c, r, now));
+}
+
+async function loadDetailOn(ctx: Ctx, r: string, now: () => number = Date.now): Promise<DetailData> {
   const api = await ctx.indexer.round(r);
   const { round, utxos } = await liveRound(ctx, api);
   const covenantId = ctx.config.covenantId;

@@ -207,7 +207,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: tn10 <keygen | admin-keygen | beta genesis --profile <fast|steady> [--fee-address <kaspatest:...>] [--jackpot <KAS>] [--vault <KAS>] [--s-c <bp>] [--s-d <bp>] (--dry-run | --submit) | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--beta] [--out <file>] | bundle-verify <file> | masses | wallet-probe <serve [--port n] | selftest> | send <kaspatest:address> <KAS> [--parts n]>
+const USAGE: &str = "usage: tn10 <keygen | admin-keygen | beta genesis --profile <beta8h|fast|steady> [--fee-address <kaspatest:...>] [--jackpot <KAS>] [--vault <KAS>] [--s-c <bp>] [--s-d <bp>] (--dry-run | --submit) | info | anchor-check [n] | probe <case> | node-check [block-hash...] | indexer --cov <hex> [--start <hash>] [--bundle <file>] [--once] | campaign start [--dry-run] [--until <step>] [--soak a|b] [--budget <KAS>] [--buys <n>] [--c6-deposit <KAS>] | campaign resume [--until <step>] [--soak a|b] [--c6-deposit <KAS>] | campaign status [--cov <hex>] [--soak a|b] | campaign reanchor [--check] [--cov <hex>] | bundle [--beta] [--out <file>] | bundle-verify <file> | masses | wallet-probe <serve [--port n] | selftest> | send <kaspatest:address> <KAS> [--parts n]>
 probe cases: all|baseline|storage|transient|dust|buy|buy-m1|claim|close-m2|draw-m3|draw-m7|void-m7|claim-m4|vault-m5|conflict-m6|close16|close32|close62 (conflict-m6 is not part of all)";
 
 /// The value after `--name` in `args`.
@@ -667,13 +667,13 @@ fn admin_key(env: &BTreeMap<String, String>, funding: &Keypair) -> Result<[u8; 3
 /// goes to `tn10-data/beta/`.
 async fn beta_cmd(args: &[String]) -> Result<(), String> {
     if args.first().map(String::as_str) != Some("genesis") {
-        return Err("usage: tn10 beta genesis --profile <fast|steady> [--fee-address kaspatest:...] [--jackpot <KAS>] [--vault <KAS>] [--s-c <bp>] [--s-d <bp>] (--dry-run | --submit)".into());
+        return Err("usage: tn10 beta genesis --profile <beta8h|fast|steady> [--fee-address kaspatest:...] [--jackpot <KAS>] [--vault <KAS>] [--s-c <bp>] [--s-d <bp>] (--dry-run | --submit)".into());
     }
     let env = load_env();
     let kp = keypair(&env)?;
     let admin = admin_key(&env, &kp)?;
     let mut o = campaign::Opts { until: "C1".into(), ..Default::default() };
-    let mut k = campaign::GenesisKnobs::beta(flag(args, "--profile").ok_or("--profile <fast|steady> required")?)?;
+    let mut k = campaign::GenesisKnobs::beta(flag(args, "--profile").ok_or("--profile <beta8h|fast|steady> required")?)?;
     if let Some(a) = flag(args, "--fee-address") {
         let addr = Address::try_from(a).map_err(|e| format!("--fee-address {a}: {e}"))?;
         net::check_testnet(&addr)?;
@@ -748,6 +748,7 @@ fn page_config(dir: &std::path::Path) -> Result<(), String> {
     let cov = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     println!("web/.env.production: VITE_COVENANT_ID={cov}");
     println!("web/.env.production: VITE_BUNDLE_HASH={}", encode_hex(h.as_bytes()));
+    println!("web/.env.production: VITE_REFERRAL_ADDRESS={} (the owner's default referrer, DECISIONS 2026-10-28)", campaign::BETA_REFERRAL_ADDRESS);
     Ok(())
 }
 

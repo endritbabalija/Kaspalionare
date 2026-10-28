@@ -261,9 +261,7 @@ fn purchases_hex(p: &[[u8; 6]]) -> String {
 /// `{"ok":...}`; the detail (the store's and the node's errors can name paths and the node's URL)
 /// only on loopback without a forwarded client (a check on the server itself) and in-process.
 pub async fn health(State(st): State<AppState>, req: axum::extract::Request) -> Response {
-    let peer = req.extensions().get::<crate::limits::Peer>().copied();
-    let local = peer.is_none()
-        || (req.headers().get("x-forwarded-for").is_none() && crate::limits::client_of(peer, req.headers(), st.client_ip).is_some_and(|ip| ip.is_loopback()));
+    let local = is_local(&st, &req);
     let s = st.snapshot();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     let (follow_ok, follow_why, ago) = match &st.follow {
@@ -293,7 +291,20 @@ pub async fn health(State(st): State<AppState>, req: axum::extract::Request) -> 
     body(if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, b)
 }
 
-pub async fn status(State(st): State<AppState>) -> Response {
+/// A request from the server itself: no peer (in-process), or a loopback peer without a forwarded
+/// client (a check on the server, not a visitor behind the local proxy).
+fn is_local(st: &AppState, req: &axum::extract::Request) -> bool {
+    let peer = req.extensions().get::<crate::limits::Peer>().copied();
+    peer.is_none() || (req.headers().get("x-forwarded-for").is_none() && crate::limits::client_of(peer, req.headers(), st.client_ip).is_some_and(|ip| ip.is_loopback()))
+}
+
+/// F6 part E: what `/v1/status` says in `error` to anyone but the server itself when the store
+/// stopped applying its log. The text (it can name the server's paths) is in the log and, as
+/// `/health`'s detail, on loopback only.
+pub const STATUS_STORE_ERROR: &str = "store_error";
+
+pub async fn status(State(st): State<AppState>, req: axum::extract::Request) -> Response {
+    let local = is_local(&st, &req);
     let s = st.snapshot();
     json(
         LIMITS.small,
@@ -306,7 +317,7 @@ pub async fn status(State(st): State<AppState>) -> Response {
             last_chain_daa_score: s.last_chain.map(|(_, d)| d.to_string()),
             current_round: s.rounds.keys().next_back().map(|r| r.to_string()),
             gaps: s.gaps.clone(),
-            error: s.error.clone(),
+            error: s.error.as_ref().map(|e| if local { e.clone() } else { STATUS_STORE_ERROR.into() }),
             updated: s.updated_ms.to_string(),
         },
     )

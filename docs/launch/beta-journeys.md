@@ -14,9 +14,15 @@ For every step, write down:
 A step passes when its transaction is accepted. Open the explorer link next to the ID, or check the ticket or row
 on the page.
 
+**The pace (profile `beta8h`, docs/launch/beta-plan.md):** a round every 8 hours. Sales of a round close at its
+deadline; you close and draw it (J4) within 4 hours to keep the clock, so its winning numbers come a couple of
+minutes after your Close. Plan the journeys around three deadlines a day: buy (J1, J7) before a deadline, run J4
+right after it, then claim (J2) and verify (J6). A losing ticket's deposit (J2.4) comes back 14 days after its
+round's deadline.
+
 Before starting:
 - [ ] The site opens on `https://…` with the testnet-10 badge.
-- [ ] `/health` of the API shows `"ok":true`.
+- [ ] `/health` of **each** API listed in `VITE_INDEXER_URL` shows `"ok":true`.
 - [ ] KasWare is on its testnet-10 network and holds about 20 test-KAS from the faucet.
 
 ## J1: new player buys a ticket
@@ -31,12 +37,23 @@ Before starting:
 | 1.6 | Repeat with b = 1, without a referral link (open the site plainly) | Referral to the owner's default address only if it is at least 0.1 KAS; below that, no Referral row. | | |
 | 1.7 | **My tickets** | The ticket card shows the round and the combinations. | | |
 
+## J8: indexer fallback (several URLs, F6 part E)
+
+Only when `VITE_INDEXER_URL` lists two or more APIs. Use a fresh private window for each row.
+
+| # | Do this | Expect | Result |
+|---|---|---|---|
+| 8.1 | Stop the first API (`docker compose stop` or `systemctl stop indexer-api` on its server), open the site | The round card loads (after at most 15 s); Rounds lists the rounds. | |
+| 8.2 | Reload the page | It loads at once: this browser now asks the second API first. | |
+| 8.3 | Start the first API again; stop the second; reload | Loads from the first again. | |
+| 8.4 | Both stopped | The page shows the indexer as unavailable (`indexer_unavailable`); My tickets still claims from a local copy. | |
+
 ## J4: caller runs the round (after the sales deadline)
 
 | # | Do this | Expect | txid / result |
 |---|---|---|---|
 | 4.1 | **Rounds** → the closed-for-sales round → the panel shows **Close** due, the reward and the fee | Figures shown before signing. | |
-| 4.2 | **Close**, approve | Accepted. The next round opens, and its deadline is shown. | |
+| 4.2 | **Close**, approve, within 4 hours of the deadline | Accepted. The next round opens; its deadline is 8 hours after the last one. | |
 | 4.3 | About 1–2 minutes later the panel shows **Draw** due | "Anchor proof" is available (the hosted API builds it). | |
 | 4.4 | **Draw**, approve | Accepted. Winning numbers final; pools listed. | |
 | 4.5 | **Old M8 instance (absorbing draw)**: see "Old M8 instance checks" below | | |
@@ -100,13 +117,29 @@ Never put this build on Vercel.
 | M.1 | **`return_deposit()` on an expired M8 ticket.** My tickets must hold an M8 ticket of rounds 1–8 that won nothing (see the note below), then press **Return deposit** on it. | Accepted. The deposit (0.13 KAS) goes to the ticket's payout address, whoever submits. | |
 | M.2 | **An absorbing draw.** Round 9 of M8: after its deadline, **Close** (J4.2), then **Draw**. The panel's "Expired pools" row lists the expired pools of rounds 1–8, oldest first, at most 7. | Accepted. On the explorer, the draw spends those pools, and their reserves (1.69 KAS each) go back to their funders. | |
 
-Note for M.1: every M8 ticket pays the campaign wallet (`TN10_PRIVATE_KEY`). My tickets finds tickets by the
-connected wallet's payout address (J3), so the page sees them only when it is connected as that wallet. The only
-way with today's page: in a **throwaway browser profile**, menu → Wallet → quick wallet → **Import** the campaign
-key, so My tickets finds its M8 tickets. Then press Return deposit, and delete the profile afterwards.
+**The M8 store is re-anchored** (F6 part E, 2026-10-28): `tn10 campaign reanchor --check` proved on a public node
+that the instance's 383 live UTXOs were unchanged, then `tn10 campaign reanchor` moved the store's resume point
+from the pruned block (DAA 605,601,500) to block `05e00563…05f9c748` (DAA 608,152,477) and caught up. Only local
+files changed (`tn10-data/e9f4…/`; a copy of the store from before is in that session's scratchpad). The node
+prunes after about 30–34 hours, so start the M8 indexer API (`--node resolver`) on a copy of the store within a
+day, or re-anchor again first.
 
-That puts a testnet key holding about 4,789 test-KAS into a browser, so the owner must agree to it first. The
-alternative is to move most of the balance to another key beforehand (`tn10 send`). Log which way was used.
+Note for M.1 (**owner choice open**): every M8 ticket pays the M8 campaign's key, and **that key is the main
+test key** (`TN10_PRIVATE_KEY`, `kaspatest:qqdasdj3…85tms5s`): the campaign was funded and run with it, and it
+also funds the beta's genesis. So "move the M8 key's balance to the main key" has nothing to move, and importing
+that key into a browser would put the main test key (4,789 test-KAS, the beta's funding) in it. Nothing was moved
+or imported. My tickets finds tickets by the connected wallet's payout address (J3), so today the page sees them
+only when connected as that key. `return_deposit()` itself pays the ticket's payout whoever submits, so the key is
+not needed to sign it. Ways forward (docs/specs/frontend-handoff.md "F6 part E"):
+- **A. A new main key** (recommended): `tn10` gets a fresh `TN10_PRIVATE_KEY`, the old key is kept as the M8 key,
+  and about 4,739 test-KAS move from the old to the new one (a second testnet transfer, to approve). Then the old
+  key, holding about 50 test-KAS, is imported into the throwaway profile as planned. About an hour of work.
+- **B. A backup file of the M8 tickets**, written by a new `tn10` command from the M8 store and imported into any
+  browser (Backup → Import); no key leaves `.env`, and the page checks every record against the chain. A ticket
+  paying another address shows its Payout row; whether Return deposit is offered for it must be checked. About
+  half a day of work.
+- **C. Import the main key into the throwaway profile anyway:** no work; the risk is a browser holding the key
+  that funds the beta (testnet coins only, no real money).
 
 ## Sign-off
 
@@ -119,5 +152,6 @@ alternative is to move most of the balance to another key beforehand (`tn10 send
 | J5 | | | |
 | J6 | | | |
 | J7 | | | |
+| J8 indexer fallback | | | |
 | M.1 return_deposit (M8) | | | |
 | M.2 absorbing draw (M8) | | | |

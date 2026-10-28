@@ -29,7 +29,7 @@ Trimmed after F4's review (owner process decision, DECISIONS 2026-10-26 "full ri
 | F3 web shell and Play | done (parts A, B; review fixed; `add7983`, `2319d11`, `8647382`) | `web/` (React 19, Vite 7, Tailwind 4, Vitest, Playwright + axe), tokens and themes, the wasm in a worker, the node client in wasm, `npm run dev:simnet`; wallet adapters (KasWare with the index list, Kaspire untested, the quick wallet), post-sign attack tests through the real path, S1 Play, S7, `webstore/1`. Review fixes: open-round lists all-or-nothing, rebuild signed only as shown, quick key by compare-and-swap, lost submit answers settled from the chain, status from chain objects only, CSP as an HTTP header (`vercel.json`). Codes 35–49. |
 | F4 My tickets, claims, backup | done (2026-10-26, `d3b24b0`; reviewed by `covenant-reviewer`, every must-fix and should-fix fixed, see "F4 review and fixes") | S2 My tickets, S8 Backup, claims and deposit returns from the local copy without the API, `kaspalionare-backup/1`, `webstore/2`, codes 50–53; done criterion met on simnet. **Review fixes (this stage):** Return deposit offered only when nothing unclaimed can still be claimed (M1); a drawn copy checked for its pools, "expired" only on chain evidence, the marker kept so a copy lists every pool of the draw, never fewer pools (M2); void only where chain and copy do not contradict it; J3 by payout only for this wallet; "With last claim" only when the last claim will be FINAL; a closed copy with its marker spent is incomplete; claims accepted on their own outputs; pending claims kept and settled; limits consistent; stale purchases not resent by themselves; F3 copies migrated; `onversionchange`. |
 | F5 Rounds, verify, run the round | done (2026-10-26, `d23ed0d`; reviewed by `covenant-reviewer`, every should-fix and note fixed 2026-10-27, see "F5 review and fixes"; not committed) | S3 list and round detail (facts from Rust with their sources, "Unverified" for the indexer's), Verify in this browser item by item (`verifyRound`), X.hash after the draw bound to a public node's block, S4 close/draw/void from the panel (`callerFigures`, code 54), the SN5 dev self-check fixed, `POST /mine` (TEST-ONLY); e2e: S3, draw, close, doctored API, void. See "F5" below. |
-| F6 Vault, How it works, beta instance, deploy, security review | part A done (2026-10-27, S5 Vault, `0dcb01a`; reviewed by `covenant-reviewer`, fixes `e5309c5`); part B done (2026-10-27, S6 How it works; light process: web tests, no adversarial review, the owner reads the page; not committed); part C done (2026-10-27, deploy preparation: hosted indexer API `--node`, site configuration and narrowed CSP, prebuilt deploy with `check:deploy`, beta genesis dry-run with a fresh admin key, journeys plan; nothing deployed or launched; not committed); security review done (2026-10-28: no must-fix; four should-fix and the notes fixed by the fix agent, see "F6 security review and fixes"; not committed); genesis, deploy and journeys not started | Part A: "F6 part A"; part B: "F6 part B"; part C: "F6 part C" (owner choices listed there). Then and the security review: read "What F6 needs". |
+| F6 Vault, How it works, beta instance, deploy, security review | part A done (2026-10-27, S5 Vault, `0dcb01a`; reviewed by `covenant-reviewer`, fixes `e5309c5`); part B done (2026-10-27, S6 How it works; light process: web tests, no adversarial review, the owner reads the page; not committed); part C done (2026-10-27, deploy preparation: hosted indexer API `--node`, site configuration and narrowed CSP, prebuilt deploy with `check:deploy`, beta genesis dry-run with a fresh admin key, journeys plan; nothing deployed or launched; not committed); security review done (2026-10-28: no must-fix; four should-fix and the notes fixed by the fix agent, see "F6 security review and fixes"; committed `3129728`); part E done (2026-10-28, launch preparation with the owner's choices: `beta8h` profile and dry run, several indexer URLs with fallback, `/v1/status` error masked, M8 store re-anchored, no M8 transfer (same key), Vercel proxy feasible on paper; not committed, see "F6 part E"); part F (2026-10-28, launch: e2e + e2e:void green, **beta genesis on testnet-10** `2b86171b…01ec00`, launch bundle verified, hosted indexer on the Linode at `https://172-104-238-197.sslip.io` with a witness node, `web/dist` built and checked, a page buy accepted on testnet-10; not committed, see "F6 part F"); Vercel deploy and journeys not started | Part A: "F6 part A"; part B: "F6 part B"; part C: "F6 part C" (owner choices listed there). Then and the security review: read "What F6 needs". |
 
 ## What F6 needs (Vault, How it works, beta, deploy, security review)
 
@@ -325,6 +325,211 @@ The stage agents' build decisions, kept verbatim until recorded. The owner decis
 - (f) **`callerFigures` reads the kind from the exact lock time** (draw: max(D, absorbed deadlines); void: max(D + draw_window, absorbed deadlines); both matching is refused), takes the vault (whether a settlement record is posted) and the absorbed pools (every covenant input named); "Back" is the new pools' claim deadline only; a record's R comes back "With settlement".
 - (g) **The void e2e runs on request**: `npm run e2e:void` (E2E_VOID=1); `npm run e2e` skips it (owner, DECISIONS 2026-10-27).
 - (h) **No simnet e2e of an absorbing draw** (pools expire about 6.9 million DAA after their draw; no test-only short window, DECISIONS 2026-10-26): Rust byte-identity and page-level Vitest tests; the real-chain check is F6's on testnet-10.
+
+## F6 part F (stage agent, 2026-10-28): launch of the testnet-10 beta (no Vercel command; not committed)
+
+No covenant change; goldens untouched. Testnet-10 only. Every txid is in `docs/tn10-mass-check.md` "Front end beta:
+genesis".
+
+- **Owner rule, void e2e:** in one fresh dev run, `npm run e2e` **23 passed, 1 skipped**, then `npm run e2e:void`
+  **1 passed** (1.1 h). Dev run stopped; ports 18610, 8790, 8791, 5173, 4173, 4174 free; that run's 2.5 GB of simnet
+  data deleted.
+- **Genesis:** dry run all ok (547.49 test-KAS, fee 0.46065700). Live: **covenant ID
+  `2b86171b385bb93ffb7726994ba83901a7732af432c2c583aaa45cce6401ec00`**, genesis
+  `1b6cc6eb87f2aeeb3d9e824621482e2e9eb102c1f34421ca6aaf2b1e05408caf` (fee 0.46061100 KAS), T(1) = DAA 608,535,700
+  (about 11:34 UTC on 2026-10-28, shown as 12:34 on this PC). Store `tn10-data/beta/2b86171b…/` (`tn10-data/beta/current`; M8 keeps
+  `tn10-data/current`). **Launch bundle `docs/launch/tn10-beta.json`: `bundle-verify` PASS** on a second node.
+- **Hosted indexer** (Linode `172.104.238.197`, Ubuntu 24.04, 1 GB): option B of `docs/launch/indexer-server.md`.
+  - The binary built on this PC by the Dockerfile's `export` target (Linux x86-64, sha256 `d10a622f…378e924c`, no
+    doctored code), installed as `/usr/local/bin/indexer-api`; the repo's systemd unit unchanged (`DynamicUser`,
+    sandboxed, `MemoryMax=1G`), enabled; store in `/var/lib/private/kaspalionare` (seeded from the PC's genesis
+    store). No key, no `.env` on the server (store and bundle checked: neither key's hex is in them).
+  - Settings `/etc/kaspalionare/indexer-api.env` (the example with `INDEXER_API_COV` set,
+    `INDEXER_API_STORE=/var/lib/kaspalionare`): `NODE=resolver`, **`WITNESS=resolver`** (seen: pinned to
+    `vector-10.kaspa.green`, witness `muon-10.kaspa.blue`; after a restart the pair may swap), loopback bind,
+    `CLIENT_IP=forwarded`, per-client limits as the example.
+  - Caddy 2.11.7 (official apt repo), `/etc/caddy/Caddyfile` = the repo's with the site `172-104-238-197.sslip.io`:
+    **Let's Encrypt certificate issued at once** (nip.io not needed). The hostname is in public certificate logs:
+    scanners hit it within seconds (502s before the API started; harmless, GET only).
+  - Checked from this PC: `https://172-104-238-197.sslip.io/health` `{"ok":true}`; `/v1/status` testnet-10, this
+    covenant ID, DAA growing; `/v1/instance` byte-identical to the store's `bundle.json`, blake2b
+    `d10bb199…7095d60` = `VITE_BUNDLE_HASH`, and equal to `tn10-beta.json` in every field but `snapshot`; CORS answers
+    only the listed origins; POST 405. **Reboot test:** back in about 70 s, resumed from its log; 65 MB RSS.
+  - **CORS, to update once the Vercel URL is known:** on the server, edit
+    `INDEXER_API_ALLOW_ORIGIN=https://kaspalionare.vercel.app,https://site-placeholder.invalid` in
+    `/etc/kaspalionare/indexer-api.env` (comma list, exact origins, no trailing slash), then
+    `systemctl restart indexer-api` (the API listens again about 20 s later, after it picked its witness). The
+    smoke test's temporary `http://127.0.0.1:4173` was removed afterwards.
+- **Explorer:** `explorer-tn10.kaspa.org` answers 402 `DEPLOYMENT_DISABLED`. `https://tn10.kaspa.stream` shows
+  testnet-10 transactions, but under `/transactions/<id>` (addresses and blocks as the page's layout). Page change
+  (UI only): `src/lib/explorer.ts` uses `transactions` on `kaspa.stream` hosts, `txs` elsewhere; new
+  `src/lib/explorer.test.ts` (4 tests; mutant "fixed path" fails one). `npm test`: 32 files, **237 passed**.
+- **The production build** (`web/.env.production`, new file, every value public):
+  `VITE_NETWORK=testnet-10`, `VITE_INDEXER_URL=https://172-104-238-197.sslip.io/v1/`,
+  `VITE_COVENANT_ID=2b86171b385bb93ffb7726994ba83901a7732af432c2c583aaa45cce6401ec00`,
+  `VITE_BUNDLE_HASH=d10bb199b12967b46edd94d0a2c3d9f29bd998bbf5f01f344c55747ff7095d60`,
+  `VITE_REFERRAL_ADDRESS=kaspatest:qz2cr4g5262katpapg4djvpvgakltuv5h99dedl4hh5ktluvke6pza8pa3h2f`,
+  `VITE_EXPLORER_URL=https://tn10.kaspa.stream`, `VITE_FAUCET_LINK=https://faucet-tn10.kaspanet.io`, no
+  `VITE_NODE_URL` (resolver), no proxy. `npm run csp:write` (vercel.json connect-src: the sslip.io origin and the
+  resolver's four domains); `npm run build` ok (check-bundle, control); `check:mainnet` ok; `check:csp` **34 ok**;
+  `check:deploy` **every check ok**. `web/dist` unchanged since (sha256 of all 13 files compared after the smoke
+  test; `index.html` `40df8a04…`, `assets/web_bg-CQ1zupv_.wasm` `8059a918…`).
+- **Smoke test on testnet-10** (that `dist` under `vite preview` with vercel.json's headers, headless Chromium,
+  a throwaway profile): round card Round 1, Open, jackpot 100 KAS, deadline DAA 608,535,700; Rounds row 1 open;
+  round 1 detail ready and **Verify: 35 items, all match** (18 state, status, 16 trees); How it works with the
+  figure; no CSP report. Quick wallet `kaspatest:qzlz2nfl…ykufykfcu9u` funded 20 tKAS
+  (`d38178b8…1939`); **buy b = 1 ACCEPTED `b950e55699b4c71bc6dc34794af8fc74fc2c8c8975edcb104f9c6a8a7365fdb3`**
+  (total 1.55 KAS; referral to the owner's default); shown on My tickets and counted by the hosted indexer. The page's
+  one 404 is `/v1/rounds/1/anchor-proof` for the open round (no proof before the close; expected).
+- **Seen, not fixed (UX, no money risk):** on a cold load the quick-wallet button reads "Create quick wallet" for
+  several seconds while the worker boots and connects to a node, even when a key is stored; a press then is refused
+  by the key store's compare-and-swap (`wallet_changed`), the stored key is untouched, and the button turns into
+  "Use quick wallet" (and a remembered quick wallet reconnects by itself). A loading state on that button would
+  remove the refusal.
+- **Left:** the Vercel deploy (orchestrator, with `site-deploy.md` steps 4–7 and the "After deploying" checks, then
+  the CORS line above); `web/.env.production` and the new `vercel.json` connect-src to commit; the journeys
+  (`docs/launch/beta-journeys.md`); round 1's Close after DAA 608,535,700 and Draw within 24 h; the smoke wallet's key
+  and its ticket live only in this session's scratchpad profile (`smoke-profile`, about 18.4 tKAS), a throwaway.
+
+### Proposed DECISIONS rows (F6 part F)
+
+- **Beta instance launched:** covenant ID `2b86171b…01ec00`, genesis `1b6cc6eb…08caf` (profile `beta8h`, V0 510 KAS),
+  launch bundle `docs/launch/tn10-beta.json` (bundle-verify PASS). Reason: owner's go-ahead (delegated for the night).
+- **Indexer host:** Linode `172.104.238.197`, systemd binary built on the PC, Caddy with the sslip.io hostname and a
+  Let's Encrypt certificate (no domain); two public nodes must agree (witness). Reason: no domain yet; the 1 GB server
+  must not compile.
+- **Explorer:** `https://tn10.kaspa.stream`; the page links kaspa.stream transactions under `/transactions/`. Reason:
+  `explorer-tn10.kaspa.org` is disabled.
+
+## F6 part E (stage agent, 2026-10-28): launch preparation with the owner's choices (nothing launched, deployed or submitted; not committed)
+
+No covenant change; goldens untouched. Network contact: read-only RPC (`tn10 info`, fee estimate, the two re-anchor
+proofs and the catch-up) and the Vercel/Caddy documentation. **No testnet-10 transaction was submitted** (item 4b
+below), no Vercel command, no genesis.
+
+### What changed
+
+1. **`tn10 beta genesis --profile beta8h`** (`crates/tn10/src/campaign.rs` `GenesisKnobs::beta`, `main.rs`):
+   round_len 288,000 (8 h), d_min 144,000, T(1) = genesis + 8 h, windows at their floors, J(1) 100 KAS,
+   **V0 510 KAS** (the cap's floor for L(1) = 102 KAS; draw() tops the jackpot up to the cap, so 510 keeps it at
+   100 KAS from round 2, 600 would give 117.65), the owner's fee address built in (`BETA_FEE_ADDRESS`,
+   `schnorr_payout`; `--fee-address` overrides), the referral address printed with the page values
+   (`BETA_REFERRAL_ADDRESS`). Test `beta_profiles_pass_genesis_validation` extended (the knobs, the fee key in the
+   controller and params, V0 509.99999999 refused, J(2) at V' 510/600 and m' 2/3/10, a mainnet address refused).
+2. **Several indexer URLs with fallback** (`web/src/net/indexers.ts`, new): `VITE_INDEXER_URL` one URL or a
+   comma-separated list (at most 8, no duplicates, http(s) or the same-origin `/api/v1/`); `IndexerSet` asks them in
+   order, the last good one first (`localStorage` `kl.indexer`); `withIndexer(ctx, op)` runs one read-and-check
+   step on one indexer and moves on for `FALLBACK` codes (`indexer_unavailable` incl. timeout and busy,
+   `chain_mismatch`, `bytes_length`, `input_format`, `store_format`, `anchor_invalid`); any other code is thrown at
+   once; a refusal is reported over an unreachable one. Wrapped (reads and builds only, never a signature or a
+   send): `checkInstance`, `checkedRound`, `loadRoundCard`, `loadSales`, `prepareBuy`, `roundRows`, `checkRow`,
+   `loadDetail`, `verifyRound`, `prepareCaller` (per build inside `unrefused`), `copyRound`, `findByPayout`,
+   `loadVault`; the set's own methods fall back per request for every other call site. `Config.indexerUrl` →
+   `indexerUrls`; `Ctx.indexer` is `IndexerApi`. `scripts/csp.mjs` (every listed origin into connect-src; the
+   proxy rewrite), `check-deploy.mjs` (each entry; the rewrite; `--vercel`: the rewrite route), `check-csp.mjs`
+   (every listed origin probed, and a same-origin `/api/v1/` fetch allowed). `.env.production.example`,
+   `web/CLAUDE.md`.
+3. **`/v1/status` `error`** is the fixed word `store_error` (`routes::STATUS_STORE_ERROR`) for a remote client and
+   for one behind the local proxy; the text only on loopback without `X-Forwarded-For` (`routes::is_local`, shared
+   with `/health`). The page never reads the field (types only). Test `hosted::status_error_text_only_on_loopback`
+   (both client modes; the page's parser still reads it; control: the local answer carries the path, a clean store
+   answers null); mutant (text for everyone) fails it.
+4. **Old-M8 preparation:** `campaign reanchor --check` passed (383 live instance UTXOs unchanged, nothing written,
+   file hashes unchanged), then the real `campaign reanchor`: resume block `e7df021d…` (DAA 605,601,500, pruned) →
+   `05e00563…f9c748` (DAA 608,152,477), caught up to DAA 608,152,503. A copy of the store from before is in this
+   session's scratchpad (`m8-store-before-reanchor`). **No transfer:** the M8 campaign key *is* `TN10_PRIVATE_KEY`
+   (the campaign Runner signs with the funding key; `.env` holds only it and `TN10_ADMIN_KEY`; every M8 ticket pays
+   it), so there is nothing to move, and importing it would put the main test key in a browser. Options for the
+   owner below. Logged in `docs/tn10-mass-check.md` "Front end F6 part E".
+5. **Vercel proxy: feasible on paper** (`docs/launch/site-deploy.md` "The indexer through the site's own
+   address", `indexer-server.md` "Behind the Vercel proxy"): external rewrites work for static prebuilt sites;
+   120 s proxy timeout on every plan; no documented body limit; `no-cache` answers are not cached; Vercel overwrites
+   `X-Forwarded-For` and sends `x-real-ip`, egress IPs unpublished, so per-client limits need Vercel's documented
+   shared-secret header (a `routes` transform) checked by Caddy; bare-IP and `http://` destinations are neither
+   allowed nor refused in the docs (private IPs and IPv6 are refused), so one throwaway deploy must confirm; Hobby's
+   "non-commercial" wording ("any method of requesting or processing payment") may cover a ticket-selling page even
+   on testnet. Prepared: `INDEXER_PROXY_TARGET` (not a page variable) → `csp:write` writes the
+   `/api/v1/:path*` rewrite; the secret transform and the Caddy rule are not written (untested).
+6. Docs: `docs/launch/beta-plan.md` (the `beta8h` section, the figures, the duties), `beta-journeys.md` (8 h pace,
+   J8 fallback journey, the re-anchor, M.1's key finding and options), `site-deploy.md`, `indexer-server.md`.
+
+### Dry-run figures (2026-10-28)
+
+- `beta8h` C0/C1 all ok. **Locked at genesis 547.49 test-KAS** (510 vault + 21 × 1.69 reserves + 2 fee
+  accumulator), **fee 0.4607 KAS**. Dry-run covenant ID `b989a09a…1481107b` (changes at the real genesis).
+- **Main key (read-only):** 4,789.39 test-KAS, 203 coins, largest 3,728.62.
+- **Per day, 3 closes + 3 draws:** fees ≈ 1.96 KAS (close 0.4323, draw 0.2217 at 100 sompi/gram, M8 masses;
+  an absorbing draw unmeasured); reserves: the marker's 1.69 KAS back at each draw; up to 7 × 1.69 KAS per draw
+  locked about 8 days → at most ≈ 300 KAS in flight. Budget ≈ 950 KAS.
+- **6-day close limit:** 5,183,400 DAA = 17.998 rounds of 8 h (miss at most 17 consecutive slots).
+- **Checks tripped:** none; the vault cap is the binding one (V0 ≥ 510 KAS). Close within 4 h of T keeps the 8-h
+  clock; draw within 24 h of the close or the round can be voided.
+
+### Runs (one cargo process at a time)
+
+- `cargo test -j 4 --no-fail-fast` (debug, default members): **1,111 passed, 0 failed, 4 ignored**; the only failing
+  target is `spike_vdf`'s known debug stack overflow (D113). Goldens unchanged (`f1_bytes` passes).
+- `cargo test -j 4 --release -p tn10`: **27 passed** (`beta_profiles_pass_genesis_validation` with `beta8h`).
+- indexer-api `--features doctored --lib --test api --test doctored --test review_f3 --test review_f4 --test
+  hosted`: 6 + 6 + 4 + 2 + 1 + **16** passed (new `status_error_text_only_on_loopback`; its mutant fails it);
+  `--test production`: 1 passed.
+- The web test command: `-p web --release --test api --test f4_tickets --test f4_review --test f5_rounds --test
+  review_f5 --test f6_vault`: 20 (3 ignored) + 6 + 7 + 3 + 6 + 9 passed; **W3 page** (debug): 6 passed; **W1**: 1
+  passed (97 digests, 18 API builds, 291 decode/verify calls, 14 signed); **W4**: 1 passed (149 s).
+- `npm test`: 31 files, **233** tests passed (221 before: 11 in `src/net/indexers.test.ts`, 1 in `config.test.ts`);
+  typecheck, ESLint, Prettier clean. Mutants run by hand and restored: no fallback in `run` (7 of 11 fail);
+  `withIndexer` not pinning (2 fail: the lying-first case and the one-indexer-per-step case).
+- `npm run e2e` (fresh dev run): **23 passed, 1 skipped** (void, on request). Ports 18610, 8790, 8791, 5173, 4173,
+  4174 free afterwards; the run's simnet data (151 MB) deleted.
+- `npm run build`: ok (check-bundle and its control). `npm run check:mainnet`: ok. `npm run check:csp`: **34 checks
+  ok** (32 before; new: a same-origin `/api/v1/` fetch allowed in the page and the worker; every listed indexer
+  origin probed).
+- `check:deploy` rehearsal (environment values: the dry-run covenant ID and bundle hash, the owner's referral
+  address; `csp:write`, `vite build`): two indexer URLs: every check ok; `/api/v1/` plus a direct URL with
+  `INDEXER_PROXY_TARGET=http://203.0.113.5`: every check ok, with the "not encrypted" note. Negative controls: the
+  proxy configuration against the old `vercel.json` (connect-src and rewrites FAIL), `/api/v1/` without a target
+  plus a placeholder URL, a URL listed twice, a target on this machine: each refused. `vercel.json` restored
+  (no diff), `dist` rebuilt with the default configuration.
+- Read-only on testnet-10: `tn10 beta genesis --profile beta8h --dry-run`, `tn10 info`, `tn10 masses`,
+  `campaign reanchor --check`; local files only: `campaign reanchor`.
+
+### Proposed DECISIONS rows (F6 part E)
+
+- **Beta profile `beta8h`:** 8-hour rounds, d_min 4 h, J(1) 100 KAS, V0 510 KAS (the cap's floor, so the jackpot
+  stays at 100 KAS), the owner's fee address, windows at their floors. Reason: the owner's choices of 2026-10-28;
+  V0 600 would raise round 2's jackpot to 117.65 KAS.
+- **Several indexer URLs with fallback:** the page asks the build's list in order, the last good one per browser
+  first, and moves on for unreachable, timed-out, busy or refused answers; one read-and-check step on one indexer;
+  never a retry around a signature or a send. Reason: owner item 6; trust unchanged (every answer node-checked).
+- **`/v1/status` error text only on loopback:** the public `error` is `store_error`.
+- **The M8 campaign key is the main key:** no transfer was made; the M.1 import waits for the owner's choice.
+- **Vercel proxy: feasible, not adopted:** prepared behind `INDEXER_PROXY_TARGET`; needs a throwaway deploy, the
+  secret header and Caddy rule, and an answer on Hobby's commercial-use wording.
+
+### Owner choices (none decided)
+
+1. **Vault size for the beta:** 510 test-KAS (built; the jackpot stays near 100) or more (the jackpot then starts
+   higher from round 2; the vault is your own position, withdrawable).
+2. **Old-M8 check M.1, since the M8 key is your main test key:** A. a new main key, moving about 4,739 test-KAS to it
+   (one more testnet transfer to approve; about an hour), then import the old key with about 50 test-KAS as planned
+   (recommended); B. a `tn10` tool that writes a backup file of the M8 tickets for the page to import, no key in a
+   browser (about half a day; whether Return deposit is offered for a ticket paying another address is unchecked);
+   C. import the main key into the throwaway profile anyway (no work; the beta's funding key sits in a browser,
+   testnet coins only).
+3. **Indexer hosting with no domain:** the Vercel proxy (free with the site; plain http between Vercel and the
+   server for an IP-only server; a throwaway deploy to confirm; per-client limits need the secret-header setup), or
+   a domain for the server (https, the setup already written).
+4. **Vercel plan:** Hobby's "non-commercial" rule mentions "requesting or processing payment from visitors"; a
+   ticket-selling page, even for test-KAS, may need Vercel support's answer or Pro ($20 a month).
+5. Still open from before: the server host, and the go-aheads for genesis (about 548 test-KAS) and the deploy.
+
+### Left
+
+- No e2e test of the fallback in a real browser (the dev run builds one URL); the unit tests run the page's own
+  `checkInstance` on the real wasm against a dead, a hanging, a busy and a lying first URL.
+- `npm run e2e:void` not run; `rounds/load.ts`, `verify.ts` and `caller.ts` changed (wrapped only), so the rule asks
+  for it before committing.
+- The Caddy rule and the Vercel secret transform are sketches; nothing on a real host.
 
 ## F6 security review and fixes (fix agent, 2026-10-28; not committed)
 

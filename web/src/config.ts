@@ -2,6 +2,8 @@
 // fills it from crates/target/simnet-dev/current.json; a testnet-10 build sets it in .env files or the
 // environment. A production build refuses any network but testnet-10 and any faucet (vite.config.ts).
 
+import { parseIndexerUrls } from '@/net/indexers';
+
 export type Network = 'testnet-10' | 'simnet';
 
 export interface Config {
@@ -9,8 +11,11 @@ export interface Config {
   network: Network;
   /** The node's wRPC URL; undefined means a public testnet-10 node from the resolver. */
   nodeUrl: string | undefined;
-  /** The indexer API base, ending in /v1/ (spec 6.3). */
-  indexerUrl: string;
+  /**
+   * The indexer API bases, each ending in /v1/ (spec 6.3), asked in order with fallback (F6 part E,
+   * net/indexers.ts): VITE_INDEXER_URL, one URL or a comma-separated list.
+   */
+  indexerUrls: string[];
   /** The instance this page is built for (64 hex digits). */
   covenantId: string;
   /** The launch bundle's blake2b-256 (spec 6.5), if pinned. */
@@ -64,8 +69,8 @@ export function readConfig(env: ConfigEnv, dev: boolean): { config: Config } | {
   const problems: string[] = [];
   const network = (nonEmpty(env.VITE_NETWORK) ?? 'testnet-10') as Network;
   if (network !== 'testnet-10' && !(dev && network === 'simnet')) problems.push(`VITE_NETWORK=${network}`);
-  const indexerUrl = nonEmpty(env.VITE_INDEXER_URL);
-  if (!indexerUrl) problems.push('VITE_INDEXER_URL is not set');
+  const indexer = parseIndexerUrls(env.VITE_INDEXER_URL);
+  if ('problems' in indexer) problems.push(...indexer.problems);
   const covenantId = nonEmpty(env.VITE_COVENANT_ID)?.toLowerCase();
   if (!covenantId || !HEX64.test(covenantId)) problems.push('VITE_COVENANT_ID is not 64 hex digits');
   const bundleHash = nonEmpty(env.VITE_BUNDLE_HASH)?.toLowerCase();
@@ -86,12 +91,12 @@ export function readConfig(env: ConfigEnv, dev: boolean): { config: Config } | {
   if (nodeUrl && network === 'testnet-10' && !dev && !nodeUrl.startsWith('wss://'))
     problems.push('VITE_NODE_URL is not wss://');
   const faucetUrl = dev && network === 'simnet' ? nonEmpty(env.VITE_FAUCET_URL) : undefined;
-  if (problems.length || !indexerUrl || !covenantId) return { problems };
+  if (problems.length || 'problems' in indexer || !covenantId) return { problems };
   return {
     config: {
       network,
       nodeUrl,
-      indexerUrl: indexerUrl.endsWith('/') ? indexerUrl : `${indexerUrl}/`,
+      indexerUrls: indexer.urls,
       covenantId,
       bundleHash,
       referralAddress,

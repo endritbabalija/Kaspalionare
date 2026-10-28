@@ -32,6 +32,7 @@ import { copyRoundSoon } from '@/store/roundCopy';
 import { ticketKey, type WebStore } from '@/store/webstore';
 import type { WalletAdapter } from '@/wallet/types';
 import type { LotteryClient } from '@/worker/client';
+import { withIndexer } from '@/net/indexers';
 
 /** Spec S1: rebuilds on another shard after a conflict. */
 export const REBUILDS_MAX = 3;
@@ -79,7 +80,12 @@ function sameOutpoint(u: Utxo, o: ApiObject): boolean {
  * round live on the node (`close()` spends them all) and the node's clock before their deadline T; the
  * indexer's status field is not used.
  */
-export async function loadSales(ctx: Ctx, now: () => number = Date.now): Promise<Sales> {
+/** One indexer for the round's sales (F6 part E). */
+export function loadSales(ctx: Ctx, now: () => number = Date.now): Promise<Sales> {
+  return withIndexer(ctx, (c) => loadSalesOn(c, now));
+}
+
+async function loadSalesOn(ctx: Ctx, now: () => number = Date.now): Promise<Sales> {
   const status = await ctx.indexer.status();
   if (status.covenantId.toLowerCase() !== ctx.config.covenantId) {
     throw new PageError('chain_mismatch', `the indexer serves instance ${status.covenantId}`);
@@ -175,12 +181,23 @@ function defaultPick(n: number): number {
 }
 
 /** Build the purchase on one live shard not in `exclude`, with its cost panel figures. */
-export async function prepareBuy(
+export function prepareBuy(
   env: BuyEnv,
   sales: Sales,
   bundle: Combination[],
   referrer: string | undefined,
   exclude: ReadonlySet<number> = new Set(),
+): Promise<Prepared> {
+  // One indexer for the shard's purchases (F6 part E); building only, nothing is signed here.
+  return withIndexer(env.ctx, (ctx) => prepareBuyOn({ ...env, ctx }, sales, bundle, referrer, exclude));
+}
+
+async function prepareBuyOn(
+  env: BuyEnv,
+  sales: Sales,
+  bundle: Combination[],
+  referrer: string | undefined,
+  exclude: ReadonlySet<number>,
 ): Promise<Prepared> {
   const { ctx } = env;
   const candidates = sales.shards.filter((s) => !exclude.has(shardIndexOf(s)));

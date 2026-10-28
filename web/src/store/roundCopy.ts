@@ -14,6 +14,7 @@ import type { CheckedObject, RoundCopyStage, StoredObject, StoredResult, StoredR
 import { PageError, unwrap } from '@/lib/errors';
 import type { Ctx } from '@/net/round';
 import { roundKey, type WebStore } from './webstore';
+import { withIndexer } from '@/net/indexers';
 
 function stored(o: CheckedObject): StoredObject {
   return { role: o.role, state: o.object.state, scriptPublicKey: o.object.utxo.scriptPublicKey };
@@ -26,7 +27,17 @@ function resultOf(objects: CheckedObject[], round: string): StoredResult | undef
   return { winning: first.win, claimDeadline: first.deadline, pools: pools.map(stored) };
 }
 
-export async function copyRound(
+/** One indexer for the copy (F6 part E). */
+export function copyRound(
+  ctx: Ctx,
+  store: WebStore,
+  round: string,
+  now: () => number = Date.now,
+): Promise<StoredRound> {
+  return withIndexer(ctx, (c) => copyRoundOn(c, store, round, now));
+}
+
+async function copyRoundOn(
   ctx: Ctx,
   store: WebStore,
   round: string,

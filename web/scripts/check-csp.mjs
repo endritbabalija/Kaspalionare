@@ -48,7 +48,10 @@ const FIGURE = '/figures/draw-cabinet-tour.html';
 // F6 part C: the indexer origin vercel.json allows (the one https source without a wildcard); the check page is
 // built against it, so the probe of the allowed indexer origin tests the policy that ships.
 const CONNECT = directives(CSP).find(([n]) => n === 'connect-src')?.[1] ?? [];
-const INDEXER = CONNECT.find((x) => x.startsWith('https://') && !x.includes('*')) ?? 'https://indexer.invalid';
+// F6 part E: VITE_INDEXER_URL may list several indexers; every listed origin is probed, and the page is built with
+// all of them (a same-origin /api/v1/ proxy needs no source of its own: 'self').
+const INDEXERS = CONNECT.filter((x) => x.startsWith('https://') && !x.includes('*'));
+const INDEXER = INDEXERS[0] ?? 'https://indexer.invalid';
 const RESOLVER = CONNECT.includes('https://*.kaspa.stream');
 
 let bad = 0;
@@ -62,7 +65,7 @@ run(process.execPath, [vite, 'build', '--outDir', out, '--emptyOutDir'], {
   cwd: WEB,
   env: {
     ...process.env,
-    VITE_INDEXER_URL: `${INDEXER}/v1/`,
+    VITE_INDEXER_URL: (INDEXERS.length ? INDEXERS : [INDEXER]).map((o) => `${o}/v1/`).join(','),
     VITE_COVENANT_ID: '00'.repeat(32),
     VITE_NODE_URL: NODE_URL,
   },
@@ -191,8 +194,12 @@ try {
       const c = await connectIn(where, 'fetch', 'https://eric.kaspa.stream/v2/kaspa/testnet-10/tls/wrpc/borsh');
       check(c === 'none', `${name}: a fetch to a resolver host is allowed by the CSP (${c})`);
     }
-    const d = await connectIn(where, 'fetch', `${INDEXER}/v1/status`);
-    check(d === 'none', `${name}: a fetch to the indexer origin is allowed by the CSP (${d})`);
+    for (const o of INDEXERS.length ? INDEXERS : [INDEXER]) {
+      const d = await connectIn(where, 'fetch', `${o}/v1/status`);
+      check(d === 'none', `${name}: a fetch to the indexer origin ${o} is allowed by the CSP (${d})`);
+    }
+    const e = await connectIn(where, 'fetch', 'http://127.0.0.1:4173/api/v1/status');
+    check(e === 'none', `${name}: a same-origin fetch (the /api/v1/ proxy) is allowed by the CSP (${e})`);
   }
   // The probes' own reports: their directives, and the console's wording of a refused fetch to the probe host.
   const other = reports.filter((t) => !/connect-src|script-src|https:\/\/example\.com\//.test(t));

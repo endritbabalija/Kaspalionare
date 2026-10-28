@@ -36,6 +36,8 @@ costs, and how to set it up step by step. Nothing in it needs programming.
   server reads" below).
 - `/health` tells the public only "ok" or "not ok". The reasons (which can name paths and the node's address) are
   in the log, and in full only to a request from the server itself (`curl http://127.0.0.1:8790/health`).
+- `/v1/status` says only `"error":"store_error"` to the public when the store stopped applying its log (F6 part
+  E); the error's text (it can name the server's paths) is in the log and in a request from the server itself.
 
 The files are in `crates/indexer-api/deploy/`:
 - `Dockerfile`: the reproducible Linux build. Rust 1.94.0, Debian 12, `Cargo.lock`, the pinned rusty-kaspa
@@ -186,6 +188,36 @@ You need:
 - **Updates:**
   - option A: `git pull && docker compose up -d --build`;
   - option B: build and copy the binary again, then `systemctl restart indexer-api`.
+
+## Behind the Vercel proxy (proposal, not tested; docs/launch/site-deploy.md)
+
+If the site forwards `/api/v1/*` to this server (no domain for the server), every request arrives from one of
+Vercel's addresses, which are not published. Vercel puts the visitor's address in `X-Real-IP` (and overwrites
+`X-Forwarded-For`), but anyone can send those headers straight to the server's IP. **Proposed rule:**
+
+1. A long random secret, set in two places only: Vercel's project settings (an environment variable that a
+   `routes` transform copies into a request header, `X-Origin-Secret`, as Vercel documents under "Restricting your
+   origin to Vercel traffic") and the server's Caddy environment (`ORIGIN_SECRET`).
+2. Caddy (the only thing listening on the internet) passes a request to the API **only when the header matches**,
+   and then gives the API the visitor's address from `X-Real-IP`; everything else gets 403. The API keeps its
+   rule: it trusts `X-Forwarded-For` only from Caddy on the same machine (`INDEXER_API_CLIENT_IP=forwarded`).
+   Sketch, to be checked with a local Caddy first (Caddy's docs do not say whether `header_up` can replace the
+   `X-Forwarded-For` it sets itself; [reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)):
+
+   ```
+   :80 {
+     @vercel header X-Origin-Secret {$ORIGIN_SECRET}
+     handle @vercel {
+       reverse_proxy 127.0.0.1:8790 {
+         header_up X-Forwarded-For {http.request.header.X-Real-IP}
+       }
+     }
+     respond 403
+   }
+   ```
+3. Over plain http (an IP-only server) the secret crosses the network unencrypted. Whoever reads it can only
+   pretend to be many visitors (dodging the per-client limits); answers they change are refused by the page. No
+   money is at risk. A domain with https for the server closes this.
 
 ## Per-client limits behind a different proxy
 

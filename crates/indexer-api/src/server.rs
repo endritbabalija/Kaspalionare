@@ -21,6 +21,8 @@
 //!   check; outside `/v1/` (the page never reads it). F6 security review: a remote client gets
 //!   only `{"ok":...}`; the detail (store and node errors, which can name paths and the node's
 //!   URL) only on loopback without a forwarded client, and in the log.
+//!   F6 part E: `/v1/status`'s `error` is the fixed word `store_error` for the same clients;
+//!   the store's error text only on loopback.
 //! - **No keys, no transactions, no writes.** The only inputs are the store directory and
 //!   the bundle file, read-only.
 

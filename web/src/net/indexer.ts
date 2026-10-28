@@ -36,6 +36,8 @@ export class Indexer {
     readonly base: string,
     private readonly lottery: LotteryClient,
     private readonly fetchImpl?: typeof fetch,
+    /** One response's deadline (fetchText's default unless set; F6 part E tests). */
+    private readonly timeoutMs?: number,
   ) {}
 
   private async caps(): Promise<Limits> {
@@ -46,7 +48,7 @@ export class Indexer {
   /** GET a path; a 2xx body, or null for a 404 when `missingOk`. */
   private async get(path: string, cap: number, missingOk = false): Promise<string | null> {
     const url = new URL(path, this.base).toString();
-    const r = await fetchText(url, cap, { fetch: this.fetchImpl });
+    const r = await fetchText(url, cap, { fetch: this.fetchImpl, timeoutMs: this.timeoutMs });
     if (r.status >= 200 && r.status < 300) return r.text;
     if (r.status === 404 && missingOk) return null;
     const small = (await this.caps()).small;

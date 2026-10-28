@@ -9,8 +9,21 @@ describe('config (spec 6.5, 6.6)', () => {
     const r = readConfig(base, false);
     if (!('config' in r)) throw new Error(r.problems.join(', '));
     expect(r.config.network).toBe('testnet-10');
-    expect(r.config.indexerUrl).toBe('http://127.0.0.1:8790/v1/');
+    expect(r.config.indexerUrls).toEqual(['http://127.0.0.1:8790/v1/']);
     expect(r.config.nodeUrl).toBeUndefined();
+  });
+
+  it('takes several indexer URLs, in order (F6 part E), and refuses a bad or repeated one', () => {
+    const r = readConfig({ ...base, VITE_INDEXER_URL: 'https://a.example/v1, https://b.example/v1/' }, false);
+    if (!('config' in r)) throw new Error(r.problems.join(', '));
+    expect(r.config.indexerUrls).toEqual(['https://a.example/v1/', 'https://b.example/v1/']);
+    expect(
+      'problems' in readConfig({ ...base, VITE_INDEXER_URL: 'https://a.example/v1/,https://a.example/v1' }, false),
+    ).toBe(true);
+    expect('problems' in readConfig({ ...base, VITE_INDEXER_URL: 'https://a.example/v1/,javascript:x' }, false)).toBe(
+      true,
+    );
+    expect('problems' in readConfig({ ...base, VITE_INDEXER_URL: ' , ' }, false)).toBe(true);
   });
 
   it('allows the simnet and its faucet in development only', () => {
