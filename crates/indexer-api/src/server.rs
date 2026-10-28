@@ -12,9 +12,15 @@
 //!   each request has a deadline (`timeout`); each connection has a header-read timeout
 //!   and a total lifetime; at most `max_connections` connections are open.
 //! - **Per-client limits** (F6 part C, `limits`): a token bucket per client address (the
-//!   peer, or behind a local reverse proxy its `X-Forwarded-For`); over it, `busy`.
+//!   peer, or behind a local reverse proxy its `X-Forwarded-For`); over it, `busy`. F6 security
+//!   review S1: at most `per_client_inflight` requests of one client at once (below the global
+//!   `max_requests`), and an anchor-proof request waits for its build on a permit of its own
+//!   pool (`max_anchor_waits`), never on one of the global permits: a client holding many slow
+//!   anchor-proof requests during a draw leaves the other endpoints and other clients served.
 //! - **Health** (F6 part C): `GET /health`, 200 or 503, for a process supervisor or an uptime
-//!   check; outside `/v1/` (the page never reads it).
+//!   check; outside `/v1/` (the page never reads it). F6 security review: a remote client gets
+//!   only `{"ok":...}`; the detail (store and node errors, which can name paths and the node's
+//!   URL) only on loopback without a forwarded client, and in the log.
 //! - **No keys, no transactions, no writes.** The only inputs are the store directory and
 //!   the bundle file, read-only.
 
@@ -35,7 +41,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use web::indexer::ApiErrorCode;
 
 use crate::config::Config;
-use crate::limits::{ClientIp, ClientLimiter, Peer, client_of};
+use crate::limits::{ClientIp, ClientLimiter, InFlight, Peer, client_of};
 use crate::routes;
 use crate::store::{Follower, Snapshot};
 
@@ -56,6 +62,8 @@ pub struct FollowHealth {
     fatal: std::sync::atomic::AtomicBool,
     started_ms: u64,
     stale: Duration,
+    /// The followed node and the witness (shown only in `/health`'s local detail).
+    nodes: std::sync::Mutex<(Option<String>, Option<String>)>,
 }
 
 fn now_ms() -> u64 {
@@ -64,7 +72,16 @@ fn now_ms() -> u64 {
 
 impl FollowHealth {
     pub fn new(stale: Duration) -> Self {
-        FollowHealth { last_ok_ms: 0.into(), last_daa: 0.into(), error: Default::default(), fatal: false.into(), started_ms: now_ms(), stale }
+        FollowHealth { last_ok_ms: 0.into(), last_daa: 0.into(), error: Default::default(), fatal: false.into(), started_ms: now_ms(), stale, nodes: Default::default() }
+    }
+    pub fn set_nodes(&self, node: String, witness: Option<String>) {
+        if let Ok(mut g) = self.nodes.lock() {
+            *g = (Some(node), witness);
+        }
+    }
+    /// (the followed node, the witness).
+    pub fn nodes(&self) -> (Option<String>, Option<String>) {
+        self.nodes.lock().map(|g| g.clone()).unwrap_or_default()
     }
     pub fn ok(&self, daa: u64) {
         self.last_ok_ms.store(now_ms(), std::sync::atomic::Ordering::SeqCst);
@@ -105,9 +122,13 @@ pub struct AppState {
     snap: Arc<RwLock<Arc<Snapshot>>>,
     pub anchor: Option<Arc<dyn AnchorProvider>>,
     busy: Arc<Semaphore>,
+    /// Anchor-proof requests' own permits (S1: their waits never hold a global one).
+    anchor_busy: Arc<Semaphore>,
     timeout: Duration,
     /// Per-client token buckets (`None`: off).
     pub limiter: Option<Arc<ClientLimiter>>,
+    /// Per-client requests in flight (on with the per-client limit).
+    pub inflight: Option<Arc<InFlight>>,
     pub client_ip: ClientIp,
     /// The one-process mode's follower (`None` in the store-only mode).
     pub follow: Option<Arc<FollowHealth>>,
@@ -122,8 +143,10 @@ impl AppState {
             snap: Arc::new(RwLock::new(Arc::new(snap))),
             anchor: cfg.anchor.clone(),
             busy: Arc::new(Semaphore::new(cfg.max_requests)),
+            anchor_busy: Arc::new(Semaphore::new(cfg.max_anchor_waits)),
             timeout: cfg.request_timeout,
             limiter: cfg.per_client.map(|(burst, rate)| Arc::new(ClientLimiter::new(burst, rate))),
+            inflight: cfg.per_client.map(|_| InFlight::new(cfg.per_client_inflight)),
             client_ip: cfg.client_ip,
             follow: None,
             #[cfg(feature = "doctored")]
@@ -148,17 +171,28 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
     if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return routes::error(ApiErrorCode::MethodNotAllowed, format!("{} is not served: the indexer API is read-only", req.method()));
     }
-    if let Some(l) = &st.limiter {
-        let peer = req.extensions().get::<Peer>().copied();
-        if let Some(ip) = client_of(peer, req.headers(), st.client_ip) {
-            if !l.allow(ip) {
-                let mut r = routes::error(ApiErrorCode::Busy, "too many requests from this client; retry in a second");
-                r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-                return r;
-            }
+    let client = client_of(req.extensions().get::<Peer>().copied(), req.headers(), st.client_ip);
+    let busy_client = || {
+        let mut r = routes::error(ApiErrorCode::Busy, "too many requests from this client; retry in a second");
+        r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+        r
+    };
+    if let (Some(l), Some(ip)) = (&st.limiter, client) {
+        if !l.allow(ip) {
+            return busy_client();
         }
     }
-    let Ok(_permit) = st.busy.clone().try_acquire_owned() else {
+    let _running = match (&st.inflight, client) {
+        (Some(f), Some(ip)) => match f.enter(ip) {
+            Some(g) => Some(g),
+            None => return busy_client(),
+        },
+        _ => None,
+    };
+    let p = req.uri().path();
+    let anchor = p.starts_with("/v1/rounds/") && p.ends_with("/anchor-proof");
+    let pool = if anchor { &st.anchor_busy } else { &st.busy };
+    let Ok(_permit) = pool.clone().try_acquire_owned() else {
         return routes::error(ApiErrorCode::Busy, "too many requests at once");
     };
     #[cfg_attr(not(feature = "doctored"), allow(unused_mut))]
@@ -218,6 +252,9 @@ pub fn open(cfg: &Config) -> Result<AppState, String> {
                     Ok(false) => {}
                     Err(e) => {
                         let mut s = (*shared.snapshot()).clone();
+                        if s.error.as_deref() != Some(e.as_str()) {
+                            eprintln!("indexer-api: the store does not apply: {e}");
+                        }
                         s.error = Some(e);
                         shared.replace(s);
                     }

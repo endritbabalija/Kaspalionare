@@ -7,7 +7,9 @@
 // (`checkCopy`). Any disagreement refuses the whole file (`backup_mismatch`); a ticket no longer live, an open
 // copy (its lists are taken again from the chain) and a round with nothing left on the chain are left out
 // and reported (an ended ticket's history too: it has nothing left to do, and its end is not checkable). The
-// quick wallet's key is never in the file (it has its own database and its own export). A copy is kept as
+// quick wallet's key is never in the file (it has its own database and its own export), nor any pending
+// purchase, claim or return (format kaspalionare-backup/2; a format-1 file's pending records are not imported).
+// A copy is kept as
 // `mergeCopy` says (never a stage back, never fewer pools than the copy held here; F4 review M2). The limits
 // agree (F4 review S7): the writer keeps a file within what `backupRead` and the worker take, and the node is
 // asked in batches.
@@ -29,7 +31,6 @@ export async function writeBackup(ctx: Ctx, store: WebStore, now: () => number =
       createdMs: String(now()),
       tickets,
       rounds,
-      pending: [],
     }),
   );
   if (w.skipped.length) console.info(`backup: left out ${w.skipped.join(', ')}`);
@@ -134,10 +135,18 @@ export async function importBackup(ctx: Ctx, store: WebStore, text: string): Pro
     if (m.ok.changed) merged.push(m.ok.round);
   }
   for (const r of merged) await store.putRound(r);
+  // Each file ticket is filed under its outpoint (Rust `backupRead`). A ticket this browser already follows, by
+  // its entry's outpoint whatever key it is kept under here, keeps its own record.
+  const held = await store.tickets(ctx.config.covenantId);
   for (const t of keepTickets) {
-    const prev = await store.ticket(t.key);
-    // A ticket this browser already follows keeps its own record.
-    if (!prev) await store.putTicket(t);
+    const u = t.ticket.utxo;
+    const followed = held.some(
+      (h) =>
+        h.key === t.key ||
+        (h.ticket.utxo.transactionId.toLowerCase() === u.transactionId.toLowerCase() &&
+          h.ticket.utxo.index === u.index),
+    );
+    if (!followed) await store.putTicket(t);
   }
   return { summary: contents.summary, rounds, ticketsKept: keepTickets.length, ticketsSpent: spent };
 }

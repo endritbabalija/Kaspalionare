@@ -139,9 +139,10 @@ describe('post-sign check through the page path (spec 6.2, 8)', () => {
 function fakeKasware(network = 'kaspa_testnet_10') {
   const calls: { signInputs: { index: number; sighashType: number }[] }[] = [];
   let open = 0;
+  const account = { now: key.address };
   const api: KasWareApi = {
-    requestAccounts: () => Promise.resolve([key.address]),
-    getAccounts: () => Promise.resolve([key.address]),
+    requestAccounts: () => Promise.resolve([account.now]),
+    getAccounts: () => Promise.resolve([account.now]),
     getNetwork: () => Promise.resolve(network),
     async signPskt(a) {
       if (open > 0) throw { code: 4001, message: 'please request after current approval resolve' };
@@ -160,7 +161,7 @@ function fakeKasware(network = 'kaspa_testnet_10') {
       }
     },
   };
-  return { api, calls };
+  return { api, calls, account };
 }
 
 describe('KasWare adapter (F0 result, DECISIONS 2026-10-26)', () => {
@@ -191,6 +192,20 @@ describe('KasWare adapter (F0 result, DECISIONS 2026-10-26)', () => {
     const both = await Promise.all([w.signInputs(buyBuilt, [1]), w.signInputs(closeBuilt, [18])]);
     expect(both.every((s) => typeof s === 'string')).toBe(true);
     expect(k.calls).toHaveLength(2);
+  });
+
+  // F6 security review: an account switched in KasWare after connect is refused before anything is signed, with
+  // its own code (not a confusing signature_invalid from the post-sign check); connected again, it signs.
+  it('refuses to sign after the account was switched in KasWare', async () => {
+    const k = fakeKasware();
+    const w = new KasWareAdapter(k.api, 'kaspa_testnet_10', () => Promise.resolve([]));
+    await w.connect();
+    k.account.now = 'kaspatest:qq0000000000000000000000000000000000000000000000000000000000000000';
+    await expect(w.signInputs(closeBuilt, [18])).rejects.toMatchObject({ code: 'wallet_account' });
+    expect(k.calls).toHaveLength(0);
+    k.account.now = key.address;
+    expect(typeof (await w.signInputs(closeBuilt, [18]))).toBe('string');
+    expect(k.calls).toHaveLength(1);
   });
 
   it('refuses a sign list that is not the built transaction’s', async () => {

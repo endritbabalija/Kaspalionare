@@ -46,8 +46,8 @@ export function VaultRequestRows(p: VaultRequestRowsProps) {
           <FigureRow name="Reserve" testId={`${id}-reserve-row`}>
             <Amount sompi={f.reserve} testId={`${id}-reserve`} />
           </FigureRow>
-          <FigureRow name="Back" testId={`${id}-back-row`} part>
-            <span data-testid={`${id}-back`}>With settlement</span>
+          <FigureRow name="Back at" testId={`${id}-back-row`} part>
+            <span data-testid={`${id}-back`}>Settlement</span>
           </FigureRow>
         </>
       )}

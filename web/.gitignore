@@ -17,3 +17,8 @@ test-results/
 .vite/
 # Vercel CLI (F6 part C): the linked project and vercel build's output (.vercel/output), never committed
 .vercel/
+# Build configuration (F6 security review): web/.env.production is committed on purpose: every value in it is
+# public (it ends up in the page). Vite's local overrides (.env.local, .env.production.local) are never committed,
+# so what is built is what the repository shows.
+.env.local
+.env.*.local

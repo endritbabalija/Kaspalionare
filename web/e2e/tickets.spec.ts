@@ -20,7 +20,17 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test, type BrowserContext, type Locator, type Page } from '@playwright/test';
-import { axe, buyAndWait, devRun, fundedQuickWallet, layoutHolds, localStore, namedAndTagged, shots } from './helpers';
+import {
+  axe,
+  buyAndWait,
+  devRun,
+  fundedQuickWallet,
+  layoutHolds,
+  localStore,
+  namedAndTagged,
+  shots,
+  untraced,
+} from './helpers';
 
 interface Combo {
   main: number[];
@@ -79,8 +89,9 @@ async function hangApi(ctx: BrowserContext) {
   await ctx.route(`${api.origin}/**`, () => undefined);
 }
 
-function card(page: Page, txid: string): Locator {
-  return page.locator(`article[data-key="${txid}:1"]`);
+/** The card of the ticket bought in `txid` (output 1), or of the record filed under `key` (`<txid>:<index>`). */
+function card(page: Page, txidOrKey: string): Locator {
+  return page.locator(`article[data-key="${txidOrKey.includes(':') ? txidOrKey : `${txidOrKey}:1`}"]`);
 }
 
 /** My tickets, read again until `f` holds (the screen also re-reads every 15 s). */
@@ -246,9 +257,12 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   test.setTimeout(40 * 60_000);
   const w = await fundedQuickWallet(browser);
   const { page } = w;
-  await page.getByTestId('quick-export').click();
-  const secret = (await page.getByTestId('quick-exported').textContent()) ?? '';
-  await page.getByTestId('quick-exported-hide').click();
+  const secret = await untraced(w.ctx, async () => {
+    await page.getByTestId('quick-export').click();
+    const s = (await page.getByTestId('quick-exported').textContent()) ?? '';
+    await page.getByTestId('quick-exported-hide').click();
+    return s;
+  });
   const { A, B, C } = combinations();
   const t1 = await buyTicket(page, [B, A]);
   const t2 = await buyTicket(page, [C, A]);
@@ -296,8 +310,10 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   const two = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const p2 = await two.newPage();
   await p2.goto('/#/wallet');
-  await p2.getByTestId('quick-import-input').fill(secret);
-  await p2.getByTestId('quick-import').click();
+  await untraced(two, async () => {
+    await p2.getByTestId('quick-import-input').fill(secret);
+    await p2.getByTestId('quick-import').click();
+  });
   await expect(p2.getByTestId('wallet-status')).toHaveText('Quick wallet');
   await ticketsUntil(p2, async () => (await card(p2, t3).getAttribute('data-state')) === 'win');
   // The page's own warnings in the race (a refusal's code and detail), for the log.
@@ -368,7 +384,7 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   const file = path.join(shots, '..', 'backup.json');
   await dl.saveAs(file);
   const text = readFileSync(file, 'utf8');
-  expect(text).not.toContain(secret);
+  expect(text.includes(secret), 'the backup holds no key').toBe(false);
   const store = await localStore(page);
   const t1Record = store.tickets.find((x) => (x as { key: string }).key === `${t1}:1`);
 
@@ -376,8 +392,10 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   const j3 = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const p3 = await j3.newPage();
   await p3.goto('/#/wallet');
-  await p3.getByTestId('quick-import-input').fill(secret);
-  await p3.getByTestId('quick-import').click();
+  await untraced(j3, async () => {
+    await p3.getByTestId('quick-import-input').fill(secret);
+    await p3.getByTestId('quick-import').click();
+  });
   await expect(p3.getByTestId('wallet-status')).toHaveText('Quick wallet');
   await ticketsUntil(p3, async () => (await p3.locator('article[data-key]').count()) >= 1);
   const found = p3.locator('article[data-key]').first();
@@ -421,8 +439,10 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   await stopApi(fresh);
   const pf = await fresh.newPage();
   await pf.goto('/#/wallet');
-  await pf.getByTestId('quick-import-input').fill(secret);
-  await pf.getByTestId('quick-import').click();
+  await untraced(fresh, async () => {
+    await pf.getByTestId('quick-import-input').fill(secret);
+    await pf.getByTestId('quick-import').click();
+  });
   await expect(pf.getByTestId('wallet-status')).toHaveText('Quick wallet');
   await pf.goto('/#/backup');
   const bad = path.join(shots, '..', 'backup-corrupted.json');
@@ -437,11 +457,17 @@ test('F4: a win, a shared win, an accrual below P_MIN and the last claims; the l
   await expect(pf.getByTestId(`backup-file-rounds-${drawn.round}-outcome-value`)).toHaveAttribute('data-value', 'kept');
   await expect(pf.getByTestId(`backup-rounds-round-${drawn.round}`)).toBeVisible();
   await quality(pf, 'backup');
-  await ticketsUntil(pf, async () => (await card(pf, t1).getAttribute('data-state')) === 'partly-claimed');
+  // F6 security review: an imported ticket is filed under its entry's outpoint (T1's after its accrual claim),
+  // never under a key the file names; T1 is the one live ticket in the file.
+  await ticketsUntil(pf, async () => (await pf.locator('article[data-key]').count()) === 1);
+  const t1Key = (await pf.locator('article[data-key]').first().getAttribute('data-key')) ?? '';
+  expect(t1Key).toMatch(/^[0-9a-f]{64}:\d+$/);
+  expect(t1Key).not.toBe(`${t1}:1`);
+  await ticketsUntil(pf, async () => (await card(pf, t1Key).getAttribute('data-state')) === 'partly-claimed');
   await expect(pf.getByTestId('tickets')).toHaveAttribute('data-api', 'down');
-  await expect(card(pf, t1).getByTestId(/-claim-1-shared$/)).toHaveAttribute('data-value', '2');
-  await claim(pf, t1, 1);
-  await ticketsUntil(pf, async () => (await card(pf, t1).getAttribute('data-state')) === 'claimed');
+  await expect(card(pf, t1Key).getByTestId(/-claim-1-shared$/)).toHaveAttribute('data-value', '2');
+  await claim(pf, t1Key, 1);
+  await ticketsUntil(pf, async () => (await card(pf, t1Key).getAttribute('data-state')) === 'claimed');
   await pf.screenshot({ path: path.join(shots, 'tickets-imported-claimed.png'), fullPage: true });
   await fresh.close();
   await w.ctx.close();

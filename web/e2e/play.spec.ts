@@ -16,6 +16,7 @@ import {
   namedAndTagged,
   shots,
   ticketOf,
+  untraced,
 } from './helpers';
 
 interface Bought {
@@ -88,10 +89,13 @@ test('the quick wallet: created, funded by the dev faucet, exported and imported
   await page.getByTestId('menu-referral').click();
   const link = await page.evaluate(() => navigator.clipboard.readText());
   expect(new URL(link).searchParams.get('ref')).toBe(w.address);
-  await page.getByTestId('quick-export').click();
-  const secret = (await page.getByTestId('quick-exported').textContent()) ?? '';
-  expect(secret).toMatch(/^[0-9a-f]{64}$/);
-  await page.getByTestId('quick-exported-hide').click();
+  const secret = await untraced(w.ctx, async () => {
+    await page.getByTestId('quick-export').click();
+    const s = (await page.getByTestId('quick-exported').textContent()) ?? '';
+    await page.getByTestId('quick-exported-hide').click();
+    return s;
+  });
+  expect(/^[0-9a-f]{64}$/.test(secret), 'the exported key is 64 hex digits').toBe(true);
   for (const width of [360, 430]) {
     await page.setViewportSize({ width, height: 844 });
     await layoutHolds(page, `wallet ${width}`);
@@ -107,8 +111,10 @@ test('the quick wallet: created, funded by the dev faucet, exported and imported
   const other = await browser.newContext();
   const p2 = await other.newPage();
   await p2.goto('/#/wallet');
-  await p2.getByTestId('quick-import-input').fill(secret);
-  await p2.getByTestId('quick-import').click();
+  await untraced(other, async () => {
+    await p2.getByTestId('quick-import-input').fill(secret);
+    await p2.getByTestId('quick-import').click();
+  });
   await expect(p2.getByTestId('wallet-status')).toHaveText('Quick wallet');
   await expect(p2.getByTestId('wallet-address')).toHaveAttribute('data-value', w.address);
   await other.close();

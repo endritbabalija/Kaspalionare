@@ -65,8 +65,8 @@ export function CallerPanel(p: CallerPanelProps) {
         Run the round
       </h2>
       {due.kind === 'waits' && (
-        <FigureRow name="close()" testId={`${id}-waits`}>
-          <span data-testid={`${id}-status`}>Waits for draw()</span>
+        <FigureRow name="close() after" testId={`${id}-waits`}>
+          <span data-testid={`${id}-status`}>draw()</span>
         </FigureRow>
       )}
       {due.kind === 'later' && (
@@ -110,8 +110,8 @@ export function CallerPanel(p: CallerPanelProps) {
             )}
           </FigureRow>
           {f?.reserveBackWithDraw && (
-            <FigureRow name="Back" testId={`${id}-back-row`} part>
-              <span data-testid={`${id}-back`}>With draw()</span>
+            <FigureRow name="Back at" testId={`${id}-back-row`} part>
+              <span data-testid={`${id}-back`}>draw()</span>
             </FigureRow>
           )}
           {f?.reserveBackFrom && (
@@ -120,8 +120,8 @@ export function CallerPanel(p: CallerPanelProps) {
             </FigureRow>
           )}
           {f?.record && (
-            <FigureRow name="Record back" testId={`${id}-record-back-row`} part>
-              <span data-testid={`${id}-record-back`}>With settlement</span>
+            <FigureRow name="Record back at" testId={`${id}-record-back-row`} part>
+              <span data-testid={`${id}-record-back`}>Settlement</span>
             </FigureRow>
           )}
           {f && f.absorbed > 0 && (

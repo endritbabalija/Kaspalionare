@@ -173,3 +173,17 @@ export async function localStore(page: Page): Promise<{ tickets: unknown[]; roun
       }),
   );
 }
+
+/**
+ * Run `fn` with the context's trace paused (F6 security review): the steps that show or type a quick wallet's key
+ * (the exported key in the DOM, `fill()` with it) are kept out of the trace Playwright keeps on a failure
+ * (`trace: 'retain-on-failure'`). The chunk recorded so far is dropped and a new one starts after `fn`.
+ */
+export async function untraced<T>(ctx: BrowserContext, fn: () => Promise<T>): Promise<T> {
+  await ctx.tracing.stopChunk().catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    await ctx.tracing.startChunk().catch(() => undefined);
+  }
+}

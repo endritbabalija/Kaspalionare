@@ -1,12 +1,20 @@
 //! The backup file (spec frontend 3 S8, 6.3, 8 "Local copy"; front end F4) and the re-check of a
 //! kept round copy against the chain.
 //!
-//! **The file** (`kaspalionare-backup/1`): one JSON object with the whole local store of one
-//! instance (its `webstore/2` tickets, rounds and pending purchases; never the quick wallet's
-//! key, which lives in its own database and has its own export, spec S7), the network and
-//! instance it belongs to, and a checksum: blake2b-256 of the file's compact JSON with the
-//! checksum field empty. The checksum finds a damaged file; it is no seal (anyone can write a
-//! file with a matching checksum), so the import also checks every record against the chain.
+//! **The file** (`kaspalionare-backup/2`, F6 security review): one JSON object with the
+//! instance's `webstore/2` tickets and round copies (never a pending purchase, claim or return:
+//! their signed transactions stay in this browser; never the quick wallet's key, which lives in
+//! its own database and has its own export, spec S7), the network and instance it belongs to,
+//! and a checksum: blake2b-256 of the file's compact JSON with the checksum field empty. The
+//! checksum finds a damaged file; it is no seal (anyone can write a file with a matching
+//! checksum), so the import also checks every record against the chain. Each ticket is filed
+//! under its outpoint (`<transactionId>:<index>` of its ticket entry), so the key an imported
+//! ticket is kept under is bound to the entry the page checks on the node, never a name the
+//! file picks.
+//!
+//! **Format 1** (`kaspalionare-backup/1`, F4 to F6) still imports: its `pending` records (the
+//! page always wrote none) are read for the checksum and never imported, and its ticket keys
+//! (the purchase's outpoint) are replaced by each ticket's outpoint.
 //!
 //! **Reading** (`backup_read`), before anything is kept, in this order: the size cap
 //! (`BACKUP_MAX`), strict JSON (`deny_unknown_fields` on every record), the format, this page's
@@ -38,8 +46,10 @@ use crate::dto::{Combination, CovUtxo, Dec, Hex, RootsInput, Utxo};
 use crate::views::RoleName;
 use crate::webstore::{self, RoundCopyStage, StoredObject, StoredPending, StoredRound, StoredTicket};
 
-/// The backup file's format name.
-pub const BACKUP_FORMAT: &str = "kaspalionare-backup/1";
+/// The backup file's format name (the one the page writes).
+pub const BACKUP_FORMAT: &str = "kaspalionare-backup/2";
+/// The F4 format, still read (its pending records are not imported).
+pub const BACKUP_FORMAT_V1: &str = "kaspalionare-backup/1";
 /// The largest backup file read (bytes): about 130 rounds of 10,000 combinations. The writer
 /// keeps every file it writes within it, and within `WORKER_ARGS_MAX` once escaped as the
 /// `backupRead` argument (F4 review S7: anything the page writes, it can import).
@@ -54,7 +64,7 @@ pub const RECORDS_MAX: usize = 4_096;
 #[derive(Tsify, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupFile {
-    /// `kaspalionare-backup/1`.
+    /// `kaspalionare-backup/2`.
     pub format: String,
     /// The record format (`webstore/2`).
     pub store: String,
@@ -62,10 +72,26 @@ pub struct BackupFile {
     pub covenant_id: Hex,
     /// Unix milliseconds.
     pub created_ms: Dec,
+    /// Each filed under its outpoint.
+    pub tickets: Vec<StoredTicket>,
+    pub rounds: Vec<StoredRound>,
+    /// blake2b-256 of the file's compact JSON with this field empty (hex).
+    pub checksum: Hex,
+}
+
+/// A `kaspalionare-backup/1` file (read only): format 2 plus the pending purchases, which are
+/// never imported.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupFileV1 {
+    pub format: String,
+    pub store: String,
+    pub network: String,
+    pub covenant_id: Hex,
+    pub created_ms: Dec,
     pub tickets: Vec<StoredTicket>,
     pub rounds: Vec<StoredRound>,
     pub pending: Vec<StoredPending>,
-    /// blake2b-256 of the file's compact JSON with this field empty (hex).
     pub checksum: Hex,
 }
 
@@ -77,8 +103,6 @@ pub struct BackupWriteInput {
     pub created_ms: Dec,
     pub tickets: Vec<StoredTicket>,
     pub rounds: Vec<StoredRound>,
-    #[serde(default)]
-    pub pending: Vec<StoredPending>,
 }
 
 /// `backupRead`: the file's text and this page's instance.
@@ -109,9 +133,9 @@ pub struct BackupRound {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupContents {
     pub created_ms: Dec,
+    /// Each keyed by its outpoint (`<transactionId>:<index>` of its ticket entry).
     pub tickets: Vec<StoredTicket>,
     pub rounds: Vec<StoredRound>,
-    pub pending: Vec<StoredPending>,
     /// Per round, newest first.
     pub summary: Vec<BackupRound>,
 }
@@ -128,8 +152,17 @@ fn as_invalid(e: Error) -> Error {
 fn checksum(f: &BackupFile) -> Result<String> {
     let mut c = f.clone();
     c.checksum = String::new();
-    let text = serde_json::to_string(&c).map_err(|e| Error::new(Code::Encode, e.to_string()))?;
+    checksum_of(&c)
+}
+
+fn checksum_of<T: Serialize>(c: &T) -> Result<String> {
+    let text = serde_json::to_string(c).map_err(|e| Error::new(Code::Encode, e.to_string()))?;
     Ok(hex(&crate::indexer::bundle_hash(text.as_bytes())))
+}
+
+/// The key a ticket is filed under in a backup: its ticket entry's outpoint.
+pub fn outpoint_key(t: &StoredTicket) -> String {
+    format!("{}:{}", t.ticket.utxo.transaction_id.to_ascii_lowercase(), t.ticket.utxo.index)
 }
 
 fn bundle_of(t: &lottery::state::TicketState) -> Vec<Combination> {
@@ -256,26 +289,24 @@ fn webstore_round_key(cov: &str, round: &str) -> String {
     format!("{}:{round}", cov.to_ascii_lowercase())
 }
 
-fn check_pending(net: Net, cov_hex: &str, p: &StoredPending) -> Result<()> {
-    if !p.covenant_id.eq_ignore_ascii_case(cov_hex) || p.network != net.name() || !p.signed.id.eq_ignore_ascii_case(&p.key) {
-        return Err(invalid(format!("pending {}: of another instance, network or transaction", p.key)));
-    }
-    let s = verify::decode_state(Role::Ticket, &unhex("ticket.state", &p.ticket.state)?)?;
-    if convert::spk_hex(&verify::state_spk(&s)?) != p.ticket.script_public_key.to_ascii_lowercase() {
-        return Err(invalid(format!("pending {}: its ticket's script is not its state's", p.key)));
-    }
-    Ok(())
-}
-
-/// Every record checked on its own (no chain): `backup_invalid` on the first fault.
-pub fn check_records(net: Net, covenant_id: &str, tickets: &[StoredTicket], rounds: &[StoredRound], pending: &[StoredPending]) -> Result<()> {
+/// Every record checked on its own (no chain): `backup_invalid` on the first fault. Each ticket
+/// must be filed under its outpoint, once.
+pub fn check_records(net: Net, covenant_id: &str, tickets: &[StoredTicket], rounds: &[StoredRound]) -> Result<()> {
     let cov = cov_of(covenant_id).map_err(as_invalid)?;
     let cov_hex = hex(&cov.as_bytes());
-    if tickets.len() > RECORDS_MAX || rounds.len() > RECORDS_MAX || pending.len() > RECORDS_MAX {
+    if tickets.len() > RECORDS_MAX || rounds.len() > RECORDS_MAX {
         return Err(invalid("too many records"));
     }
+    let mut keys = std::collections::BTreeSet::new();
     for t in tickets {
         check_ticket(net, &cov, &cov_hex, t).map_err(as_invalid)?;
+        let k = outpoint_key(t);
+        if !t.key.eq_ignore_ascii_case(&k) {
+            return Err(invalid(format!("ticket {}: not filed under its outpoint {k}", t.key)));
+        }
+        if !keys.insert(k) {
+            return Err(invalid(format!("ticket {} twice", t.key)));
+        }
     }
     let mut seen = std::collections::BTreeSet::new();
     for r in rounds {
@@ -283,9 +314,6 @@ pub fn check_records(net: Net, covenant_id: &str, tickets: &[StoredTicket], roun
         if !seen.insert(r.key.clone()) {
             return Err(invalid(format!("round {} twice", r.round)));
         }
-    }
-    for p in pending {
-        check_pending(net, &cov_hex, p).map_err(as_invalid)?;
     }
     Ok(())
 }
@@ -302,29 +330,28 @@ pub struct BackupWritten {
 
 /// Spec S8: the backup file of the store's records. Each record is checked first, so a page
 /// never writes a file it would refuse to read; a record that fails is left out and named
-/// (`skipped`). A ticket's pending claim or return is not exported (its signed transaction
-/// stays in this browser). The file is compact JSON within `BACKUP_MAX`, and within
+/// (`skipped`). Pending purchases, claims and returns are not exported (their signed
+/// transactions stay in this browser). Each ticket is filed under its outpoint (a ticket after a
+/// claim keeps its purchase's key in the store; the file names its current entry); a second
+/// record of the same outpoint is left out. The file is compact JSON within `BACKUP_MAX`, and within
 /// `WORKER_ARGS_MAX` as the escaped `backupRead` argument, else `backup_invalid` (F4 review S7).
 pub fn backup_write(net: Net, i: &BackupWriteInput) -> Result<BackupWritten> {
     let cov = cov_of(&i.covenant_id).map_err(as_invalid)?;
     let cov_hex = hex(&cov.as_bytes());
-    if i.tickets.len() > RECORDS_MAX || i.rounds.len() > RECORDS_MAX || i.pending.len() > RECORDS_MAX {
+    if i.tickets.len() > RECORDS_MAX || i.rounds.len() > RECORDS_MAX {
         return Err(invalid(format!("{} tickets, {} rounds: at most {RECORDS_MAX} of each", i.tickets.len(), i.rounds.len())));
     }
     let mut skipped = vec![];
     let mut tickets = vec![];
+    let mut keys = std::collections::BTreeSet::new();
     for t in &i.tickets {
-        let t = StoredTicket { pending: None, ..t.clone() };
-        if check_ticket(net, &cov, &cov_hex, &t).is_ok() { tickets.push(t) } else { skipped.push(t.key.clone()) }
+        let filed = StoredTicket { pending: None, key: outpoint_key(t), ..t.clone() };
+        if check_ticket(net, &cov, &cov_hex, &filed).is_ok() && keys.insert(filed.key.clone()) { tickets.push(filed) } else { skipped.push(t.key.clone()) }
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut rounds = vec![];
     for r in &i.rounds {
         if check_round(net, &cov_hex, r).is_ok() && seen.insert(r.key.clone()) { rounds.push(r.clone()) } else { skipped.push(r.key.clone()) }
-    }
-    let mut pending = vec![];
-    for p in &i.pending {
-        if check_pending(net, &cov_hex, p).is_ok() { pending.push(p.clone()) } else { skipped.push(p.key.clone()) }
     }
     let mut f = BackupFile {
         format: BACKUP_FORMAT.into(),
@@ -334,7 +361,6 @@ pub fn backup_write(net: Net, i: &BackupWriteInput) -> Result<BackupWritten> {
         created_ms: i.created_ms.clone(),
         tickets,
         rounds,
-        pending,
         checksum: String::new(),
     };
     f.checksum = checksum(&f)?;
@@ -398,9 +424,33 @@ pub fn backup_read(net: Net, i: &BackupReadInput) -> Result<BackupContents> {
     if i.text.len() > BACKUP_MAX {
         return Err(invalid(format!("{} bytes (at most {BACKUP_MAX})", i.text.len())));
     }
-    let f: BackupFile = serde_json::from_str(&i.text).map_err(|e| invalid(format!("not a backup file: {e}")))?;
+    #[derive(Deserialize)]
+    struct Head {
+        format: String,
+    }
+    let not = |e: serde_json::Error| invalid(format!("not a backup file: {e}"));
+    let head: Head = serde_json::from_str(&i.text).map_err(not)?;
+    let f: BackupFile = match head.format.as_str() {
+        BACKUP_FORMAT => serde_json::from_str(&i.text).map_err(not)?,
+        BACKUP_FORMAT_V1 => {
+            let v1: BackupFileV1 = serde_json::from_str(&i.text).map_err(not)?;
+            if v1.pending.len() > RECORDS_MAX {
+                return Err(invalid("too many records"));
+            }
+            if checksum_of(&BackupFileV1 { checksum: String::new(), ..v1.clone() })? != v1.checksum.to_ascii_lowercase() {
+                return Err(invalid("the checksum does not hold: the file is damaged"));
+            }
+            // Format 1 filed a ticket under its purchase's outpoint; here each is filed under its own.
+            // Its pending records are not imported.
+            let tickets = v1.tickets.into_iter().map(|t| StoredTicket { key: outpoint_key(&t), ..t }).collect();
+            let mut f = BackupFile { format: v1.format, store: v1.store, network: v1.network, covenant_id: v1.covenant_id, created_ms: v1.created_ms, tickets, rounds: v1.rounds, checksum: String::new() };
+            f.checksum = checksum(&f)?;
+            f
+        }
+        other => return Err(invalid(format!("format {other}"))),
+    };
     let cov = cov_of(&i.covenant_id).map_err(as_invalid)?;
-    if f.format != BACKUP_FORMAT || f.store != webstore::FORMAT {
+    if f.store != webstore::FORMAT {
         return Err(invalid(format!("format {} / {}", f.format, f.store)));
     }
     if f.network != net.name() || convert::hash32("covenantId", &f.covenant_id).map_err(as_invalid)? != cov.as_bytes() {
@@ -409,12 +459,12 @@ pub fn backup_read(net: Net, i: &BackupReadInput) -> Result<BackupContents> {
     if checksum(&f)? != f.checksum.to_ascii_lowercase() {
         return Err(invalid("the checksum does not hold: the file is damaged"));
     }
-    check_records(net, &i.covenant_id, &f.tickets, &f.rounds, &f.pending)?;
+    check_records(net, &i.covenant_id, &f.tickets, &f.rounds)?;
     if let Some(t) = f.tickets.iter().find(|t| t.pending.is_some()) {
         return Err(invalid(format!("ticket {}: a pending action in a backup", t.key)));
     }
     let summary = summary(&f);
-    Ok(BackupContents { created_ms: f.created_ms, tickets: f.tickets, rounds: f.rounds, pending: f.pending, summary })
+    Ok(BackupContents { created_ms: f.created_ms, tickets: f.tickets, rounds: f.rounds, summary })
 }
 
 // ------------------------------------------------------------------------------ the round's pools

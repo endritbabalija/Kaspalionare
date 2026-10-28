@@ -139,7 +139,7 @@ pub fn winning_numbers_bound(i: &WinningInput) -> Result<(WinningOut, bool)> {
             verify::check_marker(&mk)?;
             let c = cases::controller(&obj("controller", controller)?, &cov)?;
             verify::check_controller(&c)?;
-            if c.round != mk.round + 1 || c.drawn != 0 {
+            if mk.round.checked_add(1) != Some(c.round) || c.drawn != 0 {
                 return Err(mismatch("the controller is not the undrawn controller of the marker's next round"));
             }
             (mk.round, mk.m, lottery::game::anchor_daa(mo.entry.block_daa_score as i64, c.seed_offset), None)

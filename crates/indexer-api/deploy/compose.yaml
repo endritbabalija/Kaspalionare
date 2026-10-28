@@ -2,6 +2,8 @@
 # Host networking, so Caddy reaches the API on 127.0.0.1 and the API sees a loopback peer (its per-client limit
 # then trusts Caddy's X-Forwarded-For). Start: `docker compose up -d`; logs: `docker compose logs -f`;
 # stop: `docker compose down` (the API finishes its current batch and stops; the store stays in ./data).
+# Caddy is pinned by digest (caddy:2 on 2026-10-28; update: `docker buildx imagetools inspect caddy:2`, then put the
+# printed "Digest:" after `@`); the API image is built from the pinned Dockerfile.
 services:
   indexer-api:
     build:
@@ -16,7 +18,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 60s
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
     network_mode: host
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

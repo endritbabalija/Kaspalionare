@@ -12,11 +12,14 @@
 //! | `--max-connections <n>` | `INDEXER_API_MAX_CONNECTIONS` | 256 |
 //! | `--per-client-burst <n>` | `INDEXER_API_PER_CLIENT_BURST` | 120 requests |
 //! | `--per-client-rate <n>` | `INDEXER_API_PER_CLIENT_RATE` | 20 requests a second (`off`: no per-client limit) |
+//! | `--per-client-inflight <n>` | `INDEXER_API_PER_CLIENT_INFLIGHT` | 16 requests of one client at once (with the per-client limit) |
+//! | `--max-anchor-waits <n>` | `INDEXER_API_MAX_ANCHOR_WAITS` | 32 anchor-proof requests at once (their own pool, not the 64 global permits) |
 //! | `--client-ip <peer\|forwarded>` | `INDEXER_API_CLIENT_IP` | `peer`; `forwarded`: the last `X-Forwarded-For` entry when the peer is loopback (a local reverse proxy) |
 //! | `--node <url\|resolver>` | `INDEXER_API_NODE` | none: serve the store only; with it, the one-process mode (`follow`): `wss://…`/`ws://…` a node's Borsh wRPC, `resolver` a public node |
 //! | `--start <hash>` | `INDEXER_API_START` | a new store's first chain block (before genesis); a store with a log resumes from it |
 //! | `--node-poll-ms <n>` | `INDEXER_API_NODE_POLL_MS` | 10000 |
 //! | `--stale-ms <n>` | `INDEXER_API_STALE_MS` | 120000: `/health` is 503 when the node was not read for this long |
+//! | `--witness <url\|resolver\|off>` | `INDEXER_API_WITNESS` | with `--node`: a second, independent node that must report the same chain blocks and accepted transactions before a batch is persisted (`follow`); required (or `off`) for a testnet-10 instance |
 //!
 //! Unknown flags are refused (so a misspelt one never goes unnoticed, and the production
 //! binary has no `--doctor`).
@@ -28,7 +31,7 @@ use std::time::Duration;
 
 use kaspa_hashes::Hash;
 
-use crate::follow::FollowOpts;
+use crate::follow::{FollowOpts, Witness};
 use crate::limits::ClientIp;
 use crate::server::AnchorProvider;
 
@@ -45,6 +48,10 @@ pub struct Config {
     pub connection_lifetime: Duration,
     pub max_connections: usize,
     pub max_requests: usize,
+    /// Anchor-proof requests at once (their own pool).
+    pub max_anchor_waits: usize,
+    /// Requests of one client at once (with `per_client`).
+    pub per_client_inflight: usize,
     pub anchor: Option<Arc<dyn AnchorProvider>>,
     /// Per-client (burst, rate per second); `None`: no per-client limit.
     pub per_client: Option<(u64, u64)>,
@@ -75,6 +82,8 @@ impl Config {
             connection_lifetime: Duration::from_secs(120),
             max_connections: 256,
             max_requests: 64,
+            max_anchor_waits: 32,
+            per_client_inflight: 16,
             anchor: None,
             per_client: Some((120, 20)),
             client_ip: ClientIp::Peer,
@@ -86,7 +95,7 @@ impl Config {
     }
 }
 
-pub const USAGE: &str = "usage: indexer-api --store <dir> --cov <hex> [--bundle <file>] [--bind <addr:port>] [--allow-origin <origin>]... [--poll-ms <n>] [--timeout-ms <n>] [--max-connections <n>] [--per-client-burst <n>] [--per-client-rate <n|off>] [--client-ip <peer|forwarded>] [--node <url|resolver> [--start <hash>] [--node-poll-ms <n>] [--stale-ms <n>]]";
+pub const USAGE: &str = "usage: indexer-api --store <dir> --cov <hex> [--bundle <file>] [--bind <addr:port>] [--allow-origin <origin>]... [--poll-ms <n>] [--timeout-ms <n>] [--max-connections <n>] [--per-client-burst <n>] [--per-client-rate <n|off>] [--per-client-inflight <n>] [--max-anchor-waits <n>] [--client-ip <peer|forwarded>] [--node <url|resolver> [--witness <url|resolver|off>] [--start <hash>] [--node-poll-ms <n>] [--stale-ms <n>]]";
 
 fn hash_of(s: &str) -> Result<Hash, String> {
     let b = lottery::store::from_hex(&s.to_ascii_lowercase()).map_err(|e| format!("--cov: {e}"))?;
@@ -116,6 +125,9 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>, mut extra: i
     let mut start = env("INDEXER_API_START");
     let mut node_poll = env("INDEXER_API_NODE_POLL_MS");
     let mut stale = env("INDEXER_API_STALE_MS");
+    let mut inflight = env("INDEXER_API_PER_CLIENT_INFLIGHT");
+    let mut anchor_waits = env("INDEXER_API_MAX_ANCHOR_WAITS");
+    let mut witness = env("INDEXER_API_WITNESS");
     let mut cli_origins = vec![];
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -138,6 +150,9 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>, mut extra: i
             "--start" => start = Some(v),
             "--node-poll-ms" => node_poll = Some(v),
             "--stale-ms" => stale = Some(v),
+            "--per-client-inflight" => inflight = Some(v),
+            "--max-anchor-waits" => anchor_waits = Some(v),
+            "--witness" => witness = Some(v),
             f => {
                 if !extra(f, &v)? {
                     return Err(format!("unknown flag {f}\n{USAGE}"));
@@ -182,6 +197,15 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>, mut extra: i
     if let Some(s) = stale {
         c.stale = Duration::from_millis(num("--stale-ms", &s)?);
     }
+    if let Some(n) = inflight {
+        c.per_client_inflight = num("--per-client-inflight", &n)? as usize;
+    }
+    if let Some(n) = anchor_waits {
+        c.max_anchor_waits = num("--max-anchor-waits", &n)? as usize;
+    }
+    if witness.is_some() && node.is_none() {
+        return Err("--witness needs --node (the one-process mode)".into());
+    }
     if start.is_some() && node.is_none() {
         return Err("--start needs --node (the one-process mode)".into());
     }
@@ -196,7 +220,20 @@ pub fn parse(args: &[String], env: impl Fn(&str) -> Option<String>, mut extra: i
         };
         let start = start.map(|h| hash_of(&h).map_err(|e| e.replace("--cov", "--start"))).transpose()?;
         let every = Duration::from_millis(node_poll.map(|p| num("--node-poll-ms", &p)).transpose()?.unwrap_or(10_000));
-        c.follow = Some(FollowOpts { node: url, start, every });
+        let witness = match witness.as_deref() {
+            None => Witness::Unset,
+            Some("off") => Witness::Off,
+            Some("resolver") => Witness::Resolver,
+            Some(u) if u.starts_with("wss://") || u.starts_with("ws://") => {
+                crate::follow::check_url(u)?;
+                if url.as_deref() == Some(u) {
+                    return Err(format!("--witness {u}: the same node as --node; a witness must be another node"));
+                }
+                Witness::Url(u.to_string())
+            }
+            Some(u) => return Err(format!("--witness {u}: a wss:// or ws:// wRPC (Borsh) URL, `resolver` or `off`")),
+        };
+        c.follow = Some(FollowOpts { node: url, start, every, witness });
     }
     Ok(c)
 }

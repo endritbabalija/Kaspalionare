@@ -5,8 +5,11 @@
 // the testnet one. Every file that build ships is scanned, the worker chunk (the wasm-bindgen glue) and the .wasm
 // itself included (F2/F3 review note: the served wasm, not only cargo's artifact): none of the quick wallet's
 // marker, the S7 key line or its exports may be in it. Positive control: the same strings must be in the normal
-// build (dist/, from `npm run build`). Run: npm run check:mainnet (builds src/wasm/mainnet first if missing).
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+// build (dist/, from `npm run build`). Run: npm run check:mainnet.
+// F6 security review S3: src/wasm/mainnet is rebuilt on every run (cargo rebuilds what changed since; wasm-bindgen
+// writes the package afresh), so the scan never reads a package left from older sources. Control: the package must
+// have been written by this run (its files newer than the run's start), else the check fails as stale.
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { WEB, run } from './lib.mjs';
 import { files } from './check-bundle.mjs';
@@ -22,9 +25,17 @@ const MARKERS = [
 const out = path.join(WEB, 'dist-mainnet-check');
 const normal = path.join(WEB, 'dist');
 
-if (!existsSync(path.join(WEB, 'src', 'wasm', 'mainnet', 'web_bg.wasm'))) {
-  run(process.execPath, [path.join(WEB, 'scripts', 'wasm.mjs'), 'mainnet'], { cwd: WEB });
+const started = Date.now();
+run(process.execPath, [path.join(WEB, 'scripts', 'wasm.mjs'), 'mainnet'], { cwd: WEB });
+const pkg = path.join(WEB, 'src', 'wasm', 'mainnet');
+const stale = ['web_bg.wasm', 'web.js', 'web.d.ts'].filter(
+  (f) => !existsSync(path.join(pkg, f)) || statSync(path.join(pkg, f)).mtimeMs < started - 2_000,
+);
+if (stale.length) {
+  console.error(`check-mainnet: src/wasm/mainnet was not written by this run (${stale.join(', ')}): stale package`);
+  process.exit(1);
 }
+console.log('check-mainnet: src/wasm/mainnet rebuilt from the current sources by this run');
 
 function finds(dir) {
   const hits = new Map(MARKERS.map((m) => [m, 0]));

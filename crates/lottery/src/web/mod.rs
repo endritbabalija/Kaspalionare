@@ -225,6 +225,10 @@ codes! {
     /// MIN_DEPOSIT, or a withdrawal that is neither the whole position nor w >= wmin leaving a
     /// remainder >= wmin (vault checks D5, W4, W4b; D85, D86).
     VaultAmount = 55, "vault_amount", "The vault does not take this amount.";
+    /// F6 security review (the page): the browser wallet now reports another account than the one
+    /// the page connected (KasWare's account switched after connect); nothing is signed until it is
+    /// connected again.
+    WalletAccount = 56, "wallet_account", "The wallet switched to another account; connect it again.";
 }
 
 impl fmt::Display for Code {

@@ -41,6 +41,9 @@ const ruleOf = (source) =>
   Object.fromEntries(vercel.find((h) => h.source === source).headers.map((h) => [h.key, h.value]));
 const CSP = ruleOf('/((?!figures/).*)')['Content-Security-Policy'];
 const FIGURE_CSP = ruleOf('/figures/(.*)')['Content-Security-Policy'];
+// F6 security review: both rules carry the same Permissions-Policy (camera, microphone, location and the like denied).
+const PERMISSIONS = ruleOf('/((?!figures/).*)')['Permissions-Policy'];
+const FIGURE_PERMISSIONS = ruleOf('/figures/(.*)')['Permissions-Policy'];
 const FIGURE = '/figures/draw-cabinet-tour.html';
 // F6 part C: the indexer origin vercel.json allows (the one https source without a wildcard); the check page is
 // built against it, so the probe of the allowed indexer origin tests the policy that ships.
@@ -92,6 +95,19 @@ try {
   check(h['content-security-policy'] === CSP, "the page is served with vercel.json's CSP header");
   check(/frame-ancestors 'none'/.test(h['content-security-policy'] ?? ''), "the CSP has frame-ancestors 'none'");
   check(h['x-frame-options'] === 'DENY', 'X-Frame-Options DENY');
+  check(
+    Boolean(PERMISSIONS) && /camera=\(\)/.test(PERMISSIONS) && h['permissions-policy'] === PERMISSIONS,
+    "the page is served with vercel.json's Permissions-Policy (camera, microphone, geolocation denied)",
+  );
+  const denied = await page.evaluate(() =>
+    document.featurePolicy
+      ? ['camera', 'microphone', 'geolocation'].filter((f) => !document.featurePolicy.allowsFeature(f))
+      : null,
+  );
+  check(
+    denied === null || denied.length === 3,
+    `the page's own policy denies camera, microphone, geolocation (${denied === null ? 'no featurePolicy API' : denied.join(' ')})`,
+  );
   const worker = await workerUp;
   const wres = await fetch(worker.url());
   check(
@@ -202,6 +218,22 @@ try {
     "the figure CSP: script by hash, frame-ancestors 'self'",
   );
   check(fres.headers.get('x-frame-options') === 'SAMEORIGIN', 'the figure: X-Frame-Options SAMEORIGIN');
+  check(
+    fres.headers.get('permissions-policy') === FIGURE_PERMISSIONS && FIGURE_PERMISSIONS === PERMISSIONS,
+    "the figure: vercel.json's Permissions-Policy, the site's value",
+  );
+  check(/(^|; )sandbox allow-scripts($|;)/.test(FIGURE_CSP), 'the figure CSP sandboxes it to scripts');
+  // Opened directly (not in How it works' frame), the figure runs in an opaque origin: no access to the site's
+  // storage. Control: the site's own page has its origin.
+  const direct = await browser.newPage();
+  await direct.goto(`http://127.0.0.1:4173${FIGURE}`);
+  const directOrigin = await direct.evaluate(() => self.origin);
+  const siteOrigin = await page.evaluate(() => self.origin);
+  check(
+    directOrigin === 'null' && siteOrigin === 'http://127.0.0.1:4173',
+    `the figure opened directly runs in an opaque origin (${directOrigin}; the site: ${siteOrigin})`,
+  );
+  await direct.close();
   const how = await browser.newPage();
   const howReports = [];
   how.on('console', (m) => {

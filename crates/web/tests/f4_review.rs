@@ -242,7 +242,7 @@ fn a_win_whose_pool_the_copy_does_not_list_is_unknown_never_expired() {
     // The probe: the copy lists only another tier's pool (the indexer served one pool); the node
     // holds both. The record check and checkCopy pass (verified against the other pool) ...
     let r = drawn_copy(&i, vec![other.clone()]);
-    backup::check_records(N, &i.covenant_id, &[], std::slice::from_ref(&r), &[]).expect("a subset is a valid record without the marker");
+    backup::check_records(N, &i.covenant_id, &[], std::slice::from_ref(&r)).expect("a subset is a valid record without the marker");
     let live = vec![other_live.utxo.clone(), i.pools[0].utxo.clone()];
     let c = check(&i, &r, live.clone(), 1).unwrap();
     assert_eq!(c.status, CopyStatus::Verified);
@@ -312,10 +312,10 @@ fn with_the_marker_kept_a_drawn_copy_lists_every_pool_of_the_draw() {
     assert_eq!(pools.len(), 5);
     assert!(set.iter().all(|o| pools.contains(o)));
     // The record check of a backup takes it, and refuses the same copy with a pool dropped.
-    backup::check_records(N, &i.covenant_id, &[], std::slice::from_ref(&m.round), &[]).unwrap();
+    backup::check_records(N, &i.covenant_id, &[], std::slice::from_ref(&m.round)).unwrap();
     let mut short = m.round.clone();
     short.result.as_mut().unwrap().pools.pop();
-    let e = backup::check_records(N, &i.covenant_id, &[], std::slice::from_ref(&short), &[]).unwrap_err();
+    let e = backup::check_records(N, &i.covenant_id, &[], std::slice::from_ref(&short)).unwrap_err();
     assert_eq!(e.code, Code::BackupInvalid, "{e}");
     // checkCopy: complete; a winning tier without a pool of the set is "no pool", not unknown.
     let c = check(&i, &m.round, live.clone(), 1).unwrap();
@@ -415,13 +415,13 @@ fn an_f3_record_is_left_out_of_a_backup_not_fatal() {
         }),
         saved_ms: "1".into(),
     };
-    let w = backup::backup_write(N, &BackupWriteInput { covenant_id: i.covenant_id.clone(), created_ms: "1".into(), tickets: vec![t.clone()], rounds: vec![good.clone(), f3.clone()], pending: vec![] }).unwrap();
+    let w = backup::backup_write(N, &BackupWriteInput { covenant_id: i.covenant_id.clone(), created_ms: "1".into(), tickets: vec![t.clone()], rounds: vec![good.clone(), f3.clone()] }).unwrap();
     assert_eq!(w.skipped, vec![f3.key.clone()], "the bad record is left out and named; the rest is written");
     assert!(!w.text.contains('\n'), "compact");
     let back = backup::backup_read(N, &BackupReadInput { covenant_id: i.covenant_id.clone(), text: w.text.clone() }).unwrap();
     assert_eq!(back.rounds, vec![good]);
     assert!(back.tickets[0].pending.is_none(), "a pending claim is not exported");
-    assert_eq!(back.tickets[0].key, t.key);
+    assert_eq!(back.tickets[0].key, backup::outpoint_key(&t), "filed under its outpoint, not the store's key");
 }
 
 #[test]

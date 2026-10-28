@@ -78,7 +78,7 @@ describe('CallerPanel', () => {
     );
     expect(screen.getByTestId('caller').dataset.state).toBe('due');
     expect(screen.getByTestId('caller-status').textContent).toBe('close() is due');
-    expect(screen.getByTestId('caller-back').textContent).toBe('With draw()');
+    expect(screen.getByTestId('caller-back').textContent).toBe('draw()');
     expect(screen.getByTestId('caller-total').dataset.sompi).toBe(SAMPLE_CLOSE.total);
     expect(screen.queryByTestId('caller-warning')).toBeNull();
     expect(screen.getByRole('button', { name: 'Close round 4' })).toBeTruthy();

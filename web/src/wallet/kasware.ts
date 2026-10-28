@@ -23,6 +23,7 @@ export function kaswareApi(w: unknown = globalThis): KasWareApi | undefined {
   if (!k || typeof k !== 'object') return undefined;
   const api = k as Partial<KasWareApi>;
   return typeof api.requestAccounts === 'function' &&
+    typeof api.getAccounts === 'function' &&
     typeof api.signPskt === 'function' &&
     typeof api.getNetwork === 'function'
     ? (api as KasWareApi)
@@ -89,6 +90,15 @@ export class KasWareAdapter implements WalletAdapter {
     const signInputs = signItems(built, indices);
     const net = await this.network();
     if (net !== this.expected) throw new PageError('wallet_network', `KasWare switched to ${net}`);
+    // F6 security review: the account is read again before each signature; KasWare signs with whatever account is
+    // selected now, so a switch after connect would end in a signature for another key (signature_invalid).
+    const accounts = await this.serial
+      .run(() => this.api.getAccounts())
+      .catch((e: unknown) => {
+        throw rejected('getAccounts', e);
+      });
+    if (accounts[0] !== this.addr)
+      throw new PageError('wallet_account', `KasWare now reports ${String(accounts[0])}, connected as ${this.addr}`);
     const out = await this.serial
       .run(() => this.api.signPskt({ txJsonString: built.transaction, options: { signInputs } }))
       .catch((e: unknown) => {

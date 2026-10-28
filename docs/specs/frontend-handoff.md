@@ -29,7 +29,7 @@ Trimmed after F4's review (owner process decision, DECISIONS 2026-10-26 "full ri
 | F3 web shell and Play | done (parts A, B; review fixed; `add7983`, `2319d11`, `8647382`) | `web/` (React 19, Vite 7, Tailwind 4, Vitest, Playwright + axe), tokens and themes, the wasm in a worker, the node client in wasm, `npm run dev:simnet`; wallet adapters (KasWare with the index list, Kaspire untested, the quick wallet), post-sign attack tests through the real path, S1 Play, S7, `webstore/1`. Review fixes: open-round lists all-or-nothing, rebuild signed only as shown, quick key by compare-and-swap, lost submit answers settled from the chain, status from chain objects only, CSP as an HTTP header (`vercel.json`). Codes 35–49. |
 | F4 My tickets, claims, backup | done (2026-10-26, `d3b24b0`; reviewed by `covenant-reviewer`, every must-fix and should-fix fixed, see "F4 review and fixes") | S2 My tickets, S8 Backup, claims and deposit returns from the local copy without the API, `kaspalionare-backup/1`, `webstore/2`, codes 50–53; done criterion met on simnet. **Review fixes (this stage):** Return deposit offered only when nothing unclaimed can still be claimed (M1); a drawn copy checked for its pools, "expired" only on chain evidence, the marker kept so a copy lists every pool of the draw, never fewer pools (M2); void only where chain and copy do not contradict it; J3 by payout only for this wallet; "With last claim" only when the last claim will be FINAL; a closed copy with its marker spent is incomplete; claims accepted on their own outputs; pending claims kept and settled; limits consistent; stale purchases not resent by themselves; F3 copies migrated; `onversionchange`. |
 | F5 Rounds, verify, run the round | done (2026-10-26, `d23ed0d`; reviewed by `covenant-reviewer`, every should-fix and note fixed 2026-10-27, see "F5 review and fixes"; not committed) | S3 list and round detail (facts from Rust with their sources, "Unverified" for the indexer's), Verify in this browser item by item (`verifyRound`), X.hash after the draw bound to a public node's block, S4 close/draw/void from the panel (`callerFigures`, code 54), the SN5 dev self-check fixed, `POST /mine` (TEST-ONLY); e2e: S3, draw, close, doctored API, void. See "F5" below. |
-| F6 Vault, How it works, beta instance, deploy, security review | part A done (2026-10-27, S5 Vault, `0dcb01a`; reviewed by `covenant-reviewer`, fixes `e5309c5`); part B done (2026-10-27, S6 How it works; light process: web tests, no adversarial review, the owner reads the page; not committed); part C done (2026-10-27, deploy preparation: hosted indexer API `--node`, site configuration and narrowed CSP, prebuilt deploy with `check:deploy`, beta genesis dry-run with a fresh admin key, journeys plan; nothing deployed or launched; not committed); security review, genesis, deploy and journeys not started | Part A: "F6 part A"; part B: "F6 part B"; part C: "F6 part C" (owner choices listed there). Then and the security review: read "What F6 needs". |
+| F6 Vault, How it works, beta instance, deploy, security review | part A done (2026-10-27, S5 Vault, `0dcb01a`; reviewed by `covenant-reviewer`, fixes `e5309c5`); part B done (2026-10-27, S6 How it works; light process: web tests, no adversarial review, the owner reads the page; not committed); part C done (2026-10-27, deploy preparation: hosted indexer API `--node`, site configuration and narrowed CSP, prebuilt deploy with `check:deploy`, beta genesis dry-run with a fresh admin key, journeys plan; nothing deployed or launched; not committed); security review done (2026-10-28: no must-fix; four should-fix and the notes fixed by the fix agent, see "F6 security review and fixes"; not committed); genesis, deploy and journeys not started | Part A: "F6 part A"; part B: "F6 part B"; part C: "F6 part C" (owner choices listed there). Then and the security review: read "What F6 needs". |
 
 ## What F6 needs (Vault, How it works, beta, deploy, security review)
 
@@ -325,6 +325,185 @@ The stage agents' build decisions, kept verbatim until recorded. The owner decis
 - (f) **`callerFigures` reads the kind from the exact lock time** (draw: max(D, absorbed deadlines); void: max(D + draw_window, absorbed deadlines); both matching is refused), takes the vault (whether a settlement record is posted) and the absorbed pools (every covenant input named); "Back" is the new pools' claim deadline only; a record's R comes back "With settlement".
 - (g) **The void e2e runs on request**: `npm run e2e:void` (E2E_VOID=1); `npm run e2e` skips it (owner, DECISIONS 2026-10-27).
 - (h) **No simnet e2e of an absorbing draw** (pools expire about 6.9 million DAA after their draw; no test-only short window, DECISIONS 2026-10-26): Rust byte-identity and page-level Vitest tests; the real-chain check is F6's on testnet-10.
+
+## F6 security review and fixes (fix agent, 2026-10-28; not committed)
+
+The review of the whole front-end track found no must-fix, four should-fix items and notes; all are fixed below.
+No covenant change; goldens unchanged (`f1_bytes`, W1). Nothing submitted to testnet-10, nothing deployed, no
+Vercel command. The reviewer's untracked probe `crates/web/tests/secreview_w3_probe.rs` is folded into
+`crates/web/tests/w3_page.rs` and deleted.
+
+### Should-fix, per item: change, test, negative control
+
+1. **S1, one client could block the hosted API during a draw.** `server.rs` guard: at most `per_client_inflight`
+   (16) requests of one client at once (`limits::InFlight`, by /64 for IPv6; on with the per-client limit, so the
+   dev run and the doctored binary stay unlimited), and anchor-proof requests take a permit of their own pool
+   (`max_anchor_waits`, 32), never one of the 64 global ones. Flags `--per-client-inflight`, `--max-anchor-waits`.
+   Test `hosted::one_client_cannot_starve_another_during_a_draw`: 40 parallel anchor-proof requests from one
+   client with the build slower than the wait, global pool 4: the other client's `/v1/status` is 200 and its own
+   anchor-proof request is served; the flooder gets at most 8 through. Negative control in the test: no per-client
+   cap and an anchor pool of 8: the other client's anchor-proof request is `busy`. Mutant (run by hand): anchor
+   waits back on the global permit: the test fails ("another client's status ... busy"). `in_flight_cap_per_client`.
+2. **S2, `verifyRound` overflow on a lying indexer's round number.** `indexer.rs` `classify` and the closing check,
+   `rounds.rs` facts and draw checks, `api.rs` (`r + 1`, `mk.round + 1` → `checked_add`), `rounds.rs` caller
+   figures (`caller.value + refund`, `n * r_res` checked), `vault.rs` settle case (`refund × dep_rem` checked),
+   `tickets.rs` (`h - 1` saturating). The rest of the post-F1 arithmetic works on states bounded by `check_*`
+   (vault, position, marker, controller, drawer ranges) or on u128/i128 of u64 values. **W3 extended**
+   (`crates/web/tests/w3_page.rs`, debug, seeded, `W3_ITERS`): `checkIndexerRound`, `verifyRound` (closing,
+   drawn), every `parseIndexer*`, `anchorProofX`, `vaultView`, `withdrawChoice`, `depositFigures`,
+   `withdrawFigures` (partial, whole), `settleFigures` (3 modes), `callerFigures` (close, draw, void),
+   `absorbablePools` (draw, void), `claimFigures` (3), `returnFigures` (2), `ticketCard`, `backupRead` (checksum
+   recomputed so the record checks run, and raw text), `checkCopy`, `mergeCopy`. Regression
+   `a_round_at_i64_max_is_an_error_not_a_panic`; mutant (original `x.round == r + 1` restored by hand): it fails
+   with "attempt to add with overflow". Negative control `the_harness_counts_panics`.
+3. **S3, `check:mainnet` could scan a stale mainnet wasm.** `scripts/check-mainnet.mjs` rebuilds
+   `src/wasm/mainnet` on every run (cargo rebuilds what changed; wasm-bindgen writes the package afresh) and fails
+   as stale if the package's `web_bg.wasm`, `web.js` or `web.d.ts` is older than the run's start (the control);
+   the positive control (markers present in the normal build) stays.
+4. **S4, the hosted indexer followed whatever node the resolver handed out.** `follow.rs`:
+   - the followed node is **pinned per run** (the resolver's first pick; reconnects go back to it);
+   - a **witness node** (`--witness <url|resolver|off>`, `INDEXER_API_WITNESS`; the env example sets `resolver`):
+     each batch is asked of the witness from the same chain block at Low verbosity (`view_of_response`: header
+     hash, transaction IDs, signature scripts) and only the common prefix is persisted (`agree`,
+     `apply_witnessed`): a reorg only one reports, a tip fork or a witness behind takes less; one chain block with
+     different transactions is `DIVERGED`: nothing persisted, `/health` 503 at once until they agree; no progress
+     for the staleness limit: 503. The witness must be another host (for `resolver`, up to 8 picks); on the
+     private simnet the same node is accepted. A testnet-10 instance refuses to start with `--witness` unset
+     (`off` accepts one node).
+   - Tests (`hosted`): `the_witness_confirms_the_common_prefix_only` (prefix, behind, ahead, tip fork, other
+     chain, other transaction, missing transaction, other signature script, a removal only one reports);
+     `a_lying_node_cannot_write_the_store_past_the_witness` on the real indexer over a store: an unconfirmed chain
+     leaves the position, `index.json` and the log byte-identical; a divergence too; a confirmed prefix is
+     persisted and a restart resumes there; **negative control**: without a witness the same lie is persisted.
+     `security_review_flags`. On simnet: `simnet follow-check` now follows with a witness (a second connection to
+     the dev node), so a real node's Low answers are shown to agree with its Full ones; `/health`'s local detail
+     names the witness. A lying second node could not be run on the simnet (one node per process; a second
+     in-process core was not tried).
+   - Owner write-up: `docs/launch/indexer-server.md` "Which nodes the server reads" (below).
+
+### Notes fixed
+
+- **Backup format** (`crates/web/src/backup.rs`): `kaspalionare-backup/2` has no `pending` field (code and docs
+  now agree: no pending purchase, claim or return is exported); `kaspalionare-backup/1` still imports (its
+  checksum checked over the format-1 layout, its pending records never imported). `check_pending` is gone.
+  Tests `f4_tickets::backup_format_2_and_format_1_files` (format 2 written, a format-1 file with a pending
+  purchase imports without it, a broken format-1 checksum refused), damaged cases "a pending field".
+- **Ticket key tied to its outpoint:** every file ticket is filed under its ticket entry's outpoint (the writer
+  re-keys, so a ticket after a claim is written under its current entry; a second record of the same outpoint is
+  left out by name); the reader refuses a ticket not filed under its outpoint, or twice; a format-1 file is
+  re-keyed. The page keeps an imported ticket only if no ticket it follows has that outpoint
+  (`src/store/backup.ts`). Tests: damaged cases "a ticket filed under another outpoint", "a ticket twice";
+  Vitest `an imported ticket is keyed by its outpoint and never kept twice` (control: an empty store keeps it).
+- **Bucket pruning bounded** (`limits.rs`): the sweep runs at most once a second, at most 65,536 buckets, new
+  addresses past that share one overflow bucket. `hosted::bucket_memory_and_work_stay_bounded` (70,000 addresses
+  in one instant: one sweep, the cap held, the overflow shared; control: a later sweep frees the idle buckets).
+- **`/health`** answers a remote client (or one behind the proxy) only `{"ok":…}`; the detail (store and node
+  errors, the followed node and the witness) only on loopback without `X-Forwarded-For`, and in the log (store
+  errors are now logged when they change). `hosted::health_detail_only_on_loopback` (both client modes; control:
+  the detail does carry the path and the URL token the public answer hides). `/v1/status`'s `error` field (part
+  of the v1 contract) still carries the store error string: left as is, noted below.
+- **Permissions-Policy** on both `vercel.json` rules (camera, microphone, geolocation, payment, usb, serial, hid,
+  bluetooth, midi, accelerometer, gyroscope, magnetometer, display-capture denied); `figure.test.ts` and
+  `check:csp` check it (served on the page and the figure, equal; the page's own policy denies the three).
+- **Figure CSP `sandbox allow-scripts`** (also in `docs/figures/draw-cabinet/build.mjs`, which writes it);
+  `check:csp` opens the figure directly: its origin is `null` (control: the site's page has its origin), and the
+  framed tour still runs.
+- **Docker/compose images pinned by digest** (rust:1.94.0-bookworm, debian:bookworm-slim, caddy:2; index
+  digests read from Docker Hub 2026-10-28; how to update in the files). `hosted::deploy_files_parse_and_pin_their_images`
+  (the env example parses and sets a witness; every image line pinned; control: an unpinned line is found).
+- **`web/.env.production`**: committed on purpose (every value public), as `site-deploy.md` says; `web/.gitignore`
+  now ignores Vite's `.env.local` and `.env.*.local` overrides so nothing local changes a build.
+- **Caddy**: `max_header_size 16KB` in the Caddyfile's global options (Caddy's default is Go's 1 MB).
+- **KasWare account switch**: the adapter reads `getAccounts()` before each signature and refuses
+  `wallet_account` (new code 56, "The wallet switched to another account; connect it again.") instead of a
+  later `signature_invalid`. Vitest `refuses to sign after the account was switched in KasWare` (nothing sent
+  to KasWare; control: switched back, it signs). Kaspire (untested, no `getAccounts` in its API) unchanged.
+- **Playwright traces**: the steps that show or type a quick wallet's key (the export and every import, in
+  `play.spec.ts` and `tickets.spec.ts`) run inside `untraced(ctx, …)` (`e2e/helpers.ts`): the context's trace chunk
+  is dropped before them and a new one starts after, so a trace kept on failure never holds the key; screenshots and
+  video are off by default; the backup's no-key check no longer prints the key on a failure.
+- **Copy pass** (light process): Play's closed card "Sales closed" (status) with the Rounds link; CallerPanel row
+  "close() after" `draw()`, "Back at" `draw()`, "Record back at" `Settlement`; VaultRequestRows "Back at"
+  `Settlement`; SettleRows "Shares left". The S7 key line and How it works untouched. The Rust `sales_closed`
+  error message is unchanged (an error).
+
+### Runs (one cargo process at a time)
+
+- `cargo test -j 4 --no-fail-fast` (debug, default members): **1,111 passed, 0 failed, 4 ignored**; the only failing
+  target is `spike_vdf`'s known debug stack overflow (D113). Goldens unchanged (`f1_bytes` passes).
+- The web test command: `cargo test -j 4 -p web --release --test api --test f4_tickets --test f4_review --test
+  f5_rounds --test review_f5 --test f6_vault`: 20 (3 ignored) + 6 + 7 + 3 + 6 + 9 passed; **W3 page** (debug,
+  `w3_page`): 6 passed, 0 panics in about 7,500 parsed mutations; **W1**: 1 passed (97 library digests, 18 API
+  builds, 291 decode/verify calls, 14 signed in wasm); **W4**: 1 passed (119 s).
+- indexer-api: `--features doctored --lib --test api --test doctored --test review_f3 --test review_f4 --test
+  hosted`: 6 + 6 + 4 + 2 + 1 + **15** passed; `--test production`: 1 passed (100 s).
+- `cargo test -j 2 -p simnet --release`: 15 passed. `cargo run -j 2 -p simnet --release -- follow-check`: all 8
+  FOLLOW-CHECK lines ok, now with the witness ("pinned to ws://127.0.0.1:18610; witness ... confirms every batch").
+- `cargo test -j 1 --release -p tn10`: 27 passed.
+- `npm test`: 30 files, **221** tests passed (219 before: the KasWare account test and the import-by-outpoint test).
+- `npm run e2e` (fresh dev run): **23 passed, 1 skipped** (the void test, on request only). A first attempt found
+  that Playwright refuses `test.use({ trace })` inside a describe group (hence `untraced`), and a second that the
+  F4 import step addressed T1's card by its purchase key, which the outpoint filing changes for a ticket after a
+  claim (the test now reads the imported card's key and checks it is not the purchase's). Ports 18610, 8790, 8791,
+  5173 free afterwards; this session's four simnet data directories (about 400 MB) deleted.
+- `npm run build`: ok (check-bundle and its control). `npm run check:mainnet`: ok, "src/wasm/mainnet rebuilt from
+  the current sources by this run". `npm run check:csp`: 32 checks ok (27 before; new: the Permissions-Policy on the
+  page and the figure, the page's own policy, the figure's sandbox, the figure opened directly in an opaque origin).
+  Ports 4173 and 4174 free.
+- Mutants run by hand and restored: `x.round == r + 1` (W3 regression fails: "attempt to add with overflow");
+  anchor waits on the global permit (S1 test fails: the other client's status `busy`).
+
+### Proposed DECISIONS rows (F6 security review)
+
+- **Hosted indexer: pinned node and a witness.** The one-process API keeps the node it started with for the whole
+  run and persists a batch only as far as a second, independent node reports the same chain blocks and accepted
+  transactions (ID and signature scripts); a block both report differently stops persisting (`/health` 503).
+  A testnet-10 instance must set `--witness` (`off` accepts one node). Reason: a bad public node could otherwise
+  write false history into the store and block the page until a manual re-index.
+- **Per-client in-flight cap and an anchor-proof pool.** At most 16 requests of one client at once; anchor-proof
+  requests wait in their own pool of 32. Reason: S1, a draw-time flood from one client could hold all 64 permits.
+- **Backup format 2.** No pending records; each ticket filed under its outpoint; format 1 still read (pending
+  left out, re-keyed). Reason: the docs' promise and an unbound pending transaction; a key the file chooses.
+- **Code 56 `wallet_account`.** KasWare's account is read again before every signature.
+- **Response headers:** a `Permissions-Policy` denying device features on both rules; the figure rule's CSP has
+  `sandbox allow-scripts`.
+- **`/health` detail only locally.** Remote clients see `{"ok":…}` only.
+
+### Owner choices (none decided)
+
+1. **Which nodes the hosted API reads** (`docs/launch/indexer-server.md`, "Which nodes the server reads"):
+   - **A, two public nodes must agree (built, the default):** no extra cost or work; the trust is that two public
+     node operators do not lie together; a bad node can only make the API stop and wait, the page then shows it
+     as unavailable (players with a local copy can still claim). No money is at risk in any option: every browser
+     re-checks against its own node.
+   - **B, your own testnet-10 node on the server**, a public node as witness: you trust yourself; a much larger
+     server (not measured: our private test node reached about 6.6 GB of memory after 864,000 blocks, about a
+     day of testnet-10), several times the €6 plan, plus keeping the node updated. We would measure it before
+     you pay.
+   - **C, one public node unchecked** (`--witness off`): no extra cost; a bad node can block the page until the
+     store is rebuilt by hand.
+2. **`/v1/status` `error`** shows the store's error text to anyone (it can contain a file path). Hiding it changes
+   the page's API contract (the page only logs it); the choice is to keep it (the path says only where the store
+   lives on the server) or to replace it by a fixed word in a follow-up.
+
+### Left
+
+- `npm run e2e:void` not run (no draw or void code changed).
+- Kaspire's account is not re-read (untested wallet; its API has no `getAccounts` in our adapter).
+- The hosted API's own HTTP header limit is hyper's default; Caddy's 16 KB cap applies in front of it.
+
+### Files
+
+- indexer API: `src/server.rs`, `limits.rs`, `follow.rs`, `config.rs`, `routes.rs`, `tests/hosted.rs`,
+  `deploy/` (Dockerfile, compose.yaml, Caddyfile, indexer-api.env.example).
+- web crate: `src/indexer.rs`, `rounds.rs`, `api.rs`, `vault.rs`, `tickets.rs`, `backup.rs`; tests `w3_page.rs`
+  (new), `f4_tickets.rs`, `f4_review.rs`; the probe deleted. lottery: `src/web/mod.rs` (code 56),
+  `tests/f1_web.rs`. simnet: `src/dev.rs` (follow-check with a witness).
+- web: `src/wallet/kasware.ts`, `postsign.test.ts`, `src/store/backup.ts`, `src/tickets/tickets.test.ts`,
+  `vercel.json`, `scripts/check-csp.mjs`, `check-mainnet.mjs`, `src/screens/how/figure.test.ts`, components
+  `CallerPanel`, `SettleRows`, `VaultRequestRows`, `screens/play/BuyCard` (and their tests), `e2e/play.spec.ts`,
+  `tickets.spec.ts`, `vault.spec.ts`, `helpers.ts`, `.gitignore`, `.env.production.example`, `CLAUDE.md`.
+- docs: `docs/figures/draw-cabinet/build.mjs`, `docs/launch/indexer-server.md`, `site-deploy.md`, `CLAUDE.md`.
 
 ## F6 part C (stage agent, 2026-10-27): deploy preparation (nothing deployed or launched; not committed)
 

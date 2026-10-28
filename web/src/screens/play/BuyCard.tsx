@@ -1,7 +1,7 @@
 // S1's buy card (spec 3, 7, mock-up board 2): the picker, the ticket builder, the cost panel as figure rows
 // from the built transaction (price with its referral share and destination, deposit with its return date,
-// network fee, total: the top-level rows add up to the total), the buy button and the transaction progress. After the deadline: "Sales closed;
-// waiting for close()" with a link to Rounds (S4).
+// network fee, total: the top-level rows add up to the total), the buy button and the transaction progress. After the deadline: the status
+// "Sales closed" with a link to Rounds (S4).
 import { useId } from 'react';
 import type { BuyFigures } from '@wasm/web.js';
 import { CostPanel, type CostRow } from '@/components/CostPanel';
@@ -87,7 +87,7 @@ export function BuyCard({
     return (
       <section data-testid="buy-card" data-state="closed" aria-label="Buy" className={card}>
         <p data-testid="sales-closed-play" role="status" className="m-0 font-mono text-[15px] text-amber">
-          Sales closed; waiting for close()
+          Sales closed
         </p>
         <a
           href={href('rounds')}

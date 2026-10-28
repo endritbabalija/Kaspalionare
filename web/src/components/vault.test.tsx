@@ -157,7 +157,7 @@ describe('DepositPanel and WithdrawPanel', () => {
     );
     expect(screen.getByTestId('d-total').dataset.sompi).toBe(SAMPLE_DEPOSIT.total);
     expect(screen.getByTestId('d-reserve').dataset.sompi).toBe(SAMPLE_DEPOSIT.reserve);
-    expect(screen.getByTestId('d-back').textContent).toBe('With settlement');
+    expect(screen.getByTestId('d-back').textContent).toBe('Settlement');
     expect(screen.getByTestId('d-terms-revocable').textContent).toBe('No');
     expect(screen.getByTestId('d-terms-price').textContent).toBe('Round 12 draw');
     expect(screen.getByTestId('d-terms-refund').textContent).toBe('Possible');

@@ -9,6 +9,14 @@
 //!   (503, `Retry-After: 1`), the code the page already treats as "the indexer is
 //!   unavailable, retry". Requests that carry no peer (in-process tests, an embedding
 //!   process that calls the router directly) are not limited here.
+//! - **Bounded bucket memory and work** (F6 security review): idle full buckets are dropped by a
+//!   sweep that runs at most once a second (the sweep is O(buckets), so it is amortised over a
+//!   second of requests, never paid per request), and at most `BUCKETS_MAX` buckets exist: past
+//!   that, new addresses share one overflow bucket until a sweep frees room (a flood of addresses
+//!   then limits itself, and one map entry per address is never kept beyond the cap).
+//! - **Per-client requests in flight** (F6 security review S1): at most `cap` requests of one
+//!   client run at once (`InFlight`), well below the global limit, so one client holding slow
+//!   requests (anchor-proof waits during a draw) cannot hold every slot. Over it, `busy`.
 //! - **Anchor-proof cache.** Building an anchor proof before the draw costs a node dozens of
 //!   RPC calls (the anchor's mergeset, `tn10/src/anchor.rs`). `CachedAnchor` builds each
 //!   (round, D, marker DAA) at most once at a time (one build in flight; every request for it
@@ -92,30 +100,45 @@ pub fn client_of(peer: Option<Peer>, headers: &HeaderMap, mode: ClientIp) -> Opt
 pub struct ClientLimiter {
     burst: f64,
     rate: f64,
-    buckets: Mutex<HashMap<IpAddr, (f64, Instant)>>,
+    buckets: Mutex<Buckets>,
 }
 
-/// Above this many buckets, idle full ones are dropped (memory stays bounded under a flood
-/// of addresses: each entry is a few dozen bytes).
+struct Buckets {
+    map: HashMap<IpAddr, (f64, Instant)>,
+    last_sweep: Option<Instant>,
+    sweeps: u64,
+}
+
+/// Above this many buckets, idle full ones are swept (at most once a second).
 const PRUNE_AT: usize = 10_000;
+/// At most this many buckets (a few dozen bytes each); past it new addresses share `OVERFLOW`.
+pub const BUCKETS_MAX: usize = 65_536;
+/// The shared bucket of addresses that arrive while the map is full.
+pub const OVERFLOW: IpAddr = IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
+const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
 impl ClientLimiter {
     pub fn new(burst: u64, rate: u64) -> Self {
-        ClientLimiter { burst: burst as f64, rate: rate as f64, buckets: Mutex::new(HashMap::new()) }
+        ClientLimiter { burst: burst as f64, rate: rate as f64, buckets: Mutex::new(Buckets { map: HashMap::new(), last_sweep: None, sweeps: 0 }) }
     }
 
     /// Take one token for `ip` at `now`; false when its bucket is empty.
     pub fn allow_at(&self, ip: IpAddr, now: Instant) -> bool {
-        let key = bucket_of(ip);
-        let mut m = match self.buckets.lock() {
+        let mut key = bucket_of(ip);
+        let mut b = match self.buckets.lock() {
             Ok(m) => m,
             Err(p) => p.into_inner(),
         };
-        if m.len() >= PRUNE_AT && !m.contains_key(&key) {
+        if b.map.len() >= PRUNE_AT && !b.map.contains_key(&key) && b.last_sweep.is_none_or(|t| now.saturating_duration_since(t) >= SWEEP_EVERY) {
             let full = Duration::from_secs_f64(self.burst / self.rate.max(1e-9));
-            m.retain(|_, (_, at)| now.saturating_duration_since(*at) < full);
+            b.map.retain(|k, (_, at)| *k == OVERFLOW || now.saturating_duration_since(*at) < full);
+            b.last_sweep = Some(now);
+            b.sweeps += 1;
         }
-        let (tokens, at) = m.entry(key).or_insert((self.burst, now));
+        if b.map.len() >= BUCKETS_MAX && !b.map.contains_key(&key) {
+            key = OVERFLOW;
+        }
+        let (tokens, at) = b.map.entry(key).or_insert((self.burst, now));
         let refill = now.saturating_duration_since(*at).as_secs_f64() * self.rate;
         *tokens = (*tokens + refill).min(self.burst);
         *at = now;
@@ -132,7 +155,65 @@ impl ClientLimiter {
     }
 
     pub fn clients(&self) -> usize {
-        self.buckets.lock().map(|m| m.len()).unwrap_or(0)
+        self.buckets.lock().map(|m| m.map.len()).unwrap_or(0)
+    }
+
+    /// How many sweeps ran (for tests).
+    pub fn sweeps(&self) -> u64 {
+        self.buckets.lock().map(|m| m.sweeps).unwrap_or(0)
+    }
+}
+
+/// Requests in flight per client (see the module doc): `enter` gives a guard while the client
+/// has fewer than `cap` running, `None` otherwise. Entries leave the map when their count is 0,
+/// so it holds at most one entry per running request.
+pub struct InFlight {
+    cap: usize,
+    m: Mutex<HashMap<IpAddr, usize>>,
+}
+
+impl InFlight {
+    pub fn new(cap: usize) -> Arc<Self> {
+        Arc::new(InFlight { cap, m: Mutex::new(HashMap::new()) })
+    }
+
+    pub fn enter(self: &Arc<Self>, ip: IpAddr) -> Option<InFlightGuard> {
+        let key = bucket_of(ip);
+        let mut m = match self.m.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        let n = m.entry(key).or_insert(0);
+        if *n >= self.cap {
+            return None;
+        }
+        *n += 1;
+        Some(InFlightGuard { f: self.clone(), key })
+    }
+
+    /// Requests of `ip` running now.
+    pub fn running(&self, ip: IpAddr) -> usize {
+        self.m.lock().map(|m| m.get(&bucket_of(ip)).copied().unwrap_or(0)).unwrap_or(0)
+    }
+}
+
+pub struct InFlightGuard {
+    f: Arc<InFlight>,
+    key: IpAddr,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let mut m = match self.f.m.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(n) = m.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.key);
+            }
+        }
     }
 }
 

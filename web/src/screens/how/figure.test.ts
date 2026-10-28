@@ -74,6 +74,13 @@ describe('the embedded draw cabinet', () => {
     expect(directive(figCsp, 'script-src').every((s) => s.startsWith("'sha256-"))).toBe(true);
     expect(directive(figCsp, 'connect-src')).toEqual([]);
     expect(fig['X-Frame-Options']).toBe('SAMEORIGIN');
+    // F6 security review: opened directly, the figure runs in an opaque origin (scripts only), never the site's.
+    expect(directive(figCsp, 'sandbox')).toEqual(['allow-scripts']);
+    // Both rules deny the powerful browser features (camera, microphone, location, ...), with one value.
+    for (const f of ['camera', 'microphone', 'geolocation', 'payment', 'usb']) {
+      expect(site['Permissions-Policy'] ?? '').toContain(`${f}=()`);
+    }
+    expect(fig['Permissions-Policy']).toBe(site['Permissions-Policy']);
     expect(directive(siteCsp, 'frame-ancestors')).toEqual(["'none'"]);
     expect(directive(siteCsp, 'frame-src')).toEqual(["'self'"]);
     expect(site['X-Frame-Options']).toBe('DENY');

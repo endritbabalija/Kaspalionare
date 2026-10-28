@@ -181,7 +181,7 @@ test('a part withdrawn and a second deposit; the page draws their round; both se
   await devPost('/mine?to=anchor', 5 * 60_000);
   await detail(page, closing);
   await expect(page.getByTestId('caller')).toHaveAttribute('data-due', 'due', { timeout: 120_000 });
-  await expect(page.getByTestId('caller-record-back')).toHaveText('With settlement', { timeout: 120_000 });
+  await expect(page.getByTestId('caller-record-back')).toHaveText('Settlement', { timeout: 120_000 });
   console.log(`draw() of round ${closing}: ${await pressCaller(page, 'draw')}`);
   // Both settled: the deposit into a second position, the withdrawal paid out.
   await vault(page);

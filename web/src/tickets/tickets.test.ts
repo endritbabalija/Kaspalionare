@@ -178,6 +178,25 @@ describe('S8 backup and import (spec 8 "Local copy")', () => {
     expect(await empty.rounds(w.round.covenantId)).toEqual([]);
   });
 
+  // F6 security review: the file files each ticket under its outpoint; a ticket this browser already follows under
+  // another key (its purchase's, after a claim) is matched by its entry's outpoint and keeps its own record.
+  // Control: into an empty store the same file keeps the ticket, under its outpoint.
+  it('an imported ticket is keyed by its outpoint and never kept twice', async () => {
+    const w = await world('claim k=4');
+    const text = await writeBackup(w.ctx, w.store);
+    const held = new WebStore(INFO, new MemoryKV());
+    await held.putTicket({ ...w.ticket, key: `${'ee'.repeat(32)}:0` });
+    await importBackup(w.ctx, held, text);
+    const kept = await held.tickets(w.round.covenantId);
+    expect(kept.map((t) => t.key)).toEqual([`${'ee'.repeat(32)}:0`]);
+    const empty = new WebStore(INFO, new MemoryKV());
+    await importBackup(w.ctx, empty, text);
+    const u = w.ticket.ticket.utxo;
+    expect((await empty.tickets(w.round.covenantId)).map((t) => t.key)).toEqual([
+      `${u.transactionId.toLowerCase()}:${u.index}`,
+    ]);
+  });
+
   it('a file whose ticket the chain contradicts is refused whole (backup_mismatch); nothing is kept', async () => {
     const w = await world('claim final');
     const text = await writeBackup(w.ctx, w.store);

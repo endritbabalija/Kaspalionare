@@ -490,13 +490,16 @@ async fn start_follower(
     start: Option<Hash>,
     want_lines: String,
 ) -> Result<(std::net::SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<Result<(), String>>), String> {
-    use indexer_api::follow::{FollowOpts, run_following};
+    use indexer_api::follow::{FollowOpts, Witness, run_following};
     let bind = free_port()?;
     let mut cfg = indexer_api::Config::new(fdir, cov);
     cfg.bind = bind;
     cfg.poll = Duration::from_millis(200);
     cfg.per_client = None;
-    let fo = FollowOpts { node: Some(node_url), start, every: Duration::from_millis(500) };
+    // F6 security review S4: a second connection to the same node as the witness (the private simnet has one
+    // node; `connect_witness` accepts it there only): every batch is confirmed at Low verbosity before it is
+    // persisted, so this run checks that a real node's Low answer agrees with its Full one.
+    let fo = FollowOpts { node: Some(node_url.clone()), start, every: Duration::from_millis(500), witness: Witness::Url(node_url) };
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let h = tokio::spawn(run_following(cfg, fo, async move {
         let _ = rx.await;
@@ -593,10 +596,10 @@ async fn follow_check(node_url: &str, dev_dir: &std::path::Path, cov: Hash, star
     }
     ok(&format!("{} endpoints byte for byte as the dev API; round 2's anchor proof built from the node ({} bytes)", FOLLOW_PATHS.len(), p.anchor_proof.len() / 2));
     let (hs, hb) = http_get(bind, "/health").await?;
-    if hs != 200 || !hb.contains("\"ok\":true") || !hb.contains("\"following\":true") {
+    if hs != 200 || !hb.contains("\"ok\":true") || !hb.contains("\"following\":true") || !hb.contains(&format!("\"witness\":\"{node_url}\"")) {
         return Err(format!("/health: {hs} {hb}"));
     }
-    ok("/health 200, following the node");
+    ok("/health 200, following the node, every batch confirmed by the witness (a second connection)");
     // 2.
     let many = concurrent_proofs(bind, 8).await?;
     if many.iter().any(|b| *b != proof) {

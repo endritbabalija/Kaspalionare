@@ -273,7 +273,7 @@ fn claim_view(x: &lottery::claim::ClaimExpected, pool: &PoolState) -> ClaimView 
         tier_name: tier_name(pool.tier).unwrap_or_default(),
         slice: pool.slice.to_string(),
         h: x.h.to_string(),
-        shared_with: (x.h - 1).max(0).to_string(),
+        shared_with: x.h.saturating_sub(1).max(0).to_string(),
         prize: x.prize.to_string(),
         mode: x.mode.into(),
         below_p_min: x.prize < P_MIN,

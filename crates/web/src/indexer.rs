@@ -615,7 +615,7 @@ pub(crate) fn classify(net: Net, cov: &kaspa_hashes::Hash, r: i64, objects: &[Ap
             State::Marker(x) => x.round == r,
             State::Pool(x) => x.round == r,
             State::Record(x) => x.round == r,
-            State::Controller(x) => x.round == r || x.round == r + 1,
+            State::Controller(x) => x.round == r || r.checked_add(1) == Some(x.round),
             State::Drawer(x) => x.round >= r,
             State::Params(_) | State::Vault(_) => true,
             State::Ticket(_) | State::Position(_) | State::Request(_) => false,
@@ -679,8 +679,8 @@ pub fn check_round(net: Net, i: &RoundCheckInput) -> Result<CheckedRound> {
     if a.status == RoundStatus::Void && (!pools.is_empty() || a.draw.as_ref().is_some_and(|d| !d.void || d.winning.is_some())) {
         return Err(chain_mismatch(format!("round {r}: a void with pools or winning numbers")));
     }
-    if marker.is_some() && controller.as_ref().is_some_and(|(_, c)| c.round != r + 1) {
-        return Err(chain_mismatch(format!("round {r} is closing but the controller served is not round {}'s", r + 1)));
+    if marker.is_some() && controller.as_ref().is_some_and(|(_, c)| r.checked_add(1) != Some(c.round)) {
+        return Err(chain_mismatch(format!("round {r} is closing but the controller served is not the next round's")));
     }
     // m and k against the chain objects.
     let chain_mk: Vec<(i64, i64)> = marker

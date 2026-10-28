@@ -2,6 +2,15 @@
 # GET only, small requests, access logs. Replace api.example.com with the API's domain (its DNS A record points
 # at this server; ports 80 and 443 open). Per-client limits and CORS are done by indexer-api itself
 # (stock Caddy has no rate limiter).
+#
+# F6 security review: request headers are capped at 16 KB (Caddy's default is Go's 1 MB); the API's requests are a
+# GET line and a few headers, so anything larger is refused before it reaches indexer-api.
+{
+	servers {
+		max_header_size 16KB
+	}
+}
+
 api.example.com {
 	encode zstd gzip
 	@write not method GET HEAD OPTIONS

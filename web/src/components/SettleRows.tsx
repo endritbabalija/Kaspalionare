@@ -52,7 +52,7 @@ export function SettleRows(p: SettleRowsProps) {
         </FigureRow>
       )}
       {(s.mode === 'pay' || s.mode === 'accrue') && (
-        <FigureRow name="Still pending" testId={`${id}-left-row`}>
+        <FigureRow name="Shares left" testId={`${id}-left-row`}>
           <Shares value={s.left} testId={`${id}-left`} />
         </FigureRow>
       )}

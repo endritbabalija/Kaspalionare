@@ -190,12 +190,12 @@ pub(crate) fn facts(r: i64, c: &Classified) -> Result<RoundFacts> {
     // The close's and the draw's transactions (S4): only from objects that transaction alone creates.
     if let Some((mo, _)) = &c.marker {
         f.close_tx = Some(tx_fact(mo));
-    } else if let Some((co, _)) = c.controller.as_ref().filter(|(_, ct)| ct.round == r + 1 && ct.drawn == 0) {
+    } else if let Some((co, _)) = c.controller.as_ref().filter(|(_, ct)| r.checked_add(1) == Some(ct.round) && ct.drawn == 0) {
         f.close_tx = Some(tx_fact(co));
     }
-    if let Some((dro, _)) = c.drawer.as_ref().filter(|(_, dr)| dr.round == r + 1) {
+    if let Some((dro, _)) = c.drawer.as_ref().filter(|(_, dr)| r.checked_add(1) == Some(dr.round)) {
         f.draw_tx = Some(tx_fact(dro));
-    } else if let Some((co, _)) = c.controller.as_ref().filter(|(_, ct)| ct.round == r + 1 && ct.drawn == 1) {
+    } else if let Some((co, _)) = c.controller.as_ref().filter(|(_, ct)| r.checked_add(1) == Some(ct.round) && ct.drawn == 1) {
         f.draw_tx = Some(tx_fact(co));
     }
     // Closing: the marker, round r + 1's controller and the drawer.
@@ -207,7 +207,7 @@ pub(crate) fn facts(r: i64, c: &Classified) -> Result<RoundFacts> {
         if let Some(cd) = c_draw(mk) {
             f.reward = Some(fact(cd, &[mo]));
         }
-        if let Some((co, ct)) = c.controller.as_ref().filter(|(_, ct)| ct.round == r + 1) {
+        if let Some((co, ct)) = c.controller.as_ref().filter(|(_, ct)| r.checked_add(1) == Some(ct.round)) {
             f.reserve = Some(fact(ct.reserve, &[co]));
             let mdaa = convert::dec_i64("marker.blockDaaScore", &mo.utxo.block_daa_score)?;
             let d = game::anchor_daa(mdaa, ct.seed_offset);
@@ -588,7 +588,7 @@ pub fn absorbable_pools(net: Net, i: &AbsorbInput) -> Result<Absorbable> {
     let dr = cases::drawer(&convert::obj("drawer", &i.drawer)?, &cov)?;
     verify::check_controller(&ct)?;
     verify::check_drawer(&dr)?;
-    if ct.round != mk.round + 1 || dr.round != mk.round {
+    if mk.round.checked_add(1) != Some(ct.round) || dr.round != mk.round {
         return Err(Error::new(Code::ChainMismatch, "the controller and drawer are not the marker's round's"));
     }
     let now = convert::dec_i64("virtualDaaScore", &i.virtual_daa_score)?;
@@ -764,7 +764,7 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
             verify::check_drawer(&dr)?;
             spent(m)?;
             spent(d)?;
-            if ct.round != mk.round + 1 || dr.round != mk.round {
+            if mk.round.checked_add(1) != Some(ct.round) || dr.round != mk.round {
                 return Err(bound("draw: the controller and drawer are not the marker's round's"));
             }
             let vt = i.vault.as_ref().ok_or_else(|| bound("draw: the vault is not given"))?;
@@ -843,7 +843,7 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
     let pools = if kind == CallerKind::Close { 0 } else { pools.unwrap_or(0) };
     // Cross-check with the summary the page shows (`unsigned_of` already rebuilt it from the tx).
     let back = dec("summary.walletBack", &i.built.summary.wallet_back)?;
-    if dec("summary.walletIn", &i.built.summary.wallet_in)? != wallet_in || back != caller.value + refund {
+    if dec("summary.walletIn", &i.built.summary.wallet_in)? != wallet_in || caller.value.checked_add(refund) != Some(back) {
         return Err(bound("the summary is not the funding and what comes back"));
     }
     let total = wallet_in as i128 - back as i128;
@@ -852,7 +852,7 @@ pub fn caller_figures(net: Net, i: &CallerFiguresInput) -> Result<CallerFigures>
         round: round.to_string(),
         reward: reward.to_string(),
         fee: u.fee.to_string(),
-        reserve: (n * r_res).to_string(),
+        reserve: n.checked_mul(r_res).ok_or_else(|| bound("reserves overflow"))?.to_string(),
         reserves: n as u32,
         reserve_back_with_draw: kind == CallerKind::Close,
         pools: pools as u32,

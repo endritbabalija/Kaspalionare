@@ -34,7 +34,8 @@ Sources: [fair use](https://vercel.com/docs/limits/fair-use-guidelines), [pricin
 ## The configuration (`web/.env.production`)
 
 Copy `web/.env.production.example` to `web/.env.production` and fill it in. Nothing in it is secret: every value
-ends up in the public page.
+ends up in the public page, so the file is committed with `vercel.json` (git ignores only Vite's `.env.*.local`
+overrides, so nothing local changes what is built).
 
 | Variable | Value | Where it comes from |
 |---|---|---|
@@ -99,8 +100,10 @@ Run every `npm` command in `web/`. Never run a cargo build and a Vite build at t
    - Verify in this browser shows matches.
 2. In the browser's developer tools (Network tab, the page document and `lottery.worker-*.js`):
    - `Content-Security-Policy` equals `vercel.json`'s site rule;
-   - `X-Frame-Options: DENY`.
-3. `/figures/draw-cabinet-tour.html` has the figure rule's CSP and `X-Frame-Options: SAMEORIGIN`, and How it
+   - `X-Frame-Options: DENY`;
+   - `Permissions-Policy` equals `vercel.json`'s (camera, microphone, geolocation and the like denied).
+3. `/figures/draw-cabinet-tour.html` has the figure rule's CSP (ending in `sandbox allow-scripts`: opened on its
+   own it runs in no site's origin), `X-Frame-Options: SAMEORIGIN` and the same `Permissions-Policy`, and How it
    works shows the figure.
 4. The console shows no CSP report while the page is used.
 5. The faucet link and one explorer link open.

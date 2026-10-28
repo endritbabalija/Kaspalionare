@@ -65,9 +65,9 @@ function ready(paid: boolean): Play['cost'] {
 afterEach(cleanup);
 
 describe('S1 buy card (spec 3, 7)', () => {
-  it('after the deadline: "Sales closed; waiting for close()" and a link to Rounds, no picker', () => {
+  it('after the deadline: the status "Sales closed" and a link to Rounds, no picker', () => {
     render(<BuyCard play={play({ sales: { kind: 'ready', data: { ...sales, open: false } } })} walletConnected />);
-    expect(screen.getByTestId('sales-closed-play').textContent).toBe('Sales closed; waiting for close()');
+    expect(screen.getByTestId('sales-closed-play').textContent).toBe('Sales closed');
     expect(screen.getByTestId('sales-closed-rounds').getAttribute('href')).toBe('#/rounds');
     expect(screen.queryByTestId('number-picker')).toBeNull();
   });

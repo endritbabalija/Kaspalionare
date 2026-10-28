@@ -298,7 +298,7 @@ fn records() -> (String, StoredTicket, StoredRound) {
     })
     .unwrap();
     let ticket = StoredTicket {
-        key: format!("{}:1", "ee".repeat(32)),
+        key: format!("{}:{}", i.ticket.utxo.transaction_id, i.ticket.utxo.index),
         covenant_id: cov.clone(),
         network: "testnet-10".into(),
         round: t.round.clone(),
@@ -332,7 +332,7 @@ fn records() -> (String, StoredTicket, StoredRound) {
 }
 
 fn write(cov: &str, t: &StoredTicket, r: &StoredRound) -> String {
-    backup::backup_write(N, &BackupWriteInput { covenant_id: cov.into(), created_ms: "7".into(), tickets: vec![t.clone()], rounds: vec![r.clone()], pending: vec![] }).unwrap().text
+    backup::backup_write(N, &BackupWriteInput { covenant_id: cov.into(), created_ms: "7".into(), tickets: vec![t.clone()], rounds: vec![r.clone()] }).unwrap().text
 }
 
 fn read(cov: &str, text: &str) -> lottery::web::Result<backup::BackupContents> {
@@ -350,6 +350,62 @@ fn doctor(cov: &str, text: &str, f: impl Fn(&mut serde_json::Value)) -> String {
     file.checksum = sum;
     let _ = cov;
     serde_json::to_string(&file).unwrap()
+}
+
+/// The file as JSON with one change and a checksum recomputed over the changed JSON (for fields the
+/// format-2 type does not have).
+fn doctor_v(text: &str, f: impl Fn(&mut serde_json::Value)) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+    f(&mut v);
+    v["checksum"] = "".into();
+    let sum = hex(&web::indexer::bundle_hash(serde_json::to_string(&v).unwrap().as_bytes()));
+    v["checksum"] = sum.into();
+    v.to_string()
+}
+
+/// F6 security review: format 2 has no pending records and files each ticket under its outpoint (a
+/// ticket kept under its purchase's key after a claim is written under its current entry); a format-1
+/// file still imports, its pending records left out and its tickets filed under their outpoints;
+/// a format-1 file with a broken checksum is refused (negative control).
+#[test]
+fn backup_format_2_and_format_1_files() {
+    let (cov, t, r) = records();
+    let purchase_keyed = StoredTicket { key: format!("{}:0", "ee".repeat(32)), ..t.clone() };
+    let w = backup::backup_write(N, &BackupWriteInput { covenant_id: cov.clone(), created_ms: "7".into(), tickets: vec![purchase_keyed.clone(), t.clone()], rounds: vec![r.clone()] }).unwrap();
+    assert_eq!(w.skipped, vec![t.key.clone()], "the second record of the same outpoint is left out by name");
+    let v: serde_json::Value = serde_json::from_str(&w.text).unwrap();
+    assert_eq!(v["format"], "kaspalionare-backup/2");
+    assert!(v.get("pending").is_none(), "no pending records in the file");
+    assert_eq!(v["tickets"][0]["key"], backup::outpoint_key(&t));
+    assert_eq!(read(&cov, &w.text).unwrap().tickets, vec![t.clone()]);
+
+    // A format-1 file as F4 wrote it: the purchase's key, a pending purchase, the format-1 checksum.
+    let pending: web::webstore::StoredPending = serde_json::from_value(serde_json::json!({
+        "key": "ab".repeat(32), "covenantId": cov, "network": "testnet-10", "round": t.round, "shardIndex": 0,
+        "ticket": {"index": 1, "state": t.ticket.state, "scriptPublicKey": t.ticket.utxo.script_public_key, "address": t.payout},
+        "bundle": t.bundle, "payout": t.payout,
+        "buy": {"transactionId": "ab".repeat(32), "price": "100000000", "deposit": "13000000", "depositBack": "1", "fee": "1",
+                "referral": {"amount": "5000000", "paid": false, "address": null}},
+        "signed": {"transaction": "{}", "id": "cd".repeat(32)}, "savedMs": "1",
+    })).unwrap();
+    let mut f1 = backup::BackupFileV1 {
+        format: "kaspalionare-backup/1".into(),
+        store: "webstore/2".into(),
+        network: "testnet-10".into(),
+        covenant_id: cov.clone(),
+        created_ms: "7".into(),
+        tickets: vec![purchase_keyed.clone()],
+        rounds: vec![r.clone()],
+        pending: vec![pending],
+        checksum: String::new(),
+    };
+    f1.checksum = hex(&web::indexer::bundle_hash(serde_json::to_string(&f1).unwrap().as_bytes()));
+    let v1_text = serde_json::to_string(&f1).unwrap();
+    let back = read(&cov, &v1_text).unwrap();
+    assert_eq!(back.tickets, vec![t.clone()], "filed under its outpoint");
+    assert_eq!(back.rounds, vec![r.clone()]);
+    let broken = v1_text.replacen("\"createdMs\":\"7\"", "\"createdMs\":\"8\"", 1);
+    assert_eq!(read(&cov, &broken).unwrap_err().code, Code::BackupInvalid, "a format-1 checksum is checked");
 }
 
 #[test]
@@ -403,6 +459,13 @@ fn backups_round_trip_and_damaged_or_doctored_files_are_refused() {
         ("a ticket's bundle changed", doctor(&cov, &text, |v| v["tickets"][0]["bundle"][0]["bonus"] = 9.into())),
         ("a ticket's payout changed", doctor(&cov, &text, |v| v["tickets"][0]["payout"] = common::addr(&lottery::state::Payout::Schnorr([0x44; 32])).into())),
         ("a round of another instance", doctor(&cov, &text, |v| v["rounds"][0]["covenantId"] = "ab".repeat(32).into())),
+        // F6 security review: a ticket's key is its outpoint, never a name the file picks.
+        ("a ticket filed under another outpoint", doctor(&cov, &text, |v| v["tickets"][0]["key"] = format!("{}:1", "ee".repeat(32)).into())),
+        ("a ticket twice", doctor(&cov, &text, |v| {
+            let t = v["tickets"][0].clone();
+            v["tickets"].as_array_mut().unwrap().push(t);
+        })),
+        ("a pending field (format 2 has none)", doctor_v(&text, |v| v["pending"] = serde_json::json!([]))),
     ];
     for (what, x) in damaged {
         let e = read(&cov, &x).expect_err(what);
@@ -414,7 +477,7 @@ fn backups_round_trip_and_damaged_or_doctored_files_are_refused() {
     // The writer leaves out (and names) a record it would not read back (F4 review note).
     let mut bad = r.clone();
     bad.purchases[0] = "zz".into();
-    let w = backup::backup_write(N, &BackupWriteInput { covenant_id: cov.clone(), created_ms: "1".into(), tickets: vec![], rounds: vec![bad.clone()], pending: vec![] }).unwrap();
+    let w = backup::backup_write(N, &BackupWriteInput { covenant_id: cov.clone(), created_ms: "1".into(), tickets: vec![], rounds: vec![bad.clone()] }).unwrap();
     assert_eq!(w.skipped, vec![bad.key]);
     assert!(read(&cov, &w.text).unwrap().rounds.is_empty());
 }

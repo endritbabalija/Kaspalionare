@@ -257,8 +257,13 @@ fn purchases_hex(p: &[[u8; 6]]) -> String {
 
 /// `GET /health` (F6 part C): 200 when the store's log applies and, in the one-process mode,
 /// the node was read within the staleness limit; else 503. For a supervisor or an uptime
-/// check; not part of the page's v1 contract.
-pub async fn health(State(st): State<AppState>) -> Response {
+/// check; not part of the page's v1 contract. F6 security review: a remote client gets only
+/// `{"ok":...}`; the detail (the store's and the node's errors can name paths and the node's URL)
+/// only on loopback without a forwarded client (a check on the server itself) and in-process.
+pub async fn health(State(st): State<AppState>, req: axum::extract::Request) -> Response {
+    let peer = req.extensions().get::<crate::limits::Peer>().copied();
+    let local = peer.is_none()
+        || (req.headers().get("x-forwarded-for").is_none() && crate::limits::client_of(peer, req.headers(), st.client_ip).is_some_and(|ip| ip.is_loopback()));
     let s = st.snapshot();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     let (follow_ok, follow_why, ago) = match &st.follow {
@@ -266,6 +271,10 @@ pub async fn health(State(st): State<AppState>) -> Response {
         None => (true, None, None),
     };
     let ok = s.error.is_none() && follow_ok;
+    if !local {
+        let b = serde_json::to_vec(&serde_json::json!({ "ok": ok })).unwrap_or_default();
+        return body(if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, b);
+    }
     let v = serde_json::json!({
         "ok": ok,
         "network": s.net.name(),
@@ -277,6 +286,8 @@ pub async fn health(State(st): State<AppState>) -> Response {
         "following": st.follow.is_some(),
         "nodeReadMsAgo": ago.map(|a| a.to_string()),
         "nodeError": follow_why,
+        "node": st.follow.as_ref().and_then(|f| f.nodes().0),
+        "witness": st.follow.as_ref().and_then(|f| f.nodes().1),
     });
     let b = serde_json::to_vec(&v).unwrap_or_default();
     body(if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, b)

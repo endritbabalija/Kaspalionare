@@ -26,18 +26,49 @@ costs, and how to set it up step by step. Nothing in it needs programming.
 **Built-in safety:**
 - Per-client limits: a burst of 120 requests, then 20 a second per address, IPv6 per /64. Over that, the page
   sees "busy" and retries.
-- At most 64 requests at once and 256 connections.
-- A 10 s deadline per request.
+- At most 16 requests of one address at once (F6 security review), so one visitor cannot hold the server's slots.
+- At most 64 requests at once and 256 connections. Requests for the anchor proof wait in their own pool of 32, so
+  a flood of them during a draw leaves everything else served.
+- A 10 s deadline per request; request headers at most 16 KB (Caddy).
 - CORS for the site's origin only.
 - GET only.
+- **Two nodes must agree** before anything is written to the store (`INDEXER_API_WITNESS`, see "Which nodes the
+  server reads" below).
+- `/health` tells the public only "ok" or "not ok". The reasons (which can name paths and the node's address) are
+  in the log, and in full only to a request from the server itself (`curl http://127.0.0.1:8790/health`).
 
 The files are in `crates/indexer-api/deploy/`:
 - `Dockerfile`: the reproducible Linux build. Rust 1.94.0, Debian 12, `Cargo.lock`, the pinned rusty-kaspa
-  v2.1.0.
+  v2.1.0. Its base images, and Caddy's in `compose.yaml`, are pinned by digest (the file says how to update one).
 - `compose.yaml`: the API plus Caddy, for option A.
 - `indexer-api.service`: the systemd unit, for option B.
 - `Caddyfile`
 - `indexer-api.env.example`: every setting, explained.
+
+## Which nodes the server reads (an owner choice)
+
+The server learns what happened on chain from a testnet-10 node. Players' browsers re-check every answer against
+a node of their own, so **a lying node cannot make anyone lose money or sign something wrong.** What a bad node
+could do is put false history into the server's copy (the store). The page then refuses the server's answers
+("does not match the chain"), so Play and Rounds stop working for everybody until the store is rebuilt by hand.
+
+What is built now (F6 security review):
+- **The node is fixed for a run.** With `INDEXER_API_NODE=resolver`, the first public node the resolver gives is
+  kept; reconnects go back to it, never to a new one.
+- **A second node must agree** (`INDEXER_API_WITNESS=resolver`, the default in `indexer-api.env.example`). Before
+  each batch is written, another public node is asked the same question. Only what both report the same is written.
+  If they report the same block with different contents, nothing is written and `/health` says "not ok" at once. If
+  the second node just has not seen the blocks yet, the server waits; after 2 minutes without progress `/health`
+  says "not ok". So one bad node can make the server stop and wait, but it can no longer write into the store.
+
+| Option | Who you trust | Money at risk | Work for you | Monthly cost |
+|---|---|---|---|---|
+| **A. Two public nodes must agree (built, recommended for the beta)** | the two node operators not to lie *together*; the public resolver to hand out two different nodes (on 2026-10-27 it handed out three) | none (browsers re-check everything) | none: it is the default setting | nothing extra; the server reads twice as much from public nodes |
+| **B. Your own testnet-10 node on the server** (`INDEXER_API_NODE=ws://127.0.0.1:<port>`, and a public node as the witness) | yourself; the witness still double-checks | none | install and keep a Kaspa node running and up to date; a restart takes time to catch up | a bigger server: a node keeps a lot of chain data in memory and on disk. We have not measured a testnet-10 node; our private test node grew to about 6.6 GB of memory after 864,000 blocks (about one day of testnet-10). Plan for a 16 GB server with a large SSD, several times the €6 plan; we would measure it before you pay |
+| **C. One public node, unchecked** (`INDEXER_API_WITNESS=off`) | that one node operator | none | none | nothing extra, but a bad node can block the page until the store is rebuilt (an hour of work: re-index from the start block) |
+
+If the two public nodes keep disagreeing or one is down for long, the page shows the API as unavailable; players
+with a local copy can still claim. The fix is to wait, or to set another witness URL, or option B.
 
 ## Choose a host (prices checked 2026-10-27, before VAT)
 
@@ -92,7 +123,8 @@ You need:
    - `INDEXER_API_COV` = the covenant ID;
    - `INDEXER_API_ALLOW_ORIGIN` = the site's address, for example `https://kaspalionare.vercel.app`, plus your
      own domain if the site has one, comma-separated;
-   - leave `INDEXER_API_NODE=resolver`, or put a node's `wss://` URL.
+   - leave `INDEXER_API_NODE=resolver` and `INDEXER_API_WITNESS=resolver`, or put nodes' `wss://` URLs (see "Which
+     nodes the server reads").
 4. In `Caddyfile`, replace `api.example.com` with the API's domain.
 5. Move the store into place: `mkdir -p data && cp -r /root/store/. data/ && chown -R 10001 data`.
 6. Start: `docker compose up -d --build`. The first build takes about 20–40 minutes.
@@ -124,14 +156,16 @@ You need:
 
 ## Check it works
 
-1. `https://api.yourdomain.com/health` shows `"ok":true` and `"following":true`.
+1. `https://api.yourdomain.com/health` shows `{"ok":true}`. On the server itself,
+   `curl http://127.0.0.1:8790/health` shows the detail: `"following":true`, the node it follows and the witness.
 2. `https://api.yourdomain.com/v1/status`: its `lastChainDaaScore` grows every few seconds, and
    `covenantId` is the instance's.
 3. `https://api.yourdomain.com/v1/instance`: its blake2b-256 is the page's `VITE_BUNDLE_HASH`.
    `tn10 beta genesis` printed it.
 4. In the page, Rounds lists round 1, and Verify in this browser shows matches.
 5. Set a free uptime monitor (for example UptimeRobot) on `/health`. It answers 503 when:
-   - the node has not been read for 2 minutes;
+   - the node has not been read for 2 minutes, or the witness has confirmed nothing new for 2 minutes;
+   - the two nodes report one block differently (at once);
    - the follower hit an error a retry cannot fix (a pruned resume block);
    - the store does not apply.
 
@@ -139,8 +173,9 @@ You need:
 
 - **Restarts are safe.** Every batch is written to the store before the next node call. A stop, a crash or a reboot
   resumes from the log.
-- **Node trouble** does not stop the API. It retries (5 s doubling to 2 min), changes connection after two failures
-  in a row, and `/health` shows the error.
+- **Node trouble** does not stop the API. It retries (5 s doubling to 2 min), reconnects to the same node after two
+  failures in a row, and `/health` turns 503; the reason is in the log (`docker compose logs` or `journalctl`).
+  A restart may pick other public nodes.
 - **Seen on 2026-10-27:** the M8 store's resume block (DAA 605,601,500, two days old) was no longer on the
   public node. The follower reported it, kept serving the store, and stopped cleanly on SIGTERM.
 - **Do not leave it off for days.** If the server is off longer than the node keeps old blocks, it cannot resume:

@@ -360,7 +360,7 @@ fn part_range(v: &VaultState, shares: i64) -> Option<PartRange> {
 
 fn settle_case(cov: &kaspa_hashes::Hash, ro: &Obj, rq: &RequestState, co: &Obj, rc: &RecordState) -> Result<SettleCase> {
     let t = verify::templates()?;
-    let accounted = rc.out_rem as i128 + rc.refund as i128 * rc.dep_rem as i128;
+    let accounted = (rc.refund as i128).checked_mul(rc.dep_rem as i128).and_then(|x| x.checked_add(rc.out_rem as i128)).ok_or_else(|| Error::new(Code::Overflow, "record: refund x deposits"))?;
     let rr = reserve(co.entry.amount, accounted, "record")?;
     let mut c = SettleCase::new_with(&t, rc.clone(), rq.clone());
     c.request_value = ro.entry.amount;
